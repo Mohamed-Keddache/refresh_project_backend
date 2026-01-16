@@ -1,25 +1,21 @@
 {
-  "type": "module",
   "name": "refresh_project",
   "version": "1.0.0",
+  "type": "module",
   "scripts": {
     "start": "node server.js"
   },
   "engines": {
-    "node": "18"
+    "node": ">=18"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
   "dependencies": {
-    "bcryptjs": "^3.0.3",
-    "cors": "^2.8.5",
-    "dotenv": "^17.2.3",
-    "express": "^5.2.1",
-    "jsonwebtoken": "^9.0.3",
-    "mongoose": "^9.1.2",
-    "morgan": "^1.10.1",
-    "multer": "^2.0.2"
+    "bcryptjs": "2.4.3",
+    "cors": "2.8.5",
+    "dotenv": "16.4.5",
+    "express": "4.21.2",
+    "jsonwebtoken": "9.0.2",
+    "mongoose": "8.9.5",
+    "morgan": "1.10.1",
+    "multer": "1.4.5-lts.1"
   }
 }

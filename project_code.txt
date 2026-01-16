@@ -1,0 +1,6282 @@
+
+
+=== package.json ===
+{
+  "type": "module",
+  "name": "refresh_project",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "mongoose": "^9.1.2",
+    "morgan": "^1.10.1",
+    "multer": "^2.0.2"
+  }
+}
+
+
+=== server.js ===
+import express from "express";
+import dotenv from "dotenv";
+import cors from "cors";
+import morgan from "morgan";
+import connectDB from "./config/db.js";
+import setupFolders from "./startup/setupFolders.js";
+import { seedAdmin } from "./startup/seedAdmin.js";
+
+import authRoutes from "./routes/authRoutes.js";
+import candidateRoutes from "./routes/candidateRoutes.js";
+import recruiterRoutes from "./routes/recruiterRoutes.js";
+import adminRoutes from "./routes/adminRoutes.js";
+import offerRoutes from "./routes/offerRoutes.js";
+import notificationRoutes from "./routes/notificationRoutes.js";
+import skillRoutes from "./routes/skillRoutes.js";
+import supportRoutes from "./routes/supportRoutes.js";
+import announcementRoutes from "./routes/announcementRoutes.js";
+
+dotenv.config();
+const app = express();
+
+app.use(
+  cors({
+    origin: "*",
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "ngrok-skip-browser-warning",
+    ],
+  })
+);
+app.use(express.json());
+app.use(morgan("dev"));
+app.use("/uploads", express.static("uploads"));
+
+async function startServer() {
+  try {
+    await connectDB();
+    setupFolders();
+    await seedAdmin();
+
+    app.use("/api/skills", skillRoutes);
+    app.use("/api/offers", offerRoutes);
+
+    app.use("/api/auth", authRoutes);
+    app.use("/api/candidates", candidateRoutes);
+    app.use("/api/recruiters", recruiterRoutes);
+    app.use("/api/admin", adminRoutes);
+    app.use("/api/notifications", notificationRoutes);
+    app.use("/api/support", supportRoutes);
+    app.use("/api/announcements", announcementRoutes);
+
+    app.get("/", (req, res) => res.send("✅ API Recrutement opérationnelle !"));
+
+    const PORT = process.env.PORT || 5000;
+    app.listen(PORT, () => console.log(`🚀 Serveur lancé sur le port ${PORT}`));
+  } catch (error) {
+    console.error("❌ Erreur lors du démarrage du serveur :", error);
+    process.exit(1);
+  }
+}
+
+startServer();
+
+
+=== config\db.js ===
+import mongoose from "mongoose";
+
+const connectDB = async () => {
+  try {
+    await mongoose.connect(process.env.MONGO_URI);
+    console.log("🟢 Connecté à MongoDB");
+  } catch (err) {
+    console.error("❌ Erreur MongoDB :", err.message);
+    process.exit(1);
+  }
+};
+
+export default connectDB;
+
+
+=== config\email.js ===
+import nodemailer from "nodemailer";
+
+export const transporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
+});
+
+
+=== config\multer.js ===
+import multer from "multer";
+import path from "path";
+
+const storageCV = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, "uploads/cv");
+  },
+  filename: function (req, file, cb) {
+    const unique = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    cb(null, unique + path.extname(file.originalname));
+  },
+});
+
+const fileFilterCV = (req, file, cb) => {
+  const allowed = [".pdf", ".doc", ".docx"];
+  const ext = path.extname(file.originalname).toLowerCase();
+
+  if (!allowed.includes(ext)) {
+    return cb(new Error("Seulement PDF, DOC ou DOCX"));
+  }
+  cb(null, true);
+};
+
+export const uploadCV = multer({
+  storage: storageCV,
+  fileFilter: fileFilterCV,
+  limits: { fileSize: 5 * 1024 * 1024 },
+});
+
+const storageImage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, "uploads/images");
+  },
+  filename: function (req, file, cb) {
+    const unique = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    cb(null, unique + path.extname(file.originalname));
+  },
+});
+
+const fileFilterImage = (req, file, cb) => {
+  const allowed = [".jpg", ".jpeg", ".png", ".webp"];
+  const ext = path.extname(file.originalname).toLowerCase();
+
+  if (!allowed.includes(ext)) {
+    return cb(new Error("Seulement JPG, JPEG, PNG ou WEBP"));
+  }
+  cb(null, true);
+};
+
+export const uploadImage = multer({
+  storage: storageImage,
+  fileFilter: fileFilterImage,
+  limits: { fileSize: 5 * 1024 * 1024 },
+});
+
+const storageAttachments = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, "uploads/attachments");
+  },
+  filename: function (req, file, cb) {
+    const unique = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    cb(null, unique + path.extname(file.originalname));
+  },
+});
+
+const fileFilterAttachments = (req, file, cb) => {
+  const allowed = [".pdf", ".doc", ".docx", ".jpg", ".jpeg", ".png", ".webp"];
+
+  const ext = path.extname(file.originalname).toLowerCase();
+
+  if (!allowed.includes(ext)) {
+    return cb(new Error("Type de fichier non autorisé"));
+  }
+  cb(null, true);
+};
+
+export const uploadAttachments = multer({
+  storage: storageAttachments,
+  fileFilter: fileFilterAttachments,
+  limits: { fileSize: 10 * 1024 * 1024 },
+});
+
+
+=== controllers\adminController.js ===
+import User from "../models/User.js";
+import Recruiter from "../models/Recruiter.js";
+import Candidate from "../models/Candidate.js";
+import Offer from "../models/Offer.js";
+import Admin from "../models/Admin.js";
+import Notification from "../models/Notification.js";
+import Application from "../models/Application.js";
+import Company from "../models/Company.js";
+import bcrypt from "bcryptjs";
+import SupportTicket from "../models/SupportTicket.js";
+import AdminLog, { logAdminAction } from "../models/AdminLog.js";
+
+export const getRecruiters = async (req, res) => {
+  try {
+    const { status, page = 1, limit = 20, search } = req.query;
+
+    let query = {};
+
+    if (status === "pending") {
+      query.status = { $in: ["pending_validation", "pending_revalidation"] };
+    } else if (status === "requests_sent") {
+      query.status = {
+        $in: [
+          "pending_info",
+          "pending_documents",
+          "pending_info_and_documents",
+        ],
+      };
+    } else if (status === "decision_made") {
+      query.status = { $in: ["validated", "rejected"] };
+    } else if (status) {
+      query.status = status;
+    }
+
+    if (search) {
+      const users = await User.find({
+        $or: [
+          { nom: { $regex: search, $options: "i" } },
+          { email: { $regex: search, $options: "i" } },
+        ],
+      }).select("_id");
+
+      const userIds = users.map((u) => u._id);
+
+      const companies = await Company.find({
+        name: { $regex: search, $options: "i" },
+      }).select("_id");
+      const companyIds = companies.map((c) => c._id);
+
+      query.$or = [
+        { userId: { $in: userIds } },
+        { companyId: { $in: companyIds } },
+      ];
+    }
+
+    const skip = (page - 1) * limit;
+
+    const recruiters = await Recruiter.find(query)
+      .populate({
+        path: "userId",
+        select: "nom email createdAt",
+      })
+      .populate("companyId", "name status logo")
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit));
+
+    const total = await Recruiter.countDocuments(query);
+
+    const enriched = recruiters
+      .filter((r) => r.userId !== null)
+      .map((r) => ({
+        _id: r._id,
+        userId: r.userId._id,
+        nom: r.userId.nom,
+        email: r.userId.email,
+        createdAt: r.userId.createdAt,
+
+        entrepriseId: r.companyId?._id,
+        entreprise: r.companyId?.name || "Inconnue",
+        entrepriseStatus: r.companyId?.status,
+        entrepriseLogo: r.companyId?.logo,
+        entrepriseDetails: r.companyId,
+
+        position: r.position,
+        telephone: r.telephone || "Non renseigné",
+        recruiterStatus: r.status,
+        isAdmin: r.isAdmin,
+        rejectionReason: r.rejectionReason,
+
+        validationRequests: r.validationRequests,
+
+        lastRequestDate:
+          r.validationRequests.length > 0
+            ? r.validationRequests[r.validationRequests.length - 1].createdAt
+            : null,
+      }));
+
+    res.json({
+      data: enriched,
+      meta: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / limit),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const cancelValidationRequest = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const recruiter = await Recruiter.findById(id);
+    if (!recruiter) {
+      return res.status(404).json({ msg: "Recruteur introuvable" });
+    }
+
+    recruiter.status = "pending_validation";
+
+    recruiter.validationRequests = recruiter.validationRequests.filter(
+      (req) => req.status !== "pending"
+    );
+
+    await recruiter.save();
+
+    await logAdminAction(
+      req.user.id,
+      "recruiter_request_canceled",
+      { type: "recruiter", id: recruiter._id },
+      {},
+      req
+    );
+
+    res.json({ msg: "Demande annulée, recruteur replacé en attente ✅" });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getCompanyDetailsAdmin = async (req, res) => {
+  try {
+    const { companyId } = req.params;
+    const company = await Company.findById(companyId);
+
+    if (!company)
+      return res.status(404).json({ msg: "Entreprise introuvable" });
+
+    const recruiterCount = await Recruiter.countDocuments({ companyId });
+    const offerCount = await Offer.countDocuments({ companyId });
+
+    res.json({
+      ...company.toObject(),
+      stats: {
+        recruiters: recruiterCount,
+        offers: offerCount,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const validateRecruiter = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    let recruiter = await Recruiter.findById(id).populate("companyId");
+    if (!recruiter) {
+      recruiter = await Recruiter.findOne({ userId: id }).populate("companyId");
+    }
+
+    if (!recruiter) {
+      return res.status(404).json({ msg: "Recruteur introuvable" });
+    }
+
+    const user = await User.findById(recruiter.userId);
+    if (!user) {
+      return res.status(404).json({ msg: "Utilisateur introuvable" });
+    }
+
+    recruiter.status = "validated";
+
+    const existingAdmins = await Recruiter.countDocuments({
+      companyId: recruiter.companyId._id,
+      status: "validated",
+      isAdmin: true,
+    });
+
+    if (existingAdmins === 0 && recruiter.companyId.status === "active") {
+      recruiter.isAdmin = true;
+      recruiter.permissions.editCompany = true;
+      recruiter.permissions.manageTeam = true;
+
+      await Notification.create({
+        userId: user._id,
+        message: `Félicitations ! Vous êtes le premier recruteur validé de "${recruiter.companyId.name}" et devenez automatiquement administrateur de l'entreprise.`,
+        type: "validation",
+      });
+    }
+
+    await recruiter.save();
+
+    await Notification.create({
+      userId: user._id,
+      message:
+        "Félicitations ! Votre compte recruteur a été validé. Vous pouvez maintenant publier des offres.",
+      type: "validation",
+    });
+
+    await logAdminAction(
+      req.user.id,
+      "recruiter_validated",
+      { type: "recruiter", id: recruiter._id },
+      { isFirstAdmin: recruiter.isAdmin },
+      req
+    );
+
+    res.json({
+      msg: "Recruteur validé avec succès ✅",
+      isCompanyAdmin: recruiter.isAdmin,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const rejectRecruiter = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { message } = req.body;
+
+    let recruiter = await Recruiter.findById(id);
+    if (!recruiter) {
+      recruiter = await Recruiter.findOne({ userId: id });
+    }
+
+    if (!recruiter) {
+      return res.status(404).json({ msg: "Recruteur introuvable" });
+    }
+
+    recruiter.status = "rejected";
+    recruiter.rejectionReason = message || "Non spécifiée";
+    await recruiter.save();
+
+    await Notification.create({
+      userId: recruiter.userId,
+      message: `Votre compte recruteur a été rejeté. Raison : ${
+        message || "Non spécifiée"
+      }`,
+      type: "alerte",
+    });
+
+    await logAdminAction(
+      req.user.id,
+      "recruiter_rejected",
+      { type: "recruiter", id: recruiter._id },
+      { reason: message },
+      req
+    );
+
+    res.json({ msg: "Recruteur rejeté ❌" });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getAllAdmins = async (req, res) => {
+  try {
+    const admins = await Admin.find()
+      .populate("userId", "nom email createdAt")
+      .populate("createdBy", "nom")
+      .sort({ createdAt: -1 });
+
+    res.json(admins);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+export const suspendAdmin = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason, until } = req.body;
+
+    if (id === req.user.id) {
+      return res
+        .status(400)
+        .json({ msg: "Vous ne pouvez pas vous suspendre vous-même." });
+    }
+
+    const targetAdmin = await Admin.findOne({ userId: id });
+    if (!targetAdmin) {
+      return res.status(404).json({ msg: "Admin introuvable" });
+    }
+
+    if (targetAdmin.label === "super_admin") {
+      return res
+        .status(403)
+        .json({ msg: "Impossible de suspendre un super admin" });
+    }
+
+    targetAdmin.status = "suspended";
+    targetAdmin.suspensionReason = reason;
+    targetAdmin.suspendedUntil = until ? new Date(until) : null;
+    await targetAdmin.save();
+
+    await logAdminAction(
+      req.user.id,
+      "admin_suspended",
+      { type: "admin", id: targetAdmin._id },
+      { reason, until },
+      req
+    );
+
+    res.json({ msg: "Administrateur suspendu ⛔" });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getPendingCompanies = async (req, res) => {
+  try {
+    const companies = await Company.find({ status: "pending" }).sort({
+      createdAt: -1,
+    });
+    res.json(companies);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const validateCompany = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const company = await Company.findByIdAndUpdate(
+      id,
+      { status: "active" },
+      { new: true }
+    );
+
+    if (!company)
+      return res.status(404).json({ msg: "Entreprise introuvable" });
+
+    res.json({ msg: "Entreprise validée avec succès ✅", company });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const rejectCompany = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const company = await Company.findByIdAndUpdate(
+      id,
+      { status: "rejected" },
+      { new: true }
+    );
+
+    if (!company)
+      return res.status(404).json({ msg: "Entreprise introuvable" });
+
+    res.json({ msg: "Entreprise rejetée ❌", company });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const createAdmin = async (req, res) => {
+  try {
+    const { nom, email, motDePasse, forceVerify } = req.body;
+
+    const exist = await User.findOne({ email });
+    if (exist) return res.status(400).json({ msg: "Email déjà utilisé" });
+
+    const hash = await bcrypt.hash(motDePasse, 10);
+
+    const emailVerified = forceVerify !== undefined ? forceVerify : true;
+
+    const user = await User.create({
+      nom,
+      email,
+      motDePasse: hash,
+      role: "admin",
+      statutValidation: "validé",
+      emailVerified: emailVerified,
+    });
+
+    await Admin.create({ userId: user._id });
+
+    res.status(201).json({ msg: "Nouvel administrateur créé ✅", admin: user });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const deleteAdmin = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (id === req.user.id)
+      return res
+        .status(400)
+        .json({ msg: "Vous ne pouvez pas vous supprimer vous-même." });
+
+    const adminUser = await User.findById(id);
+    if (!adminUser || adminUser.role !== "admin")
+      return res.status(404).json({ msg: "Admin introuvable" });
+
+    await User.findByIdAndDelete(id);
+    await Admin.findOneAndDelete({ userId: id });
+
+    res.json({ msg: "Administrateur supprimé 🗑️" });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const banUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { raison } = req.body;
+
+    const user = await User.findById(id);
+    if (!user) return res.status(404).json({ msg: "Utilisateur introuvable" });
+    if (user.role === "admin")
+      return res.status(403).json({ msg: "Impossible de bannir un admin." });
+
+    user.accountStatus = "banned";
+    user.suspensionReason = raison || "Non respect des conditions.";
+    await user.save();
+
+    await Notification.create({
+      userId: user._id,
+      message: `Votre compte a été désactivé. Raison : ${
+        raison || "Non respect des conditions."
+      }`,
+      type: "alerte",
+    });
+
+    await logAdminAction(
+      req.user.id,
+      "user_banned",
+      { type: "user", id: user._id },
+      { reason: raison },
+      req
+    );
+
+    res.json({ msg: `Utilisateur ${user.nom} a été banni ⛔` });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const unBanUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const user = await User.findById(id);
+    if (!user) return res.status(404).json({ msg: "Utilisateur introuvable" });
+
+    if (user.role === "admin") {
+      return res.status(400).json({ msg: "Action inutile sur un admin." });
+    }
+
+    if (user.accountStatus === "active") {
+      return res.status(400).json({ msg: "Cet utilisateur n'est pas banni." });
+    }
+
+    user.accountStatus = "active";
+    user.suspensionReason = undefined;
+    user.suspendedUntil = undefined;
+    await user.save();
+
+    await Notification.create({
+      userId: user._id,
+      message:
+        "Bonne nouvelle ! Votre compte a été réactivé par l'administration. Vous pouvez à nouveau vous connecter.",
+      type: "info",
+    });
+
+    await logAdminAction(
+      req.user.id,
+      "user_unbanned",
+      { type: "user", id: user._id },
+      {},
+      req
+    );
+
+    res.json({ msg: `L'utilisateur ${user.nom} a été débanni et réactivé ✅` });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getAllUsers = async (req, res) => {
+  try {
+    const {
+      role,
+      status,
+      search,
+      wilaya,
+      proposable,
+      emailVerified,
+      page = 1,
+      limit = 20,
+    } = req.query;
+
+    let query = {};
+    if (role) query.role = role;
+    if (status) query.accountStatus = status;
+    if (emailVerified) query.emailVerified = emailVerified === "true";
+
+    if (search) {
+      query.$or = [
+        { nom: { $regex: search, $options: "i" } },
+        { email: { $regex: search, $options: "i" } },
+      ];
+    }
+
+    const skip = (page - 1) * limit;
+
+    const [users, total] = await Promise.all([
+      User.find(query)
+        .select("-motDePasse")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      User.countDocuments(query),
+    ]);
+
+    const userIds = users.map((u) => u._id);
+
+    const [candidates, recruiters] = await Promise.all([
+      Candidate.find({ userId: { $in: userIds } })
+        .select(
+          "userId telephone residence autoriserProposition desiredPosition"
+        )
+        .lean(),
+      Recruiter.find({ userId: { $in: userIds } })
+        .populate("companyId", "name")
+        .select("userId status companyId")
+        .lean(),
+    ]);
+
+    const candidateMap = new Map(
+      candidates.map((c) => [c.userId.toString(), c])
+    );
+    const recruiterMap = new Map(
+      recruiters.map((r) => [r.userId.toString(), r])
+    );
+
+    const recruiterIds = recruiters.map((r) => r._id);
+    const offerCounts = await Offer.aggregate([
+      { $match: { recruteurId: { $in: recruiterIds } } },
+      { $group: { _id: "$recruteurId", count: { $sum: 1 } } },
+    ]);
+
+    const offerCountMap = new Map(
+      offerCounts.map((o) => [o._id.toString(), o.count])
+    );
+
+    let enriched = users.map((u) => {
+      const userId = u._id.toString();
+      let details = {};
+
+      if (u.role === "candidat") {
+        const cand = candidateMap.get(userId);
+        if (cand) {
+          details = {
+            telephone: cand.telephone,
+            wilaya: cand.residence?.wilaya || null,
+            autoriserProposition: cand.autoriserProposition,
+            poste: cand.desiredPosition,
+          };
+        }
+      }
+
+      if (u.role === "recruteur") {
+        const rec = recruiterMap.get(userId);
+        if (rec) {
+          details = {
+            entreprise: rec.companyId?.name || "Inconnue",
+            recruiterStatus: rec.status,
+            offres: offerCountMap.get(rec._id.toString()) || 0,
+          };
+        }
+      }
+
+      return {
+        ...u,
+        accountStatus: u.accountStatus,
+        details,
+      };
+    });
+
+    if (wilaya) {
+      enriched = enriched.filter(
+        (u) =>
+          u.details?.wilaya &&
+          u.details.wilaya.toLowerCase() === wilaya.toLowerCase()
+      );
+    }
+
+    if (proposable === "true") {
+      enriched = enriched.filter(
+        (u) => u.details?.autoriserProposition === true
+      );
+    }
+
+    res.json({
+      data: enriched,
+      meta: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / limit),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const sendMessageToUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { message } = req.body;
+
+    await Notification.create({
+      userId: id,
+      message: `Message de l'administration : ${message}`,
+      type: "info",
+    });
+
+    res.json({ msg: "Notification envoyée ✅" });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const deleteOfferAdmin = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { motif } = req.body;
+
+    const offer = await Offer.findById(id).populate("recruteurId");
+    if (!offer) return res.status(404).json({ msg: "Offre introuvable" });
+
+    if (offer.recruteurId && offer.recruteurId.userId) {
+      await Notification.create({
+        userId: offer.recruteurId.userId,
+        message: `Votre offre "${offer.titre}" a été supprimée. Motif : ${
+          motif || "Non conforme"
+        }`,
+        type: "alerte",
+      });
+    }
+
+    await Offer.findByIdAndDelete(id);
+    await Recruiter.updateOne(
+      { _id: offer.recruteurId._id },
+      { $pull: { offres: id } }
+    );
+
+    res.json({ msg: "Offre supprimée et recruteur notifié 🗑️" });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getGlobalStats = async (req, res) => {
+  try {
+    const now = new Date();
+    const fifteenMinutesAgo = new Date(now - 15 * 60 * 1000);
+    const thirtyDaysAgo = new Date(now - 30 * 24 * 60 * 60 * 1000);
+
+    const [
+      onlineUsers,
+      totalUsers,
+      newUsersThisMonth,
+      usersByRole,
+      totalOffres,
+      offresActives,
+      pendingOffers,
+      newOffersThisMonth,
+      applicationStats,
+      pendingRecruiters,
+      pendingCompanies,
+      openTickets,
+      recentAdminActions,
+    ] = await Promise.all([
+      User.countDocuments({ derniereConnexion: { $gt: fifteenMinutesAgo } }),
+      User.countDocuments(),
+      User.countDocuments({ createdAt: { $gte: thirtyDaysAgo } }),
+      User.aggregate([{ $group: { _id: "$role", count: { $sum: 1 } } }]),
+      Offer.countDocuments(),
+      Offer.countDocuments({ actif: true, validationStatus: "approved" }),
+      Offer.countDocuments({ validationStatus: "pending" }),
+      Offer.countDocuments({ createdAt: { $gte: thirtyDaysAgo } }),
+      Application.aggregate([
+        { $group: { _id: "$status", count: { $sum: 1 } } },
+      ]),
+
+      Recruiter.countDocuments({
+        status: { $in: ["pending_validation", "pending_revalidation"] },
+      }),
+      Company.countDocuments({ status: "pending" }),
+      SupportTicket.countDocuments({
+        status: { $in: ["open", "in_progress"] },
+      }),
+      AdminLog.find()
+        .populate("adminId", "nom")
+        .sort({ createdAt: -1 })
+        .limit(10),
+    ]);
+
+    const roleMap = {};
+    usersByRole.forEach((r) => {
+      roleMap[r._id] = r.count;
+    });
+
+    const statsCandidatures = {};
+    applicationStats.forEach((s) => {
+      statsCandidatures[s._id] = s.count;
+    });
+
+    const pendingTasks = {
+      recruiters: pendingRecruiters,
+      companies: 0,
+      offers: pendingOffers,
+      tickets: openTickets,
+      total: pendingRecruiters + pendingOffers + openTickets,
+    };
+
+    res.json({
+      users: {
+        online: onlineUsers,
+        total: totalUsers,
+        newThisMonth: newUsersThisMonth,
+        byRole: roleMap,
+      },
+      offres: {
+        total: totalOffres,
+        actives: offresActives,
+        pending: pendingOffers,
+        newThisMonth: newOffersThisMonth,
+      },
+      candidatures: statsCandidatures,
+      pendingTasks,
+      recentAdminActions,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getTrends = async (req, res) => {
+  try {
+    const { period = "30" } = req.query;
+    const days = parseInt(period);
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - days);
+
+    const [rawUsers, rawOffers, rawApplications] = await Promise.all([
+      User.aggregate([
+        { $match: { createdAt: { $gte: startDate } } },
+        {
+          $group: {
+            _id: {
+              date: {
+                $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
+              },
+            },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+
+      Offer.aggregate([
+        { $match: { createdAt: { $gte: startDate } } },
+        {
+          $group: {
+            _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+
+      Application.aggregate([
+        { $match: { datePostulation: { $gte: startDate } } },
+        {
+          $group: {
+            _id: {
+              $dateToString: { format: "%Y-%m-%d", date: "$datePostulation" },
+            },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+    ]);
+
+    const statsMap = new Map();
+    for (let i = 0; i < days; i++) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      const dateStr = d.toISOString().split("T")[0];
+
+      statsMap.set(dateStr, {
+        date: dateStr,
+        users: 0,
+        offers: 0,
+        applications: 0,
+      });
+    }
+
+    rawUsers.forEach((u) => {
+      const date = u._id.date;
+      if (statsMap.has(date)) {
+        statsMap.get(date).users += u.count;
+      }
+    });
+
+    rawOffers.forEach((o) => {
+      const date = o._id;
+      if (statsMap.has(date)) {
+        statsMap.get(date).offers += o.count;
+      }
+    });
+
+    rawApplications.forEach((a) => {
+      const date = a._id;
+      if (statsMap.has(date)) {
+        statsMap.get(date).applications += a.count;
+      }
+    });
+
+    const chartData = Array.from(statsMap.values()).sort(
+      (a, b) => new Date(a.date) - new Date(b.date)
+    );
+
+    res.json({
+      data: chartData,
+      period: days,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getManualSelectionOffers = async (req, res) => {
+  try {
+    const {
+      minProposals,
+      maxProposals,
+      startDate,
+      endDate,
+      sortBy = "datePublication",
+    } = req.query;
+
+    const pipeline = [
+      {
+        $match: {
+          actif: true,
+          candidateSearchMode: "manual",
+          validationStatus: "approved",
+        },
+      },
+    ];
+
+    if (startDate || endDate) {
+      const dateFilter = {};
+      if (startDate) dateFilter.$gte = new Date(startDate);
+      if (endDate) dateFilter.$lte = new Date(endDate);
+      pipeline[0].$match.datePublication = dateFilter;
+    }
+
+    pipeline.push({
+      $lookup: {
+        from: "applications",
+        let: { offerId: "$_id" },
+        pipeline: [
+          {
+            $match: {
+              $expr: {
+                $and: [
+                  { $eq: ["$offerId", "$$offerId"] },
+                  { $eq: ["$recommandeParAdmin", true] },
+                ],
+              },
+            },
+          },
+          { $count: "count" },
+        ],
+        as: "adminProposals",
+      },
+    });
+
+    pipeline.push({
+      $addFields: {
+        proposalCount: {
+          $ifNull: [{ $arrayElemAt: ["$adminProposals.count", 0] }, 0],
+        },
+      },
+    });
+
+    if (minProposals !== undefined || maxProposals !== undefined) {
+      const countMatch = {};
+      if (minProposals !== undefined) countMatch.$gte = parseInt(minProposals);
+      if (maxProposals !== undefined) countMatch.$lte = parseInt(maxProposals);
+      pipeline.push({ $match: { proposalCount: countMatch } });
+    }
+
+    pipeline.push(
+      {
+        $lookup: {
+          from: "recruiters",
+          localField: "recruteurId",
+          foreignField: "_id",
+          as: "recruteur",
+        },
+      },
+      { $unwind: "$recruteur" },
+      {
+        $lookup: {
+          from: "companies",
+          localField: "companyId",
+          foreignField: "_id",
+          as: "company",
+        },
+      },
+      { $unwind: "$company" }
+    );
+
+    let sortStage = {};
+    if (sortBy === "lastModified") {
+      sortStage = { updatedAt: -1 };
+    } else {
+      sortStage = { datePublication: -1 };
+    }
+    pipeline.push({ $sort: sortStage });
+
+    const offers = await Offer.aggregate(pipeline);
+
+    res.json(offers);
+  } catch (err) {
+    console.error("Erreur Manual Matching:", err);
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const proposeCandidateToOffer = async (req, res) => {
+  try {
+    const { candidatId, offreId } = req.body;
+
+    const offer = await Offer.findById(offreId).populate("recruteurId");
+    if (!offer) return res.status(404).json({ msg: "Offre introuvable" });
+
+    let candidate = await Candidate.findById(candidatId).populate("userId");
+    if (!candidate)
+      candidate = await Candidate.findOne({ userId: candidatId }).populate(
+        "userId"
+      );
+    if (!candidate)
+      return res.status(404).json({ msg: "Candidat introuvable" });
+
+    if (!candidate.userId.emailVerified)
+      return res.status(400).json({ msg: "Email candidat non vérifié." });
+    if (!candidate.autoriserProposition)
+      return res
+        .status(403)
+        .json({ msg: "Ce candidat refuse les propositions." });
+
+    const existingApp = await Application.findOne({
+      offerId: offreId,
+      candidateId: candidate._id,
+    });
+    if (existingApp) return res.status(400).json({ msg: "Déjà positionné." });
+
+    const lastCv =
+      candidate.cvs.length > 0
+        ? candidate.cvs[candidate.cvs.length - 1].url
+        : "No CV";
+
+    await Application.create({
+      offerId: offreId,
+      candidateId: candidate._id,
+      cvUrl: lastCv,
+      status: "proposé",
+      recommandeParAdmin: true,
+      coverLetter: "Recommandation Admin",
+    });
+
+    offer.nombreCandidatures += 1;
+    await offer.save();
+
+    if (offer.recruteurId && offer.recruteurId.userId) {
+      await Notification.create({
+        userId: offer.recruteurId.userId,
+        message: `L'administrateur vous propose un candidat idéal (${candidate.userId.nom}) pour votre offre "${offer.titre}".`,
+        type: "validation",
+      });
+    }
+
+    await Notification.create({
+      userId: candidate.userId._id,
+      message: `Bonne nouvelle ! Votre profil a été recommandé par un administrateur pour l'offre "${offer.titre}".`,
+      type: "info",
+    });
+
+    res.json({ msg: "Candidat proposé avec succès ✅" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ msg: err.message });
+  }
+};
+export const getAdminLogs = async (req, res) => {
+  try {
+    const {
+      page = 1,
+      limit = 50,
+      adminId,
+      action,
+      startDate,
+      endDate,
+    } = req.query;
+
+    let query = {};
+    if (adminId) query.adminId = adminId;
+    if (action) query.action = action;
+    if (startDate || endDate) {
+      query.createdAt = {};
+      if (startDate) query.createdAt.$gte = new Date(startDate);
+      if (endDate) query.createdAt.$lte = new Date(endDate);
+    }
+
+    const logs = await AdminLog.find(query)
+      .populate("adminId", "nom email")
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit));
+
+    const total = await AdminLog.countDocuments(query);
+
+    res.json({
+      data: logs,
+      meta: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / limit),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getPendingOffers = async (req, res) => {
+  try {
+    const { page = 1, limit = 20, sortBy = "createdAt" } = req.query;
+
+    const offers = await Offer.find({ validationStatus: "pending" })
+      .populate("companyId", "name logo")
+      .populate({
+        path: "recruteurId",
+        select: "userId position",
+        populate: { path: "userId", select: "nom email" },
+      })
+      .sort({ [sortBy]: -1 })
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit));
+
+    const total = await Offer.countDocuments({ validationStatus: "pending" });
+
+    res.json({
+      data: offers,
+      meta: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / limit),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const approveOffer = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const offer = await Offer.findById(id).populate("recruteurId");
+    if (!offer) return res.status(404).json({ msg: "Offre introuvable." });
+
+    offer.validationStatus = "approved";
+    offer.actif = true;
+    offer.datePublication = new Date();
+    offer.validationHistory.push({
+      status: "approved",
+      adminId: req.user.id,
+    });
+    await offer.save();
+
+    if (offer.recruteurId && offer.recruteurId.userId) {
+      await Notification.create({
+        userId: offer.recruteurId.userId,
+        message: `Votre offre "${offer.titre}" a été approuvée et est maintenant visible.`,
+        type: "validation",
+      });
+    }
+
+    await logAdminAction(
+      req.user.id,
+      "offer_approved",
+      { type: "offer", id: offer._id },
+      {},
+      req
+    );
+
+    res.json({ msg: "Offre approuvée ✅", offer });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const rejectOffer = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason, requestChanges } = req.body;
+
+    const offer = await Offer.findById(id).populate("recruteurId");
+    if (!offer) return res.status(404).json({ msg: "Offre introuvable." });
+
+    offer.validationStatus = requestChanges ? "changes_requested" : "rejected";
+    offer.rejectionReason = reason;
+    offer.validationHistory.push({
+      status: offer.validationStatus,
+      message: reason,
+      adminId: req.user.id,
+    });
+    await offer.save();
+
+    const msgType = requestChanges
+      ? `Des modifications sont demandées pour votre offre "${offer.titre}": ${reason}`
+      : `Votre offre "${offer.titre}" a été refusée: ${reason}`;
+
+    if (offer.recruteurId && offer.recruteurId.userId) {
+      await Notification.create({
+        userId: offer.recruteurId.userId,
+        message: msgType,
+        type: "alerte",
+      });
+    }
+
+    await logAdminAction(
+      req.user.id,
+      requestChanges ? "offer_changes_requested" : "offer_rejected",
+      { type: "offer", id: offer._id },
+      { reason },
+      req
+    );
+
+    res.json({
+      msg: requestChanges ? "Modifications demandées." : "Offre refusée.",
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const requestRecruiterDocuments = async (req, res) => {
+  try {
+    const { recruiterId } = req.params;
+    const { type, message, requiredDocuments, requiredFields } = req.body;
+
+    const recruiter = await Recruiter.findById(recruiterId).populate("userId");
+    if (!recruiter) {
+      return res.status(404).json({ msg: "Recruteur introuvable." });
+    }
+
+    recruiter.status =
+      type === "document" ? "pending_documents" : "pending_info";
+    recruiter.validationRequests.push({
+      type,
+      message,
+      requiredDocuments,
+      requiredFields,
+      status: "pending",
+    });
+    await recruiter.save();
+
+    await Notification.create({
+      userId: recruiter.userId._id,
+      message: `Action requise : ${message}`,
+      type: "alerte",
+    });
+
+    await logAdminAction(
+      req.user.id,
+      "recruiter_documents_requested",
+      { type: "recruiter", id: recruiter._id },
+      { requestType: type, message },
+      req
+    );
+
+    res.json({ msg: "Demande envoyée au recruteur ✅" });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const updateAdminPermissions = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { permissions } = req.body;
+
+    const targetAdmin = await Admin.findOne({ userId: id });
+    if (!targetAdmin) {
+      return res.status(404).json({ msg: "Admin introuvable" });
+    }
+
+    if (targetAdmin.label === "super_admin") {
+      return res.status(403).json({
+        msg: "Impossible de modifier les permissions d'un super admin",
+      });
+    }
+
+    targetAdmin.permissions = { ...targetAdmin.permissions, ...permissions };
+    await targetAdmin.save();
+
+    await logAdminAction(
+      req.user.id,
+      "admin_permissions_updated",
+      { type: "admin", id: targetAdmin._id },
+      { newPermissions: permissions },
+      req
+    );
+
+    res.json({ msg: "Permissions mises à jour ✅", admin: targetAdmin });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const updateAdminLabel = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { label } = req.body;
+
+    const validLabels = [
+      "super_admin",
+      "support",
+      "technical",
+      "operational",
+      "recruitment",
+      "moderation",
+      "product",
+    ];
+
+    if (!validLabels.includes(label)) {
+      return res.status(400).json({ msg: "Label invalide" });
+    }
+
+    const targetAdmin = await Admin.findOne({ userId: id });
+    if (!targetAdmin) {
+      return res.status(404).json({ msg: "Admin introuvable" });
+    }
+
+    const oldLabel = targetAdmin.label;
+    targetAdmin.label = label;
+    await targetAdmin.save();
+
+    await logAdminAction(
+      req.user.id,
+      "admin_label_changed",
+      { type: "admin", id: targetAdmin._id },
+      { oldLabel, newLabel: label },
+      req
+    );
+
+    res.json({ msg: "Label mis à jour ✅", admin: targetAdmin });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const createCompanyByAdmin = async (req, res) => {
+  try {
+    const { name, website, description, industry, location, size, logo } =
+      req.body;
+
+    if (!name) {
+      return res
+        .status(400)
+        .json({ msg: "Le nom de l'entreprise est obligatoire." });
+    }
+
+    const existingCompany = await Company.findOne({
+      name: { $regex: new RegExp(`^${name}$`, "i") },
+    });
+
+    if (existingCompany) {
+      return res
+        .status(400)
+        .json({ msg: "Une entreprise avec ce nom existe déjà." });
+    }
+
+    const company = await Company.create({
+      name,
+      website,
+      description,
+      industry,
+      location,
+      size,
+      logo,
+      status: "active",
+    });
+
+    await logAdminAction(
+      req.user.id,
+      "company_created_by_admin",
+      { type: "company", id: company._id },
+      { name },
+      req
+    );
+
+    res.status(201).json({
+      msg: "Entreprise créée avec succès ✅",
+      company,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getCompanyRecruiters = async (req, res) => {
+  try {
+    const { companyId } = req.params;
+
+    const company = await Company.findById(companyId);
+    if (!company) {
+      return res.status(404).json({ msg: "Entreprise introuvable." });
+    }
+
+    const recruiters = await Recruiter.find({ companyId })
+      .populate("userId", "nom email createdAt")
+      .sort({ isAdmin: -1, createdAt: 1 });
+
+    res.json({
+      company: {
+        _id: company._id,
+        name: company.name,
+        status: company.status,
+      },
+      recruiters,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const assignCompanyAdmin = async (req, res) => {
+  try {
+    const { companyId, recruiterId } = req.body;
+
+    const company = await Company.findById(companyId);
+    if (!company) {
+      return res.status(404).json({ msg: "Entreprise introuvable." });
+    }
+
+    const recruiter = await Recruiter.findById(recruiterId).populate("userId");
+    if (!recruiter) {
+      return res.status(404).json({ msg: "Recruteur introuvable." });
+    }
+
+    if (recruiter.companyId.toString() !== companyId) {
+      return res.status(400).json({
+        msg: "Ce recruteur n'appartient pas à cette entreprise.",
+      });
+    }
+
+    if (recruiter.status !== "validated") {
+      return res.status(400).json({
+        msg: "Le recruteur doit être validé avant de devenir administrateur.",
+      });
+    }
+
+    recruiter.isAdmin = true;
+    recruiter.permissions.editCompany = true;
+    recruiter.permissions.manageTeam = true;
+    await recruiter.save();
+
+    await Notification.create({
+      userId: recruiter.userId._id,
+      message: `Vous êtes maintenant administrateur de l'entreprise "${company.name}".`,
+      type: "validation",
+    });
+
+    await logAdminAction(
+      req.user.id,
+      "company_admin_assigned",
+      { type: "recruiter", id: recruiter._id },
+      { companyId, companyName: company.name },
+      req
+    );
+
+    res.json({
+      msg: `${recruiter.userId.nom} est maintenant administrateur de ${company.name} ✅`,
+      recruiter,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const removeCompanyAdmin = async (req, res) => {
+  try {
+    const { recruiterId } = req.params;
+
+    const recruiter = await Recruiter.findById(recruiterId)
+      .populate("userId")
+      .populate("companyId");
+
+    if (!recruiter) {
+      return res.status(404).json({ msg: "Recruteur introuvable." });
+    }
+
+    if (!recruiter.isAdmin) {
+      return res.status(400).json({
+        msg: "Ce recruteur n'est pas administrateur d'entreprise.",
+      });
+    }
+
+    recruiter.isAdmin = false;
+    recruiter.permissions.editCompany = false;
+    recruiter.permissions.manageTeam = false;
+    await recruiter.save();
+
+    await Notification.create({
+      userId: recruiter.userId._id,
+      message: `Vous n'êtes plus administrateur de l'entreprise "${recruiter.companyId.name}".`,
+      type: "info",
+    });
+
+    await logAdminAction(
+      req.user.id,
+      "company_admin_removed",
+      { type: "recruiter", id: recruiter._id },
+      {
+        companyId: recruiter.companyId._id,
+        companyName: recruiter.companyId.name,
+      },
+      req
+    );
+
+    res.json({
+      msg: `${recruiter.userId.nom} n'est plus administrateur ⚠️`,
+      recruiter,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const updateCompanyByAdmin = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, website, description, industry, location, size, logo } =
+      req.body;
+
+    const company = await Company.findByIdAndUpdate(
+      id,
+      { name, website, description, industry, location, size, logo },
+      { new: true }
+    );
+
+    if (!company) {
+      return res.status(404).json({ msg: "Entreprise introuvable." });
+    }
+
+    await logAdminAction(
+      req.user.id,
+      "company_updated_by_admin",
+      { type: "company", id: company._id },
+      { updates: req.body },
+      req
+    );
+
+    res.json({ msg: "Entreprise mise à jour ✅", company });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const requestMultipleValidationItems = async (req, res) => {
+  try {
+    const { recruiterId } = req.params;
+    const { requests } = req.body;
+
+    const recruiter = await Recruiter.findById(recruiterId).populate("userId");
+    if (!recruiter) {
+      return res.status(404).json({ msg: "Recruteur introuvable." });
+    }
+
+    requests.forEach((request) => {
+      recruiter.validationRequests.push({
+        type: request.type,
+        message: request.message,
+        requiredDocuments: request.requiredDocuments || 0,
+        requiredFields: request.requiredFields || [],
+        status: "pending",
+      });
+    });
+
+    const hasDocRequest = requests.some((r) => r.type === "document");
+    const hasInfoRequest = requests.some((r) => r.type === "information");
+
+    if (hasDocRequest && hasInfoRequest) {
+      recruiter.status = "pending_info_and_documents";
+    } else if (hasDocRequest) {
+      recruiter.status = "pending_documents";
+    } else if (hasInfoRequest) {
+      recruiter.status = "pending_info";
+    } else {
+      return res.status(400).json({ msg: "Aucune demande valide reçue." });
+    }
+
+    await recruiter.save();
+
+    await Notification.create({
+      userId: recruiter.userId._id,
+      message: `Action requise : Des informations ou documents vous sont demandés.`,
+      type: "alerte",
+    });
+
+    await logAdminAction(
+      req.user.id,
+      "recruiter_multiple_requests",
+      { type: "recruiter", id: recruiter._id },
+      { requestCount: requests.length, newStatus: recruiter.status },
+      req
+    );
+
+    res.json({
+      msg: `Demandes envoyées. Statut mis à jour vers : ${recruiter.status} ✅`,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getAllCompanies = async (req, res) => {
+  try {
+    const { page = 1, limit = 20, search, status } = req.query;
+
+    let query = {};
+
+    if (status) {
+      query.status = status;
+    }
+
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: "i" } },
+        { industry: { $regex: search, $options: "i" } },
+      ];
+    }
+
+    const skip = (page - 1) * limit;
+
+    const companies = await Company.find(query)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit));
+
+    const total = await Company.countDocuments(query);
+
+    const enrichedCompanies = await Promise.all(
+      companies.map(async (company) => {
+        const recruitersCount = await Recruiter.countDocuments({
+          companyId: company._id,
+        });
+        return {
+          ...company.toObject(),
+          recruitersCount,
+        };
+      })
+    );
+
+    res.json({
+      data: enrichedCompanies,
+      meta: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / limit),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+export const getOfferDetailsAdmin = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const offer = await Offer.findById(id)
+      .populate("companyId", "name logo status website location")
+      .populate({
+        path: "recruteurId",
+        select: "userId position status telephone",
+        populate: { path: "userId", select: "nom email" },
+      });
+
+    if (!offer) return res.status(404).json({ msg: "Offre introuvable." });
+
+    res.json(offer);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+export const updateOfferByAdmin = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const offer = await Offer.findByIdAndUpdate(
+      id,
+      { $set: req.body },
+      { new: true }
+    );
+
+    if (!offer) return res.status(404).json({ msg: "Offre introuvable" });
+
+    await logAdminAction(
+      req.user.id,
+      "offer_updated_by_admin",
+      { type: "offer", id: offer._id },
+      { updates: req.body },
+      req
+    );
+
+    res.json({ msg: "Offre modifiée par l'admin ✅", offer });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+export const toggleOfferVisibility = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { actif } = req.body;
+
+    const offer = await Offer.findByIdAndUpdate(
+      id,
+      { actif: actif },
+      { new: true }
+    );
+
+    if (!offer) return res.status(404).json({ msg: "Offre introuvable" });
+
+    await logAdminAction(
+      req.user.id,
+      actif ? "offer_activated_admin" : "offer_deactivated_admin",
+      { type: "offer", id: offer._id },
+      {},
+      req
+    );
+
+    res.json({
+      msg: `Offre ${actif ? "activée" : "désactivée"} avec succès`,
+      offer,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getCandidateDetailsAdmin = async (req, res) => {
+  const candidate = await Candidate.findById(req.params.id).populate("userId");
+  res.json(candidate);
+};
+
+
+=== controllers\adminSupportController.js ===
+import SupportTicket from "../models/SupportTicket.js";
+import Admin from "../models/Admin.js";
+import Notification from "../models/Notification.js";
+import { logAdminAction } from "../models/AdminLog.js";
+
+export const getTicketsByLabel = async (req, res) => {
+  try {
+    const admin = await Admin.findOne({ userId: req.user.id });
+
+    if (!admin) {
+      return res.status(403).json({ msg: "Admin introuvable." });
+    }
+
+    const { status, priority, page = 1, limit = 20 } = req.query;
+
+    let query = {};
+
+    if (admin.label !== "super_admin") {
+      query.assignedToLabel = admin.label;
+    }
+
+    if (status) query.status = status;
+    if (priority) query.priority = priority;
+
+    const tickets = await SupportTicket.find(query)
+      .populate("userId", "nom email role")
+      .populate("assignedTo", "label")
+      .sort({ priority: -1, createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit));
+
+    const total = await SupportTicket.countDocuments(query);
+
+    res.json({
+      data: tickets,
+      meta: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / limit),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getTicketById = async (req, res) => {
+  try {
+    const { ticketId } = req.params;
+
+    const ticket = await SupportTicket.findById(ticketId)
+      .populate("userId", "nom email role")
+      .populate("messages.adminId", "nom");
+
+    if (!ticket) {
+      return res.status(404).json({ msg: "Ticket introuvable." });
+    }
+
+    res.json(ticket);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const respondToTicket = async (req, res) => {
+  try {
+    const admin = await Admin.findOne({ userId: req.user.id });
+    const { ticketId } = req.params;
+    const { content, newStatus } = req.body;
+    const attachments = req.files?.map((f) => f.path.replace(/\\/g, "/")) || [];
+
+    if (!content) {
+      return res.status(400).json({ msg: "Le contenu est obligatoire." });
+    }
+
+    const ticket = await SupportTicket.findById(ticketId);
+    if (!ticket) {
+      return res.status(404).json({ msg: "Ticket introuvable." });
+    }
+
+    if (!ticket.assignedTo) {
+      ticket.assignedTo = admin._id;
+    }
+
+    ticket.messages.push({
+      from: "admin",
+      content,
+      adminId: req.user.id,
+      attachments,
+    });
+
+    if (newStatus) {
+      ticket.status = newStatus;
+      if (newStatus === "resolved") ticket.resolvedAt = new Date();
+      if (newStatus === "closed") ticket.closedAt = new Date();
+    }
+
+    await ticket.save();
+
+    await Notification.create({
+      userId: ticket.userId,
+      message: `Réponse de l'administration sur votre ticket: "${ticket.subject}"`,
+      type: "info",
+    });
+
+    await logAdminAction(
+      req.user.id,
+      "ticket_responded",
+      { type: "ticket", id: ticket._id },
+      { newStatus },
+      req
+    );
+
+    res.json({ msg: "Réponse envoyée.", ticket });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const reassignTicket = async (req, res) => {
+  try {
+    const { ticketId } = req.params;
+    const { newLabel, newAdminId } = req.body;
+
+    const ticket = await SupportTicket.findById(ticketId);
+    if (!ticket) {
+      return res.status(404).json({ msg: "Ticket introuvable." });
+    }
+
+    if (newLabel) ticket.assignedToLabel = newLabel;
+    if (newAdminId) {
+      const targetAdmin = await Admin.findById(newAdminId);
+      if (!targetAdmin) {
+        return res.status(404).json({ msg: "Admin cible introuvable." });
+      }
+      ticket.assignedTo = newAdminId;
+    }
+
+    await ticket.save();
+
+    await logAdminAction(
+      req.user.id,
+      "ticket_reassigned",
+      { type: "ticket", id: ticket._id },
+      { newLabel, newAdminId },
+      req
+    );
+
+    res.json({ msg: "Ticket réassigné.", ticket });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const closeTicket = async (req, res) => {
+  try {
+    const { ticketId } = req.params;
+    const { resolution } = req.body;
+
+    const ticket = await SupportTicket.findById(ticketId);
+    if (!ticket) {
+      return res.status(404).json({ msg: "Ticket introuvable." });
+    }
+
+    ticket.status = "closed";
+    ticket.closedAt = new Date();
+
+    if (resolution) {
+      ticket.messages.push({
+        from: "admin",
+        content: `Ticket fermé. Résolution: ${resolution}`,
+        adminId: req.user.id,
+      });
+    }
+
+    await ticket.save();
+
+    await Notification.create({
+      userId: ticket.userId,
+      message: `Votre ticket "${ticket.subject}" a été fermé.`,
+      type: "info",
+    });
+
+    await logAdminAction(
+      req.user.id,
+      "ticket_closed",
+      { type: "ticket", id: ticket._id },
+      { resolution },
+      req
+    );
+
+    res.json({ msg: "Ticket fermé.", ticket });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+=== controllers\announcementController.js ===
+import Announcement from "../models/Announcement.js";
+import User from "../models/User.js";
+import Admin from "../models/Admin.js";
+import { logAdminAction } from "../models/AdminLog.js";
+
+export const createAnnouncement = async (req, res) => {
+  try {
+    const {
+      title,
+      content,
+      targetAudience,
+      status,
+      publishAt,
+      expiresAt,
+      priority,
+      displayType,
+    } = req.body;
+
+    let finalStatus = status || "draft";
+    if (
+      status === "published" &&
+      publishAt &&
+      new Date(publishAt) > new Date()
+    ) {
+      finalStatus = "scheduled";
+    }
+
+    const announcement = await Announcement.create({
+      title,
+      content,
+      targetAudience: targetAudience || "all",
+      status: finalStatus,
+      publishAt: publishAt ? new Date(publishAt) : null,
+      expiresAt: expiresAt ? new Date(expiresAt) : null,
+      priority: priority || "normal",
+      displayType: displayType || "inline",
+      createdBy: req.user.id,
+    });
+
+    await logAdminAction(
+      req.user.id,
+      "announcement_created",
+      { type: "announcement", id: announcement._id },
+      { title },
+      req
+    );
+
+    res.status(201).json({ msg: "Annonce créée ✅", announcement });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getAllAnnouncements = async (req, res) => {
+  try {
+    const { status, targetAudience, page = 1, limit = 20 } = req.query;
+
+    let query = {};
+    if (status) query.status = status;
+    if (targetAudience) query.targetAudience = targetAudience;
+
+    const announcements = await Announcement.find(query)
+      .populate("createdBy", "nom email")
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit));
+
+    const total = await Announcement.countDocuments(query);
+
+    res.json({
+      data: announcements,
+      meta: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / limit),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getActiveAnnouncements = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    const now = new Date();
+
+    let audienceFilter = ["all"];
+    if (user.role === "admin") audienceFilter.push("admins");
+    if (user.role === "recruteur") audienceFilter.push("recruiters");
+    if (user.role === "candidat") audienceFilter.push("candidates");
+
+    const announcements = await Announcement.find({
+      status: "published",
+      targetAudience: { $in: audienceFilter },
+      $or: [{ publishAt: null }, { publishAt: { $lte: now } }],
+      dismissedBy: { $ne: req.user.id },
+    })
+      .and([
+        {
+          $or: [{ expiresAt: null }, { expiresAt: { $gt: now } }],
+        },
+      ])
+      .sort({ priority: -1, createdAt: -1 });
+
+    res.json(announcements);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const updateAnnouncement = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updates = req.body;
+
+    const announcement = await Announcement.findByIdAndUpdate(
+      id,
+      {
+        ...updates,
+        updatedBy: req.user.id,
+      },
+      { new: true }
+    );
+
+    if (!announcement) {
+      return res.status(404).json({ msg: "Annonce introuvable" });
+    }
+
+    await logAdminAction(
+      req.user.id,
+      "announcement_updated",
+      { type: "announcement", id: announcement._id },
+      { updates },
+      req
+    );
+
+    res.json({ msg: "Annonce mise à jour ✅", announcement });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const deleteAnnouncement = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const announcement = await Announcement.findByIdAndDelete(id);
+    if (!announcement) {
+      return res.status(404).json({ msg: "Annonce introuvable" });
+    }
+
+    await logAdminAction(
+      req.user.id,
+      "announcement_deleted",
+      { type: "announcement", id },
+      { title: announcement.title },
+      req
+    );
+
+    res.json({ msg: "Annonce supprimée 🗑️" });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const dismissAnnouncement = async (req, res) => {
+  try {
+    const { announcementId } = req.params;
+
+    await Announcement.findByIdAndUpdate(announcementId, {
+      $addToSet: { dismissedBy: req.user.id },
+    });
+
+    res.json({ msg: "Annonce masquée." });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const publishScheduledAnnouncements = async () => {
+  const now = new Date();
+
+  const publishedResult = await Announcement.updateMany(
+    { status: "scheduled", publishAt: { $lte: now } },
+    { $set: { status: "published" } }
+  );
+
+  const expiredResult = await Announcement.updateMany(
+    { status: "published", expiresAt: { $lte: now } },
+    { $set: { status: "expired" } }
+  );
+
+  console.log(
+    `📢 Annonces publiées: ${publishedResult.modifiedCount}, expirées: ${expiredResult.modifiedCount}`
+  );
+};
+
+
+=== controllers\authController.js ===
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import User from "../models/User.js";
+import Candidate from "../models/Candidate.js";
+import Recruiter from "../models/Recruiter.js";
+import Company from "../models/Company.js";
+
+const generateToken = (user) => {
+  return jwt.sign(
+    {
+      id: user._id,
+      role: user.role,
+      emailVerified: user.emailVerified,
+    },
+    process.env.JWT_SECRET,
+    { expiresIn: "1d" }
+  );
+};
+
+export const register = async (req, res) => {
+  try {
+    const {
+      nom,
+      email,
+      motDePasse,
+      role,
+      companyId,
+      nouveauNomEntreprise,
+      nouveauSiteWeb,
+    } = req.body;
+
+    const exist = await User.findOne({ email });
+    if (exist) return res.status(400).json({ msg: "Email déjà utilisé" });
+
+    const hash = await bcrypt.hash(motDePasse, 10);
+
+    const user = await User.create({
+      nom,
+      email,
+      motDePasse: hash,
+      role,
+      emailVerified: false,
+      accountStatus: "active",
+    });
+
+    if (role === "recruteur") {
+      let finalCompanyId;
+
+      if (companyId) {
+        const comp = await Company.findById(companyId);
+        if (!comp) {
+          await User.findByIdAndDelete(user._id);
+          return res.status(400).json({ msg: "Entreprise introuvable" });
+        }
+        finalCompanyId = comp._id;
+      } else if (nouveauNomEntreprise) {
+        const newComp = await Company.create({
+          name: nouveauNomEntreprise,
+          website: nouveauSiteWeb,
+          status: "pending",
+        });
+        finalCompanyId = newComp._id;
+      } else {
+        await User.findByIdAndDelete(user._id);
+        return res
+          .status(400)
+          .json({ msg: "Vous devez sélectionner ou créer une entreprise." });
+      }
+
+      await Recruiter.create({
+        userId: user._id,
+        companyId: finalCompanyId,
+        position: "Recruteur",
+        status: "pending_validation",
+        isAdmin: !companyId,
+      });
+    } else if (role === "candidat") {
+      await Candidate.create({ userId: user._id });
+    }
+
+    const token = generateToken(user);
+    res.status(201).json({ msg: "Inscription réussie", token, user });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const login = async (req, res) => {
+  try {
+    const { email, motDePasse } = req.body;
+
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(404).json({ msg: "Utilisateur non trouvé" });
+    }
+
+    const ok = await bcrypt.compare(motDePasse, user.motDePasse);
+    if (!ok) {
+      return res.status(401).json({ msg: "Mot de passe incorrect" });
+    }
+
+    if (!user.canLogin()) {
+      if (user.accountStatus === "banned") {
+        return res.status(403).json({
+          msg: "Votre compte a été banni. Veuillez contacter l'administrateur.",
+          code: "ACCOUNT_BANNED",
+        });
+      }
+      if (user.accountStatus === "suspended") {
+        return res.status(403).json({
+          msg: `Votre compte est suspendu${
+            user.suspendedUntil
+              ? ` jusqu'au ${user.suspendedUntil.toLocaleDateString()}`
+              : ""
+          }.`,
+          code: "ACCOUNT_SUSPENDED",
+          reason: user.suspensionReason,
+        });
+      }
+    }
+
+    if (user.role === "recruteur") {
+      if (!user.emailVerified) {
+        return res.status(403).json({
+          msg: "Veuillez confirmer votre email avant de vous connecter.",
+          code: "EMAIL_NOT_VERIFIED",
+          needEmailVerification: true,
+        });
+      }
+
+      const recruiter = await Recruiter.findOne({ userId: user._id });
+      if (recruiter) {
+        if (recruiter.status === "rejected") {
+          return res.status(403).json({
+            msg: "Votre compte recruteur a été refusé.",
+            code: "RECRUITER_REJECTED",
+            reason: recruiter.rejectionReason,
+          });
+        }
+
+        if (recruiter.status !== "validated") {
+          const token = generateToken(user);
+          user.derniereConnexion = new Date();
+          await user.save();
+
+          return res.json({
+            msg: "Connexion réussie (accès limité)",
+            token,
+            user: {
+              id: user._id,
+              email: user.email,
+              role: user.role,
+              emailVerified: user.emailVerified,
+            },
+            recruiterStatus: recruiter.status,
+            limitedAccess: true,
+            statusMessage: getRecruiterStatusMessage(recruiter.status),
+          });
+        }
+      }
+    }
+
+    const token = generateToken(user);
+    user.derniereConnexion = new Date();
+    await user.save();
+
+    res.json({
+      msg: "Connexion réussie ✅",
+      token,
+      user: {
+        id: user._id,
+        email: user.email,
+        role: user.role,
+        emailVerified: user.emailVerified,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+function getRecruiterStatusMessage(status) {
+  const messages = {
+    pending_validation:
+      "Votre compte est en attente de validation par un administrateur.",
+    pending_documents:
+      "Des documents vous ont été demandés. Veuillez les fournir.",
+    pending_info: "Des informations complémentaires vous ont été demandées.",
+    pending_info_and_documents:
+      "Des informations et des documents vous ont été demandés.",
+    pending_revalidation: "Vos réponses sont en cours d'examen.",
+  };
+  return messages[status] || "Statut en attente.";
+}
+
+export const resendConfirmationCode = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ msg: "Utilisateur introuvable" });
+
+    if (user.emailVerified)
+      return res.status(400).json({ msg: "Email déjà vérifié" });
+
+    console.log(
+      `📨 [FAKE API] Code de confirmation envoyé à ${user.email} : 123456`
+    );
+
+    res.json({
+      msg: "Code de confirmation envoyé (Regardez la console serveur pour le code Fake) 📨",
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const verifyEmail = async (req, res) => {
+  try {
+    const { code } = req.body;
+    const userId = req.user.id;
+
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ msg: "Utilisateur introuvable" });
+
+    if (user.emailVerified)
+      return res.status(400).json({ msg: "Email déjà vérifié" });
+
+    if (code === "123456") {
+      user.emailVerified = true;
+      await user.save();
+
+      const newToken = generateToken(user);
+
+      return res.json({
+        msg: "E-mail confirmé avec succès ! 🎉",
+        token: newToken,
+        user: {
+          id: user._id,
+          email: user.email,
+          role: user.role,
+          emailVerified: true,
+        },
+      });
+    } else {
+      return res.status(400).json({ msg: "Code incorrect. Essayez 123456." });
+    }
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const changeEmail = async (req, res) => {
+  try {
+    const { newEmail } = req.body;
+    const userId = req.user.id;
+
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ msg: "Utilisateur introuvable" });
+
+    if (user.emailVerified) {
+      return res.status(400).json({
+        msg: "Impossible de changer l'email car il est déjà vérifié.",
+      });
+    }
+
+    const exist = await User.findOne({ email: newEmail });
+    if (exist)
+      return res.status(400).json({ msg: "Cet email est déjà utilisé." });
+
+    user.email = newEmail;
+    await user.save();
+
+    res.json({
+      msg: `Email mis à jour vers ${newEmail}. Veuillez confirmer ce nouvel email.`,
+      email: newEmail,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getCompanies = async (req, res) => {
+  try {
+    const companies = await Company.find({ status: "active" }).select(
+      "_id name"
+    );
+    res.json(companies);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+=== controllers\candidateController.js ===
+import Candidate from "../models/Candidate.js";
+import Offer from "../models/Offer.js";
+import User from "../models/User.js";
+import { uploadCV } from "../config/multer.js";
+import Recruiter from "../models/Recruiter.js";
+import Notification from "../models/Notification.js";
+import Application from "../models/Application.js";
+import Company from "../models/Company.js";
+import fs from "fs";
+import path from "path";
+import { calculateProfileCompletion } from "../utils/profileCompletion.js";
+
+export const updateProfile = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const {
+      telephone,
+      residence,
+      searchPreferences,
+      desiredPosition,
+      desiredJobTypes,
+      dateOfBirth,
+      bio,
+      gender,
+      skills,
+      experiences,
+      education,
+      autoriserProposition,
+      links,
+    } = req.body;
+
+    let candidate = await Candidate.findOne({ userId });
+    if (!candidate) candidate = new Candidate({ userId });
+
+    if (telephone) candidate.telephone = telephone;
+    if (residence) candidate.residence = residence;
+    if (searchPreferences) candidate.searchPreferences = searchPreferences;
+    if (desiredPosition) candidate.desiredPosition = desiredPosition;
+    if (desiredJobTypes) candidate.desiredJobTypes = desiredJobTypes;
+
+    if (dateOfBirth) candidate.dateOfBirth = dateOfBirth;
+    if (bio) candidate.bio = bio;
+    if (links) candidate.links = links;
+    if (gender) candidate.gender = gender;
+    if (autoriserProposition !== undefined)
+      candidate.autoriserProposition = autoriserProposition;
+
+    if (skills) candidate.skills = skills;
+    if (experiences) candidate.experiences = experiences;
+    if (education) candidate.education = education;
+
+    await candidate.save();
+    res.json({ msg: "Profil mis à jour ✅", candidate });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const uploadProfilePicture = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const candidate = await Candidate.findOne({ userId });
+    if (!candidate) return res.status(404).json({ msg: "Profil introuvable." });
+
+    if (!req.file)
+      return res.status(400).json({ msg: "Aucune image fournie." });
+
+    if (candidate.profilePicture) {
+      const oldPath = path.join(process.cwd(), candidate.profilePicture);
+      if (fs.existsSync(oldPath)) {
+        fs.unlinkSync(oldPath);
+      }
+    }
+
+    const imagePath = req.file.path.replace(/\\/g, "/");
+
+    candidate.profilePicture = imagePath;
+    await candidate.save();
+
+    res.json({
+      msg: "Photo de profil mise à jour 📸",
+      profilePicture: candidate.profilePicture,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const uploadCandidateCV = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const candidate = await Candidate.findOne({ userId });
+
+    if (!candidate) return res.status(404).json({ msg: "Profil introuvable." });
+    if (candidate.cvs.length >= 3)
+      return res
+        .status(400)
+        .json({ msg: "Vous ne pouvez pas ajouter plus de 3 CV." });
+
+    const fileSize = req.file.size;
+    let score = 100;
+    if (fileSize < 20 * 1024) score = 0;
+    else if (fileSize > 5 * 1024 * 1024) score = 50;
+
+    const cvPath = req.file.path.replace(/\\/g, "/");
+    candidate.cvs.push({ url: cvPath, score });
+    await candidate.save();
+
+    res.json({
+      msg: "CV ajouté avec succès ✅",
+      cv: { url: cvPath, score },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const deleteCV = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { cvId } = req.params;
+
+    const candidate = await Candidate.findOne({ userId });
+    if (!candidate) return res.status(404).json({ msg: "Profil introuvable." });
+
+    const cv = candidate.cvs.id(cvId);
+    if (!cv) return res.status(404).json({ msg: "CV introuvable." });
+
+    const filePath = path.join(process.cwd(), cv.url);
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+
+    candidate.cvs.pull(cvId);
+    await candidate.save();
+
+    res.json({
+      msg: "CV supprimé avec succès 🗑️",
+      cvs: candidate.cvs,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const applyToOffer = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { offreId, cvUrl, coverLetter } = req.body;
+
+    const candidate = await Candidate.findOne({ userId });
+    const user = await User.findById(userId);
+
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil introuvable." });
+    }
+
+    if (!user.emailVerified) {
+      return res.status(403).json({
+        msg: "Veuillez confirmer votre email avant de postuler.",
+        code: "EMAIL_NOT_VERIFIED",
+      });
+    }
+
+    const completion = calculateProfileCompletion(candidate, user);
+
+    if (!completion.canApply) {
+      return res.status(400).json({
+        msg: `Profil incomplet. Veuillez compléter : ${completion.missingForApplication.join(
+          ", "
+        )}`,
+        missing: completion.missingForApplication,
+        code: "PROFILE_INCOMPLETE",
+      });
+    }
+
+    const cvExists = candidate.cvs.some((cv) => cv.url === cvUrl);
+    if (!cvExists) {
+      return res.status(400).json({ msg: "CV invalide." });
+    }
+
+    const offer = await Offer.findById(offreId).populate("recruteurId");
+
+    if (!offer) {
+      return res.status(404).json({ msg: "Offre introuvable." });
+    }
+
+    if (!offer.actif || offer.validationStatus !== "approved") {
+      return res
+        .status(400)
+        .json({ msg: "Cette offre n'est plus disponible." });
+    }
+
+    if (!offer.visibility?.acceptsDirectApplications) {
+      return res.status(403).json({
+        msg: "Cette offre n'accepte pas les candidatures directes.",
+      });
+    }
+
+    const existingApp = await Application.findOne({
+      offerId: offreId,
+      candidateId: candidate._id,
+    });
+
+    if (existingApp) {
+      return res
+        .status(400)
+        .json({ msg: "Vous avez déjà postulé à cette offre." });
+    }
+
+    const company = await Company.findById(offer.companyId);
+
+    await Application.create({
+      offerId: offreId,
+      candidateId: candidate._id,
+      cvUrl,
+      coverLetter: coverLetter || "",
+      status: "en attente",
+      offerSnapshot: {
+        titre: offer.titre,
+        entrepriseNom: company?.name || "Entreprise",
+        companyId: offer.companyId,
+        location: offer.wilaya,
+        salaryMin: offer.salaryMin,
+        salaryMax: offer.salaryMax,
+        type: offer.type,
+      },
+    });
+
+    await Offer.findByIdAndUpdate(offreId, { $inc: { nombreCandidatures: 1 } });
+
+    if (offer.recruteurId?.userId) {
+      await Notification.create({
+        userId: offer.recruteurId.userId,
+        message: `Nouvelle candidature pour "${offer.titre}"`,
+        type: "info",
+      });
+    }
+
+    res.json({ msg: "Candidature envoyée avec succès ✅" });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getHistorique = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const candidate = await Candidate.findOne({ userId });
+    if (!candidate) return res.status(404).json({ msg: "Profil introuvable." });
+
+    const applications = await Application.find({ candidateId: candidate._id })
+      .sort({ datePostulation: -1 })
+      .populate({
+        path: "offerId",
+        select: "titre actif datePublication wilaya type",
+        populate: { path: "companyId", select: "name logo" },
+      });
+
+    const enriched = applications.map((app) => ({
+      _id: app._id,
+      status: app.status,
+      date: app.datePostulation,
+      cvUrl: app.cvUrl,
+
+      offre: app.offerId
+        ? {
+            _id: app.offerId._id,
+            titre: app.offerId.titre,
+            entreprise: app.offerId.companyId?.name || "Inconnue",
+            logo: app.offerId.companyId?.logo,
+            actif: app.offerId.actif,
+          }
+        : {
+            titre: app.offerSnapshot?.titre,
+            entreprise: app.offerSnapshot?.entrepriseNom,
+            actif: false,
+            deleted: true,
+          },
+    }));
+
+    res.json(enriched);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getProfile = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id }).populate(
+      "userId",
+      "nom email emailVerified"
+    );
+
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil introuvable." });
+    }
+
+    const user = await User.findById(req.user.id);
+    const completion = calculateProfileCompletion(candidate, user);
+
+    res.json({
+      profil: candidate,
+      completion,
+      emailVerified: user.emailVerified,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const updateAccount = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { nom, email, motDePasse } = req.body;
+
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ msg: "Utilisateur introuvable." });
+
+    if (nom) user.nom = nom;
+    if (email) user.email = email;
+    if (motDePasse) {
+      const bcrypt = await import("bcryptjs");
+      user.motDePasse = await bcrypt.default.hash(motDePasse, 10);
+    }
+
+    await user.save();
+    res.json({ msg: "Compte mis à jour ✅" });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const addToFavorites = async (req, res) => {
+  try {
+    const { offerId } = req.params;
+    const userId = req.user.id;
+
+    const offerExists = await Offer.exists({ _id: offerId });
+    if (!offerExists) {
+      return res.status(404).json({ msg: "Offre introuvable." });
+    }
+
+    const candidateCheck = await Candidate.findOne({
+      userId,
+      "favoris.offerId": offerId,
+    });
+
+    if (candidateCheck) {
+      return res
+        .status(400)
+        .json({ msg: "Cette offre est déjà dans vos favoris." });
+    }
+
+    const updatedCandidate = await Candidate.findOneAndUpdate(
+      { userId },
+      {
+        $push: {
+          favoris: {
+            offerId: offerId,
+            savedAt: new Date(),
+          },
+        },
+      },
+      { new: true }
+    );
+
+    if (!updatedCandidate) {
+      return res.status(404).json({ msg: "Profil candidat introuvable." });
+    }
+
+    res.json({
+      msg: "Offre ajoutée aux favoris ❤️",
+      favoris: updatedCandidate.favoris,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const removeFromFavorites = async (req, res) => {
+  try {
+    const { offerId } = req.params;
+    const userId = req.user.id;
+
+    const updatedCandidate = await Candidate.findOneAndUpdate(
+      { userId },
+      {
+        $pull: {
+          favoris: { offerId: offerId },
+        },
+      },
+      { new: true }
+    );
+
+    if (!updatedCandidate) {
+      return res.status(404).json({ msg: "Profil candidat introuvable." });
+    }
+
+    res.json({
+      msg: "Offre retirée des favoris 💔",
+      favoris: updatedCandidate.favoris,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getFavorites = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const candidate = await Candidate.findOne({ userId }).populate({
+      path: "favoris.offerId",
+      select: "titre companyId type wilaya salaryMin salaryMax datePublication",
+      populate: {
+        path: "companyId",
+        select: "name logo location",
+      },
+    });
+
+    if (!candidate) return res.status(404).json({ msg: "Profil introuvable." });
+
+    const validFavorites = candidate.favoris.filter((f) => f.offerId !== null);
+
+    res.json(validFavorites);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const addSkill = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { name, level } = req.body;
+
+    const candidate = await Candidate.findOne({ userId });
+    if (!candidate) return res.status(404).json({ msg: "Profil introuvable." });
+
+    candidate.skills.push({ name, level });
+    await candidate.save();
+
+    res.json({ msg: "Compétence ajoutée", skills: candidate.skills });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const updateSkill = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { skillId } = req.params;
+    const { name, level } = req.body;
+
+    const candidate = await Candidate.findOne({ userId });
+    if (!candidate) return res.status(404).json({ msg: "Profil introuvable." });
+
+    const skill = candidate.skills.id(skillId);
+    if (!skill) return res.status(404).json({ msg: "Compétence introuvable." });
+
+    if (name) skill.name = name;
+    if (level) skill.level = level;
+
+    await candidate.save();
+    res.json({ msg: "Compétence mise à jour", skills: candidate.skills });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const deleteSkill = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { skillId } = req.params;
+
+    const candidate = await Candidate.findOne({ userId });
+    if (!candidate) return res.status(404).json({ msg: "Profil introuvable." });
+
+    candidate.skills.pull(skillId);
+    await candidate.save();
+
+    res.json({ msg: "Compétence supprimée", skills: candidate.skills });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const addExperience = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const { jobTitle, company, startDate, endDate, description } = req.body;
+
+    const candidate = await Candidate.findOne({ userId });
+    if (!candidate) return res.status(404).json({ msg: "Profil introuvable." });
+
+    candidate.experiences.push({
+      jobTitle,
+      company,
+      startDate,
+      endDate,
+      description,
+    });
+    await candidate.save();
+
+    res.json({ msg: "Expérience ajoutée", experiences: candidate.experiences });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const updateExperience = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { experienceId } = req.params;
+    const { jobTitle, company, startDate, endDate, description } = req.body;
+
+    const candidate = await Candidate.findOne({ userId });
+    if (!candidate) return res.status(404).json({ msg: "Profil introuvable." });
+
+    const experience = candidate.experiences.id(experienceId);
+    if (!experience)
+      return res.status(404).json({ msg: "Expérience introuvable." });
+
+    if (jobTitle) experience.jobTitle = jobTitle;
+    if (company) experience.company = company;
+    if (startDate) experience.startDate = startDate;
+
+    if (endDate !== undefined) experience.endDate = endDate;
+    if (description) experience.description = description;
+
+    await candidate.save();
+
+    res.json({
+      msg: "Expérience mise à jour",
+      experiences: candidate.experiences,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const deleteExperience = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { experienceId } = req.params;
+
+    const candidate = await Candidate.findOne({ userId });
+    if (!candidate) return res.status(404).json({ msg: "Profil introuvable." });
+
+    candidate.experiences.pull(experienceId);
+    await candidate.save();
+
+    res.json({
+      msg: "Expérience supprimée",
+      experiences: candidate.experiences,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const addEducation = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const { institut, degree, fieldOfStudy, startDate, endDate, description } =
+      req.body;
+
+    const candidate = await Candidate.findOne({ userId });
+    if (!candidate) return res.status(404).json({ msg: "Profil introuvable." });
+
+    candidate.education.push({
+      institut,
+      degree,
+      fieldOfStudy,
+      startDate,
+      endDate,
+      description,
+    });
+
+    await candidate.save();
+
+    res.json({
+      msg: "Formation ajoutée avec succès 🎓",
+      education: candidate.education,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const updateEducation = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { educationId } = req.params;
+    const { institut, degree, fieldOfStudy, startDate, endDate, description } =
+      req.body;
+
+    const candidate = await Candidate.findOne({ userId });
+    if (!candidate) return res.status(404).json({ msg: "Profil introuvable." });
+
+    const edu = candidate.education.id(educationId);
+    if (!edu) return res.status(404).json({ msg: "Formation introuvable." });
+
+    if (institut) edu.institut = institut;
+    if (degree) edu.degree = degree;
+    if (fieldOfStudy) edu.fieldOfStudy = fieldOfStudy;
+    if (startDate) edu.startDate = startDate;
+    if (endDate !== undefined) edu.endDate = endDate;
+    if (description) edu.description = description;
+
+    await candidate.save();
+
+    res.json({
+      msg: "Formation mise à jour ✅",
+      education: candidate.education,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const deleteEducation = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { educationId } = req.params;
+
+    const candidate = await Candidate.findOne({ userId });
+    if (!candidate) return res.status(404).json({ msg: "Profil introuvable." });
+
+    candidate.education.pull(educationId);
+    await candidate.save();
+
+    res.json({ msg: "Formation supprimée 🗑️", education: candidate.education });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getCandidateStats = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id });
+    if (!candidate) {
+      return res.status(404).json({ msg: "Candidat introuvable" });
+    }
+
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+    const [
+      totalApplications,
+      applicationsByStatus,
+      recentApplications,
+      weeklyApplications,
+      viewedApplications,
+    ] = await Promise.all([
+      Application.countDocuments({ candidateId: candidate._id }),
+      Application.aggregate([
+        { $match: { candidateId: candidate._id } },
+        { $group: { _id: "$status", count: { $sum: 1 } } },
+      ]),
+      Application.countDocuments({
+        candidateId: candidate._id,
+        datePostulation: { $gte: thirtyDaysAgo },
+      }),
+      Application.countDocuments({
+        candidateId: candidate._id,
+        datePostulation: { $gte: sevenDaysAgo },
+      }),
+      Application.countDocuments({
+        candidateId: candidate._id,
+        status: {
+          $in: ["vu", "présélectionné", "entretien", "accepté", "embauché"],
+        },
+      }),
+    ]);
+
+    const statusMap = {};
+    applicationsByStatus.forEach((item) => {
+      statusMap[item._id] = item.count;
+    });
+
+    const responded =
+      (statusMap["accepté"] || 0) +
+      (statusMap["rejeté"] || 0) +
+      (statusMap["entretien"] || 0) +
+      (statusMap["présélectionné"] || 0);
+
+    const responseRate =
+      totalApplications > 0
+        ? Math.round((responded / totalApplications) * 100)
+        : 0;
+
+    const viewRate =
+      totalApplications > 0
+        ? Math.round((viewedApplications / totalApplications) * 100)
+        : 0;
+
+    const user = await User.findById(req.user.id);
+    const profileCompletion = calculateProfileCompletion(candidate, user);
+
+    const suggestions = [];
+    if (!user.emailVerified) {
+      suggestions.push({
+        type: "critical",
+        message: "Confirmez votre email pour postuler aux offres",
+        action: "verify_email",
+      });
+    }
+    if (profileCompletion.percentage < 100) {
+      suggestions.push({
+        type: "important",
+        message: `Complétez votre profil (${profileCompletion.percentage}%)`,
+        action: "complete_profile",
+        missing: profileCompletion.missing,
+      });
+    }
+    if (candidate.cvs.length === 0) {
+      suggestions.push({
+        type: "important",
+        message: "Ajoutez votre CV pour augmenter vos chances",
+        action: "upload_cv",
+      });
+    }
+
+    res.json({
+      applications: {
+        total: totalApplications,
+        thisMonth: recentApplications,
+        thisWeek: weeklyApplications,
+        byStatus: statusMap,
+      },
+      favorites: candidate.favoris.length,
+      rates: {
+        response: responseRate + "%",
+        view: viewRate + "%",
+      },
+      completion: profileCompletion,
+      suggestions,
+      cvCount: candidate.cvs.length,
+      skillCount: candidate.skills.length,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getActivityTimeline = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id });
+    if (!candidate) {
+      return res.status(404).json({ msg: "Candidat introuvable" });
+    }
+
+    const recentApplications = await Application.find({
+      candidateId: candidate._id,
+    })
+      .sort({ updatedAt: -1 })
+      .limit(10)
+      .populate({
+        path: "offerId",
+        select: "titre",
+        populate: { path: "companyId", select: "name logo" },
+      });
+
+    const activities = recentApplications.map((app) => ({
+      type: "application_update",
+      date: app.updatedAt,
+      title:
+        app.offerId?.titre || app.offerSnapshot?.titre || "Offre supprimée",
+      company: app.offerId?.companyId?.name || app.offerSnapshot?.entrepriseNom,
+      status: app.status,
+      applicationId: app._id,
+    }));
+
+    res.json(activities);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getRecommendedOffers = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id });
+
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil candidat introuvable" });
+    }
+
+    const skillNames = (candidate.skills || [])
+      .map((s) => s.name?.trim().toLowerCase())
+      .filter(Boolean);
+
+    if (skillNames.length === 0) {
+      return res.json([]);
+    }
+
+    const appliedOfferIds = await Application.find({
+      candidateId: candidate._id,
+    }).distinct("offerId");
+
+    const offerFilter = {
+      actif: true,
+      validationStatus: "approved",
+      _id: { $nin: appliedOfferIds },
+      skills: {
+        $in: skillNames.map((s) => new RegExp(`^${s}$`, "i")),
+      },
+    };
+
+    const candidateWilaya = candidate.residence?.wilaya;
+
+    if (candidateWilaya) {
+      offerFilter.wilaya = candidateWilaya;
+    }
+
+    const offers = await Offer.find(offerFilter)
+      .populate("companyId", "name logo")
+      .sort({ nombreCandidatures: -1 })
+      .limit(20);
+
+    const scoredOffers = offers.map((offer) => {
+      const offerSkills = (offer.skills || []).map((s) =>
+        s.trim().toLowerCase()
+      );
+      const matchingSkills = offerSkills.filter((skill) =>
+        skillNames.includes(skill)
+      );
+      const totalSkills = offerSkills.length || 1;
+      const matchScore = Math.round(
+        (matchingSkills.length / totalSkills) * 100
+      );
+
+      return {
+        ...offer.toObject(),
+        matchScore,
+        matchingSkills,
+      };
+    });
+
+    scoredOffers.sort((a, b) => {
+      if (b.matchScore !== a.matchScore) {
+        return b.matchScore - a.matchScore;
+      }
+      return b.nombreCandidatures - a.nombreCandidatures;
+    });
+
+    res.json(scoredOffers.slice(0, 10));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ msg: err.message });
+  }
+};
+export const confirmInterview = async (req, res) => {
+  try {
+    const { applicationId } = req.params;
+    const candidate = await Candidate.findOne({ userId: req.user.id });
+
+    const application = await Application.findOne({
+      _id: applicationId,
+      candidateId: candidate._id,
+    });
+
+    if (!application)
+      return res.status(404).json({ msg: "Candidature introuvable" });
+
+    if (application.status !== "entretien") {
+      return res.status(400).json({ msg: "Aucun entretien programmé" });
+    }
+
+    application.interviewDetails.confirmedByCandidate = true;
+    await application.save();
+
+    res.json({ msg: "Entretien confirmé ✅" });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+=== controllers\notificationController.js ===
+import Notification from "../models/Notification.js";
+
+export const getMyNotifications = async (req, res) => {
+  try {
+    const notifications = await Notification.find({ userId: req.user.id }).sort(
+      {
+        date: -1,
+      }
+    );
+    res.json(notifications);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getUnreadCount = async (req, res) => {
+  try {
+    const count = await Notification.countDocuments({
+      userId: req.user.id,
+      lu: false,
+    });
+    res.json({ count });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const markAsRead = async (req, res) => {
+  try {
+    const notification = await Notification.findOneAndUpdate(
+      { _id: req.params.id, userId: req.user.id },
+      { lu: true },
+      { new: true }
+    );
+
+    if (!notification)
+      return res.status(404).json({ msg: "Notification introuvable" });
+
+    res.json(notification);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+=== controllers\offerController.js ===
+import Offer from "../models/Offer.js";
+import Company from "../models/Company.js";
+
+const toCursor = (payload) => {
+  return Buffer.from(JSON.stringify(payload)).toString("base64");
+};
+
+const fromCursor = (cursor) => {
+  try {
+    return JSON.parse(Buffer.from(cursor, "base64").toString("utf8"));
+  } catch (e) {
+    return null;
+  }
+};
+
+export const getAllActiveOffers = async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 10;
+    const {
+      cursor,
+      wilaya,
+      sort,
+      search,
+      type,
+      domaine,
+      experienceLevel,
+      minSalary,
+      maxSalary,
+    } = req.query;
+
+    let query = { actif: true, validationStatus: "approved" };
+
+    if (wilaya) {
+      query.wilaya = { $regex: new RegExp(`^${wilaya}$`, "i") };
+    }
+
+    if (type) {
+      query.type = type;
+    }
+
+    if (domaine) {
+      query.domaine = domaine;
+    }
+
+    if (experienceLevel) {
+      query.experienceLevel = experienceLevel;
+    }
+
+    if (minSalary) {
+      query.salaryMax = { $gte: parseInt(minSalary) };
+    }
+
+    if (maxSalary) {
+      query.salaryMin = { $lte: parseInt(maxSalary) };
+    }
+
+    if (search) {
+      const matchingCompanies = await Company.find({
+        name: { $regex: search, $options: "i" },
+      }).select("_id");
+
+      const companyIds = matchingCompanies.map((c) => c._id);
+
+      query.$or = [
+        { titre: { $regex: search, $options: "i" } },
+        { description: { $regex: search, $options: "i" } },
+        { skills: { $in: [new RegExp(search, "i")] } },
+        { companyId: { $in: companyIds } },
+      ];
+    }
+
+    if (cursor) {
+      const decrypted = fromCursor(cursor);
+
+      if (decrypted) {
+        const { id, value } = decrypted;
+
+        if (sort === "popular") {
+          query.$and = [
+            ...(query.$and || []),
+            {
+              $or: [
+                { nombreCandidatures: { $lt: value } },
+                { nombreCandidatures: value, _id: { $lt: id } },
+              ],
+            },
+          ];
+        } else {
+          query.$and = [
+            ...(query.$and || []),
+            {
+              $or: [
+                { datePublication: { $lt: new Date(value) } },
+                { datePublication: new Date(value), _id: { $lt: id } },
+              ],
+            },
+          ];
+        }
+      }
+    }
+
+    let sortQuery = {};
+    if (sort === "popular") {
+      sortQuery = { nombreCandidatures: -1, _id: -1 };
+    } else {
+      sortQuery = { datePublication: -1, _id: -1 };
+    }
+
+    const offers = await Offer.find(query)
+      .populate("companyId", "name logo location industry")
+      .populate("recruteurId", "position")
+      .sort(sortQuery)
+      .limit(limit + 1);
+
+    const hasNextPage = offers.length > limit;
+    const data = hasNextPage ? offers.slice(0, limit) : offers;
+
+    const enrichedData = data.map((offer) => {
+      const isNew =
+        new Date() - new Date(offer.datePublication) < 2 * 24 * 60 * 60 * 1000;
+      return { ...offer.toObject(), isNew };
+    });
+
+    let nextCursor = null;
+    if (hasNextPage && data.length > 0) {
+      const lastItem = data[data.length - 1];
+
+      const cursorValue =
+        sort === "popular"
+          ? lastItem.nombreCandidatures
+          : lastItem.datePublication;
+
+      nextCursor = toCursor({
+        id: lastItem._id,
+        value: cursorValue,
+      });
+    }
+
+    res.json({
+      data: enrichedData,
+      meta: {
+        nextCursor,
+        hasNextPage,
+        limit,
+      },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getOfferDetails = async (req, res) => {
+  try {
+    const offer = await Offer.findOne({ _id: req.params.id, actif: true })
+      .populate("companyId", "name logo website description location size")
+      .populate("recruteurId", "position");
+
+    if (!offer) return res.status(404).json({ msg: "Offre introuvable" });
+
+    const isNew =
+      new Date() - new Date(offer.datePublication) < 2 * 24 * 60 * 60 * 1000;
+
+    res.json({ ...offer.toObject(), isNew });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+=== controllers\recruiterController.js ===
+import Offer from "../models/Offer.js";
+import Recruiter from "../models/Recruiter.js";
+import User from "../models/User.js";
+import Candidate from "../models/Candidate.js";
+import Company from "../models/Company.js";
+import Notification from "../models/Notification.js";
+import Application from "../models/Application.js";
+import Admin from "../models/Admin.js";
+import bcrypt from "bcryptjs";
+
+const getRecruiterProfile = async (userId) => {
+  const recruiter = await Recruiter.findOne({ userId }).populate("companyId");
+  if (!recruiter) throw new Error("Profil recruteur non trouvé");
+  return recruiter;
+};
+
+export const createOffer = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    const recruiter = await getRecruiterProfile(req.user.id);
+
+    if (!user.emailVerified) {
+      return res.status(403).json({
+        msg: "Veuillez confirmer votre email.",
+        code: "EMAIL_NOT_VERIFIED",
+      });
+    }
+
+    if (recruiter.status !== "validated") {
+      return res.status(403).json({
+        msg: "Votre compte recruteur n'est pas validé.",
+        code: "RECRUITER_NOT_VALIDATED",
+        recruiterStatus: recruiter.status,
+      });
+    }
+
+    if (recruiter.companyId.status !== "active") {
+      return res.status(403).json({
+        msg: "Votre entreprise n'est pas encore validée.",
+        code: "COMPANY_NOT_VALIDATED",
+      });
+    }
+
+    if (!recruiter.permissions.postJobs) {
+      return res.status(403).json({
+        msg: "Vous n'avez pas la permission de publier des offres.",
+        code: "PERMISSION_DENIED",
+      });
+    }
+
+    const {
+      titre,
+      description,
+      requirements,
+      domaine,
+      type,
+      salaryMin,
+      salaryMax,
+      experienceLevel,
+      skills,
+      wilaya,
+      visibility,
+      candidateSearchMode,
+    } = req.body;
+
+    if (!titre || !description || !requirements) {
+      return res.status(400).json({
+        msg: "Titre, description et requirements sont obligatoires.",
+      });
+    }
+
+    const newOffer = new Offer({
+      recruteurId: recruiter._id,
+      companyId: recruiter.companyId._id,
+      titre,
+      description,
+      requirements,
+      domaine,
+      type: type || "full-time",
+      salaryMin,
+      salaryMax,
+      experienceLevel,
+      skills: skills || [],
+      wilaya,
+      visibility: visibility || {
+        isPublic: true,
+        acceptsDirectApplications: true,
+      },
+      candidateSearchMode: candidateSearchMode || "disabled",
+      validationStatus: "pending",
+      actif: false,
+      datePublication: null,
+    });
+
+    const savedOffer = await newOffer.save();
+
+    const admins = await User.find({ role: "admin" });
+    const notificationPromises = admins.map((admin) =>
+      Notification.create({
+        userId: admin._id,
+        message: `Nouvelle offre à valider : "${savedOffer.titre}" de ${recruiter.companyId.name}`,
+        type: "info",
+      })
+    );
+    await Promise.all(notificationPromises);
+
+    res.status(201).json({
+      msg: "Offre créée et en attente de validation ✅",
+      offer: savedOffer,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getMyOffers = async (req, res) => {
+  try {
+    const recruiter = await getRecruiterProfile(req.user.id);
+
+    const offers = await Offer.find({ recruteurId: recruiter._id }).sort({
+      createdAt: -1,
+    });
+    res.json(offers);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const updateOffer = async (req, res) => {
+  try {
+    const recruiter = await getRecruiterProfile(req.user.id);
+    const offer = await Offer.findById(req.params.id);
+
+    if (!offer) return res.status(404).json({ msg: "Offre introuvable" });
+
+    if (offer.recruteurId.toString() !== recruiter._id.toString()) {
+      return res.status(403).json({ msg: "Action non autorisée" });
+    }
+
+    const updatedOffer = await Offer.findByIdAndUpdate(
+      req.params.id,
+      { $set: req.body },
+      { new: true }
+    );
+
+    res.json({ msg: "Offre mise à jour ✅", offer: updatedOffer });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const deactivateOffer = async (req, res) => {
+  try {
+    const recruiter = await getRecruiterProfile(req.user.id);
+    const offer = await Offer.findById(req.params.id);
+
+    if (!offer) return res.status(404).json({ msg: "Offre introuvable" });
+    if (offer.recruteurId.toString() !== recruiter._id.toString()) {
+      return res.status(403).json({ msg: "Action non autorisée" });
+    }
+
+    offer.actif = false;
+    await offer.save();
+
+    res.json({ msg: "Offre désactivée ⛔", offer });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getOfferApplications = async (req, res) => {
+  try {
+    const recruiter = await getRecruiterProfile(req.user.id);
+    const { offerId } = req.params;
+
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || 20;
+    const skip = (page - 1) * limit;
+
+    const offerCheck = await Offer.findOne({
+      _id: offerId,
+      recruteurId: recruiter._id,
+    })
+      .select("_id")
+      .lean();
+
+    if (!offerCheck) {
+      return res
+        .status(404)
+        .json({ msg: "Offre introuvable ou non autorisée" });
+    }
+
+    const applications = await Application.find({ offerId: offerId })
+      .sort({ datePostulation: -1 })
+      .skip(skip)
+      .limit(limit)
+
+      .select("-coverLetter")
+      .populate({
+        path: "candidateId",
+
+        select: "cvs userId profilePicture location",
+        populate: {
+          path: "userId",
+          select: "nom email",
+        },
+      })
+      .lean();
+
+    const validApplications = applications.filter(
+      (app) => app.candidateId !== null
+    );
+
+    const total = await Application.countDocuments({ offerId: offerId });
+
+    return res.json({
+      data: validApplications,
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({ msg: err.message });
+  }
+};
+
+export const updateApplicationStatus = async (req, res) => {
+  try {
+    const { statut } = req.body;
+    const { appId } = req.params;
+    const recruiter = await getRecruiterProfile(req.user.id);
+
+    const application = await Application.findById(appId).populate("offerId");
+
+    if (!application)
+      return res.status(404).json({ msg: "Candidature introuvable" });
+
+    const offer = await Offer.findById(application.offerId);
+
+    if (offer.recruteurId.toString() !== recruiter._id.toString()) {
+      return res.status(403).json({ msg: "Action non autorisée" });
+    }
+
+    application.status = statut;
+    await application.save();
+
+    await Notification.create({
+      userId: application.candidateId,
+      message: `Votre candidature pour "${offer.titre}" est passée au statut : ${statut}.`,
+      type: "info",
+    });
+
+    res.json({ msg: `Statut mis à jour : ${statut}`, application });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const updateRecruiterProfile = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const { nom, motDePasse, telephone } = req.body;
+
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ msg: "Utilisateur introuvable" });
+
+    if (nom) user.nom = nom;
+    if (motDePasse) {
+      const hash = await bcrypt.hash(motDePasse, 10);
+      user.motDePasse = hash;
+    }
+    await user.save();
+
+    const recruiter = await Recruiter.findOne({ userId });
+    if (!recruiter)
+      return res.status(404).json({ msg: "Profil recruteur introuvable" });
+
+    if (telephone) recruiter.telephone = telephone;
+
+    await recruiter.save();
+
+    res.json({
+      msg: "Profil mis à jour avec succès ✅",
+      user: { nom: user.nom, email: user.email },
+      recruiter: {
+        telephone: recruiter.telephone,
+        position: recruiter.position,
+        isAdmin: recruiter.isAdmin,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+function getStatusMessage(status) {
+  const messages = {
+    pending_validation: "En attente de validation initiale",
+    pending_documents: "Documents demandés par l'administration",
+    pending_info: "Informations complémentaires demandées",
+    pending_revalidation: "Réponse en cours d'examen",
+    rejected: "Compte refusé",
+  };
+  return messages[status] || status;
+}
+
+export const updateCompanyDetails = async (req, res) => {
+  try {
+    const recruiter = await getRecruiterProfile(req.user.id);
+
+    if (!recruiter.isAdmin) {
+      return res.status(403).json({
+        msg: "Accès refusé. Seul l'administrateur de l'entreprise peut modifier ces informations.",
+      });
+    }
+
+    const { website, description, industry, location, size, logo } = req.body;
+
+    const updatedCompany = await Company.findByIdAndUpdate(
+      recruiter.companyId._id,
+      {
+        $set: {
+          website,
+          description,
+          industry,
+          location,
+          size,
+          logo,
+        },
+      },
+      { new: true }
+    );
+
+    res.json({
+      msg: "Informations de l'entreprise mises à jour ✅",
+      company: updatedCompany,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getRecruiterDashboard = async (req, res) => {
+  try {
+    const recruiter = await getRecruiterProfile(req.user.id);
+
+    const now = new Date();
+    const sevenDaysAgo = new Date(now - 7 * 24 * 60 * 60 * 1000);
+
+    const myOfferIds = await Offer.find({
+      recruteurId: recruiter._id,
+    }).distinct("_id");
+
+    const [
+      activeOffers,
+      pendingOffers,
+      rejectedOffers,
+      totalApplications,
+      newApplicationsThisWeek,
+      applicationsByStatus,
+      topOffers,
+      recentApplications,
+    ] = await Promise.all([
+      Offer.countDocuments({
+        recruteurId: recruiter._id,
+        actif: true,
+        validationStatus: "approved",
+      }),
+      Offer.countDocuments({
+        recruteurId: recruiter._id,
+        validationStatus: "pending",
+      }),
+      Offer.countDocuments({
+        recruteurId: recruiter._id,
+        validationStatus: { $in: ["rejected", "changes_requested"] },
+      }),
+      Application.countDocuments({ offerId: { $in: myOfferIds } }),
+      Application.countDocuments({
+        offerId: { $in: myOfferIds },
+        datePostulation: { $gte: sevenDaysAgo },
+      }),
+      Application.aggregate([
+        { $match: { offerId: { $in: myOfferIds } } },
+        { $group: { _id: "$status", count: { $sum: 1 } } },
+      ]),
+      Offer.find({ recruteurId: recruiter._id, actif: true })
+        .sort({ nombreCandidatures: -1 })
+        .limit(5)
+        .select("titre nombreCandidatures datePublication"),
+      Application.find({ offerId: { $in: myOfferIds } })
+        .populate({
+          path: "candidateId",
+          select: "profilePicture",
+          populate: { path: "userId", select: "nom" },
+        })
+        .populate("offerId", "titre")
+        .sort({ datePostulation: -1 })
+        .limit(10),
+    ]);
+
+    const statusMap = {};
+    applicationsByStatus.forEach((s) => {
+      statusMap[s._id] = s.count;
+    });
+
+    const alerts = [];
+    if (recruiter.companyId.status !== "active") {
+      alerts.push({
+        type: "warning",
+        message: "Votre entreprise est en attente de validation",
+      });
+    }
+    if (recruiter.status !== "validated") {
+      alerts.push({
+        type: "warning",
+        message: `Statut du compte : ${recruiter.status}`,
+        statusMessage: getStatusMessage(recruiter.status),
+      });
+    }
+    if (pendingOffers > 0) {
+      alerts.push({
+        type: "info",
+        message: `${pendingOffers} offre(s) en attente de validation`,
+      });
+    }
+    if (rejectedOffers > 0) {
+      alerts.push({
+        type: "error",
+        message: `${rejectedOffers} offre(s) nécessitent des modifications`,
+      });
+    }
+
+    const pendingRequests = recruiter.validationRequests.filter(
+      (r) => r.status === "pending"
+    );
+    if (pendingRequests.length > 0) {
+      alerts.push({
+        type: "action_required",
+        message: "Des documents ou informations sont demandés",
+        requests: pendingRequests,
+      });
+    }
+
+    res.json({
+      overview: {
+        activeOffers,
+        pendingOffers,
+        rejectedOffers,
+        totalApplications,
+        newApplicationsThisWeek,
+      },
+      applicationsByStatus: statusMap,
+      topOffers,
+      recentApplications,
+      company: {
+        name: recruiter.companyId.name,
+        status: recruiter.companyId.status,
+        logo: recruiter.companyId.logo,
+      },
+      recruiterStatus: recruiter.status,
+      alerts,
+      permissions: recruiter.permissions,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getOfferStats = async (req, res) => {
+  try {
+    const recruiter = await getRecruiterProfile(req.user.id);
+    const { offerId } = req.params;
+
+    const offer = await Offer.findOne({
+      _id: offerId,
+      recruteurId: recruiter._id,
+    });
+
+    if (!offer) {
+      return res.status(404).json({ msg: "Offre introuvable" });
+    }
+
+    const [applicationsByStatus, applicationsByDay] = await Promise.all([
+      Application.aggregate([
+        { $match: { offerId: offer._id } },
+        { $group: { _id: "$status", count: { $sum: 1 } } },
+      ]),
+      Application.aggregate([
+        { $match: { offerId: offer._id } },
+        {
+          $group: {
+            _id: {
+              $dateToString: { format: "%Y-%m-%d", date: "$datePostulation" },
+            },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: 1 } },
+        { $limit: 30 },
+      ]),
+    ]);
+
+    const statusMap = {};
+    applicationsByStatus.forEach((s) => {
+      statusMap[s._id] = s.count;
+    });
+
+    res.json({
+      offer: {
+        _id: offer._id,
+        titre: offer.titre,
+        actif: offer.actif,
+        validationStatus: offer.validationStatus,
+        datePublication: offer.datePublication,
+        nombreCandidatures: offer.nombreCandidatures,
+      },
+      applicationsByStatus: statusMap,
+      applicationsByDay,
+      conversionRate:
+        offer.nombreCandidatures > 0
+          ? Math.round(
+              ((statusMap["accepté"] || 0) / offer.nombreCandidatures) * 100
+            )
+          : 0,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const scheduleInterview = async (req, res) => {
+  try {
+    const recruiter = await getRecruiterProfile(req.user.id);
+    const { appId } = req.params;
+    const { scheduledAt, location, meetingLink, notes } = req.body;
+
+    const application = await Application.findById(appId).populate("offerId");
+    if (!application) {
+      return res.status(404).json({ msg: "Candidature introuvable." });
+    }
+
+    const offer = await Offer.findById(application.offerId);
+    if (offer.recruteurId.toString() !== recruiter._id.toString()) {
+      return res.status(403).json({ msg: "Non autorisé." });
+    }
+
+    if (!recruiter.permissions.scheduleInterviews && !recruiter.isAdmin) {
+      return res.status(403).json({
+        msg: "Vous n'avez pas la permission de programmer des entretiens.",
+      });
+    }
+
+    application.status = "entretien";
+    application.interviewDetails = {
+      scheduledAt: new Date(scheduledAt),
+      location,
+      meetingLink,
+      notes,
+      confirmedByCandidate: false,
+    };
+    await application.save();
+
+    const candidate = await Candidate.findById(application.candidateId);
+    await Notification.create({
+      userId: candidate.userId,
+      message: `Entretien programmé pour "${offer.titre}" le ${new Date(
+        scheduledAt
+      ).toLocaleDateString("fr-FR")}`,
+      type: "validation",
+    });
+
+    res.json({ msg: "Entretien programmé avec succès.", application });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getRecruiterProfileEndpoint = async (req, res) => {
+  try {
+    const recruiter = await Recruiter.findOne({ userId: req.user.id })
+      .populate("userId", "nom email emailVerified")
+      .populate("companyId");
+
+    if (!recruiter) {
+      return res.status(404).json({ msg: "Profil recruteur introuvable" });
+    }
+
+    const alerts = [];
+    const user = await User.findById(req.user.id);
+
+    if (!user.emailVerified) {
+      alerts.push({
+        type: "critical",
+        message: "Email non vérifié",
+        action: "verify_email",
+      });
+    }
+
+    if (recruiter.status === "pending_validation") {
+      alerts.push({
+        type: "warning",
+        message: "Compte en attente de validation par un administrateur",
+      });
+    }
+
+    if (recruiter.status === "rejected") {
+      alerts.push({
+        type: "error",
+        message: "Compte rejeté",
+        reason: recruiter.rejectionReason,
+      });
+    }
+
+    if (recruiter.companyId?.status === "pending") {
+      alerts.push({
+        type: "warning",
+        message: "Entreprise en attente de validation",
+      });
+    }
+
+    const pendingRequests = recruiter.validationRequests?.filter(
+      (r) => r.status === "pending"
+    );
+
+    if (pendingRequests?.length > 0) {
+      alerts.push({
+        type: "action_required",
+        message:
+          "Des documents ou informations sont demandés par l'administration",
+        requests: pendingRequests,
+      });
+    }
+
+    res.json({
+      recruiter,
+      alerts,
+      canPostOffers:
+        user.emailVerified &&
+        recruiter.status === "validated" &&
+        recruiter.companyId?.status === "active" &&
+        recruiter.permissions.postJobs,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getCompanyTeam = async (req, res) => {
+  try {
+    const recruiter = await Recruiter.findOne({ userId: req.user.id });
+
+    if (!recruiter) {
+      return res.status(404).json({ msg: "Profil introuvable" });
+    }
+
+    const team = await Recruiter.find({ companyId: recruiter.companyId })
+      .populate("userId", "nom email")
+      .select("position permissions isAdmin status createdAt");
+
+    res.json(team);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const submitValidationResponse = async (req, res) => {
+  try {
+    const recruiter = await Recruiter.findOne({ userId: req.user.id });
+
+    if (!recruiter) {
+      return res.status(404).json({ msg: "Profil introuvable." });
+    }
+
+    const { requestId, text } = req.body;
+    const documents = req.files?.map((f) => f.path.replace(/\\/g, "/")) || [];
+
+    const request = recruiter.validationRequests.id(requestId);
+
+    if (!request) {
+      return res.status(404).json({ msg: "Demande introuvable." });
+    }
+
+    if (request.status !== "pending") {
+      return res.status(400).json({ msg: "Cette demande a déjà été traitée." });
+    }
+
+    request.response = {
+      text,
+      documents,
+      submittedAt: new Date(),
+    };
+    request.status = "submitted";
+
+    recruiter.status = "pending_revalidation";
+
+    await recruiter.save();
+
+    const admins = await Admin.find({
+      "permissions.validateRecruiters": true,
+      status: "active",
+    }).populate("userId", "_id");
+
+    const notifPromises = admins.map((admin) =>
+      Notification.create({
+        userId: admin.userId._id,
+        message: `Le recruteur a répondu à une demande de validation.`,
+        type: "info",
+      })
+    );
+    await Promise.all(notifPromises);
+
+    res.json({ msg: "Réponse soumise. Vous serez notifié du résultat." });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+export const getRecruiterById = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const recruiter = await Recruiter.findById(id)
+      .populate("userId", "nom email role accountStatus createdAt")
+      .populate("companyId", "name logo website location description status");
+
+    if (!recruiter) {
+      return res.status(404).json({ msg: "Recruteur introuvable" });
+    }
+
+    const isAdmin = req.user && req.user.role === "admin";
+
+    if (!isAdmin) {
+      if (recruiter.status !== "validated") {
+        return res.status(404).json({ msg: "Ce profil n'est pas accessible." });
+      }
+
+      if (recruiter.companyId?.status !== "active") {
+        return res
+          .status(404)
+          .json({ msg: "L'entreprise de ce recruteur n'est pas active." });
+      }
+    }
+
+    let responseData = {
+      _id: recruiter._id,
+      nom: recruiter.userId.nom,
+      position: recruiter.position,
+      entreprise: {
+        _id: recruiter.companyId._id,
+        nom: recruiter.companyId.name,
+        logo: recruiter.companyId.logo,
+        location: recruiter.companyId.location,
+        website: recruiter.companyId.website,
+        description: recruiter.companyId.description,
+      },
+      dateCreation: recruiter.createdAt,
+    };
+
+    if (isAdmin) {
+      responseData.adminDetails = {
+        email: recruiter.userId.email,
+        telephone: recruiter.telephone,
+        status: recruiter.status,
+        userStatus: recruiter.userId.accountStatus,
+        isAdminOfCompany: recruiter.isAdmin,
+        permissions: recruiter.permissions,
+        validationRequests: recruiter.validationRequests,
+        rejectionReason: recruiter.rejectionReason,
+        userId: recruiter.userId._id,
+      };
+    }
+
+    res.json(responseData);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+export const getCandidateFullProfile = async (req, res) => {
+  try {
+    const { candidateId } = req.params;
+
+    const candidate = await Candidate.findById(candidateId)
+      .populate("userId", "nom email")
+      .select("-favoris");
+
+    if (!candidate) {
+      return res.status(404).json({ msg: "Candidat introuvable" });
+    }
+
+    res.json(candidate);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+=== controllers\skillController.js ===
+import Skill from "../models/Skills.js";
+
+export const createSkill = async (req, res) => {
+  try {
+    const { name, category } = req.body;
+
+    const normalizedName = name.trim();
+
+    const exist = await Skill.findOne({
+      name: { $regex: new RegExp(`^${normalizedName}$`, "i") },
+    });
+    if (exist) return res.status(400).json({ msg: "Ce skill existe déjà." });
+
+    const newSkill = await Skill.create({ name: normalizedName, category });
+    res.status(201).json(newSkill);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getSkills = async (req, res) => {
+  try {
+    const { search } = req.query;
+    let query = {};
+
+    if (search) {
+      query.name = { $regex: search, $options: "i" };
+    }
+
+    const skills = await Skill.find(query).sort({ name: 1 }).limit(50);
+    res.json(skills);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const deleteSkill = async (req, res) => {
+  try {
+    await Skill.findByIdAndDelete(req.params.id);
+    res.json({ msg: "Skill supprimé" });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+=== controllers\supportController.js ===
+import SupportTicket from "../models/SupportTicket.js";
+import Admin from "../models/Admin.js";
+import Notification from "../models/Notification.js";
+import { logAdminAction } from "../models/AdminLog.js";
+
+export const createTicket = async (req, res) => {
+  try {
+    const { subject, description, category } = req.body;
+    const attachments = req.files?.map((f) => f.path.replace(/\\/g, "/")) || [];
+
+    if (!subject || !description || !category) {
+      return res.status(400).json({
+        msg: "Sujet, description et catégorie sont obligatoires.",
+      });
+    }
+
+    const ticket = await SupportTicket.create({
+      userId: req.user.id,
+      subject,
+      description,
+      category,
+      attachments,
+    });
+
+    const admins = await Admin.find({
+      label: ticket.assignedToLabel,
+      status: "active",
+      "permissions.handleSupportTickets": true,
+    }).populate("userId", "_id");
+
+    const notifPromises = admins.map((admin) =>
+      Notification.create({
+        userId: admin.userId._id,
+        message: `Nouveau ticket support: "${subject}"`,
+        type: "info",
+      })
+    );
+    await Promise.all(notifPromises);
+
+    res.status(201).json({ msg: "Ticket créé avec succès.", ticket });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getMyTickets = async (req, res) => {
+  try {
+    const tickets = await SupportTicket.find({ userId: req.user.id })
+      .sort({ createdAt: -1 })
+      .select("-messages.adminId");
+
+    res.json(tickets);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getTicketDetails = async (req, res) => {
+  try {
+    const { ticketId } = req.params;
+
+    const ticket = await SupportTicket.findOne({
+      _id: ticketId,
+      userId: req.user.id,
+    });
+
+    if (!ticket) {
+      return res.status(404).json({ msg: "Ticket introuvable." });
+    }
+
+    res.json(ticket);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const replyToTicket = async (req, res) => {
+  try {
+    const { ticketId } = req.params;
+    const { content } = req.body;
+    const attachments = req.files?.map((f) => f.path.replace(/\\/g, "/")) || [];
+
+    if (!content) {
+      return res.status(400).json({ msg: "Le contenu est obligatoire." });
+    }
+
+    const ticket = await SupportTicket.findOne({
+      _id: ticketId,
+      userId: req.user.id,
+      status: { $nin: ["closed"] },
+    });
+
+    if (!ticket) {
+      return res.status(404).json({ msg: "Ticket introuvable ou fermé." });
+    }
+
+    ticket.messages.push({
+      from: "user",
+      content,
+      attachments,
+    });
+
+    if (ticket.status === "awaiting_user") {
+      ticket.status = "in_progress";
+    }
+
+    await ticket.save();
+
+    if (ticket.assignedTo) {
+      const admin = await Admin.findById(ticket.assignedTo).populate("userId");
+      if (admin) {
+        await Notification.create({
+          userId: admin.userId._id,
+          message: `Nouvelle réponse sur le ticket: "${ticket.subject}"`,
+          type: "info",
+        });
+      }
+    }
+
+    res.json({ msg: "Réponse envoyée.", ticket });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+=== middleware\adminPermissions.js ===
+import Admin from "../models/Admin.js";
+
+export const requireAdminPermission = (permission) => {
+  return async (req, res, next) => {
+    try {
+      const admin = await Admin.findOne({ userId: req.user.id });
+
+      if (!admin) {
+        return res.status(403).json({ msg: "Accès administrateur requis." });
+      }
+
+      if (admin.status !== "active") {
+        return res
+          .status(403)
+          .json({ msg: "Votre compte administrateur est suspendu." });
+      }
+
+      if (!admin.hasPermission(permission)) {
+        return res.status(403).json({
+          msg: `Permission "${permission}" requise.`,
+          code: "PERMISSION_DENIED",
+        });
+      }
+
+      req.admin = admin;
+      next();
+    } catch (err) {
+      res.status(500).json({ msg: err.message });
+    }
+  };
+};
+
+export const requireActiveAdmin = async (req, res, next) => {
+  try {
+    const admin = await Admin.findOne({ userId: req.user.id });
+
+    if (!admin || admin.status !== "active") {
+      return res
+        .status(403)
+        .json({ msg: "Accès administrateur actif requis." });
+    }
+
+    req.admin = admin;
+    next();
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+=== middleware\auth.js ===
+import jwt from "jsonwebtoken";
+
+export default function auth(req, res, next) {
+  const token = req.header("Authorization");
+  if (!token) return res.status(401).json({ msg: "Pas de token fourni" });
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch {
+    res.status(401).json({ msg: "Token invalide" });
+  }
+}
+
+
+=== middleware\optionalAuth.js ===
+import jwt from "jsonwebtoken";
+
+export const optionalAuth = (req, res, next) => {
+  const token = req.header("Authorization");
+
+  if (!token) {
+    req.user = null;
+    return next();
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+  } catch (err) {
+    req.user = null;
+  }
+  next();
+};
+
+
+=== middleware\requireEmailVerification.js ===
+import User from "../models/User.js";
+
+export const requireEmailVerification = async (req, res, next) => {
+  if (!req.user) {
+    return res.status(401).json({ msg: "Utilisateur non authentifié." });
+  }
+
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ msg: "Utilisateur introuvable." });
+    }
+
+    if (!user.emailVerified) {
+      return res.status(403).json({
+        msg: "Veuillez confirmer votre adresse e-mail pour effectuer cette action.",
+        code: "EMAIL_NOT_VERIFIED",
+      });
+    }
+    next();
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+=== middleware\roles.js ===
+export const authRole = (roles = []) => {
+  return (req, res, next) => {
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({ msg: "Accès refusé : rôle non autorisé" });
+    }
+    next();
+  };
+};
+
+
+=== models\Admin.js ===
+import mongoose from "mongoose";
+
+const adminSchema = new mongoose.Schema(
+  {
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      unique: true,
+    },
+
+    label: {
+      type: String,
+      enum: [
+        "super_admin",
+        "support",
+        "technical",
+        "operational",
+        "recruitment",
+        "moderation",
+        "product",
+      ],
+      default: "support",
+    },
+
+    permissions: {
+      createAdmin: { type: Boolean, default: false },
+      deleteAdmin: { type: Boolean, default: false },
+      editAdminPermissions: { type: Boolean, default: false },
+      assignAdminLabels: { type: Boolean, default: false },
+
+      validateOffers: { type: Boolean, default: false },
+      validateRecruiters: { type: Boolean, default: false },
+      validateCompanies: { type: Boolean, default: false },
+
+      banUsers: { type: Boolean, default: false },
+      suspendUsers: { type: Boolean, default: false },
+
+      proposeCandidates: { type: Boolean, default: false },
+
+      manageAnnouncements: { type: Boolean, default: false },
+      sendNotifications: { type: Boolean, default: false },
+
+      handleSupportTickets: { type: Boolean, default: false },
+
+      viewStats: { type: Boolean, default: true },
+      viewLogs: { type: Boolean, default: false },
+    },
+
+    status: {
+      type: String,
+      enum: ["active", "suspended", "revoked"],
+      default: "active",
+    },
+    suspensionReason: String,
+    suspendedUntil: Date,
+
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+  },
+  { timestamps: true }
+);
+
+adminSchema.methods.hasPermission = function (permission) {
+  if (this.label === "super_admin") return true;
+  return this.permissions[permission] === true;
+};
+
+export default mongoose.model("Admin", adminSchema);
+
+
+=== models\AdminLog.js ===
+import mongoose from "mongoose";
+
+const adminLogSchema = new mongoose.Schema(
+  {
+    adminId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      index: true,
+    },
+    action: {
+      type: String,
+      enum: [
+        "admin_created",
+        "admin_deleted",
+        "admin_suspended",
+        "admin_reactivated",
+        "admin_permissions_updated",
+        "admin_label_changed",
+        "recruiter_validated",
+        "recruiter_rejected",
+        "recruiter_suspended",
+        "recruiter_documents_requested",
+        "recruiter_revalidated",
+        "company_validated",
+        "company_rejected",
+        "company_suspended",
+        "offer_approved",
+        "offer_rejected",
+        "offer_changes_requested",
+        "offer_deleted",
+        "user_banned",
+        "user_unbanned",
+        "user_message_sent",
+        "candidate_proposed",
+        "announcement_created",
+        "announcement_updated",
+        "announcement_deleted",
+        "ticket_responded",
+        "ticket_closed",
+        "ticket_reassigned",
+        "company_created_by_admin",
+        "company_updated_by_admin",
+        "company_admin_assigned",
+        "company_admin_removed",
+      ],
+      required: true,
+      index: true,
+    },
+    targetType: {
+      type: String,
+      enum: [
+        "user",
+        "recruiter",
+        "company",
+        "offer",
+        "application",
+        "announcement",
+        "ticket",
+        "admin",
+      ],
+    },
+    targetId: { type: mongoose.Schema.Types.ObjectId },
+    details: { type: mongoose.Schema.Types.Mixed },
+    ip: { type: String },
+    userAgent: { type: String },
+  },
+  { timestamps: true }
+);
+
+adminLogSchema.index({ createdAt: -1 });
+adminLogSchema.index({ action: 1, createdAt: -1 });
+
+const AdminLog = mongoose.model("AdminLog", adminLogSchema);
+
+export const logAdminAction = async (
+  adminId,
+  action,
+  target = {},
+  details = {},
+  req = null
+) => {
+  try {
+    await AdminLog.create({
+      adminId,
+      action,
+      targetType: target.type,
+      targetId: target.id,
+      details,
+      ip: req?.ip,
+      userAgent: req?.get("User-Agent"),
+    });
+  } catch (err) {
+    console.error("Erreur lors du logging admin:", err);
+  }
+};
+
+export default AdminLog;
+
+
+=== models\Announcement.js ===
+import mongoose from "mongoose";
+
+const announcementSchema = new mongoose.Schema(
+  {
+    title: { type: String, required: true },
+    content: { type: String, required: true },
+    targetAudience: {
+      type: String,
+      enum: ["all", "admins", "recruiters", "candidates"],
+      default: "all",
+    },
+    status: {
+      type: String,
+      enum: ["draft", "scheduled", "published", "expired", "archived"],
+      default: "draft",
+    },
+    publishAt: { type: Date },
+    expiresAt: { type: Date },
+    priority: {
+      type: String,
+      enum: ["low", "normal", "high", "critical"],
+      default: "normal",
+    },
+    displayType: {
+      type: String,
+      enum: ["banner", "modal", "inline"],
+      default: "inline",
+    },
+    viewCount: { type: Number, default: 0 },
+    dismissedBy: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+    updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+  },
+  { timestamps: true }
+);
+
+announcementSchema.index({ status: 1, publishAt: 1, expiresAt: 1 });
+
+export default mongoose.model("Announcement", announcementSchema);
+
+
+=== models\Application.js ===
+import mongoose from "mongoose";
+
+const applicationSchema = new mongoose.Schema(
+  {
+    offerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Offer",
+      required: true,
+    },
+
+    candidateId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Candidate",
+      required: true,
+    },
+
+    offerSnapshot: {
+      titre: { type: String },
+      entrepriseNom: { type: String },
+      companyId: { type: mongoose.Schema.Types.ObjectId, ref: "Company" },
+      location: { type: String },
+      salaryMin: { type: Number },
+      salaryMax: { type: Number },
+      type: { type: String },
+    },
+
+    cvUrl: { type: String, required: true },
+    coverLetter: { type: String },
+
+    status: {
+      type: String,
+      enum: [
+        "en attente",
+        "vu",
+        "présélectionné",
+        "entretien",
+
+        "accepté",
+        "embauché",
+        "rejeté",
+        "proposé",
+        "retiré",
+      ],
+      default: "en attente",
+    },
+
+    interviewDetails: {
+      scheduledAt: Date,
+      location: String,
+      meetingLink: String,
+      notes: String,
+      confirmedByCandidate: Boolean,
+    },
+
+    recommandeParAdmin: { type: Boolean, default: false },
+
+    datePostulation: { type: Date, default: Date.now },
+  },
+  { timestamps: true }
+);
+
+applicationSchema.index({ offerId: 1, candidateId: 1 }, { unique: true });
+applicationSchema.index({ offerId: 1, datePostulation: -1 });
+applicationSchema.index({ candidateId: 1, datePostulation: -1 });
+
+export default mongoose.model("Application", applicationSchema);
+
+
+=== models\Candidate.js ===
+import mongoose from "mongoose";
+
+const educationSchema = new mongoose.Schema({
+  institut: { type: String, required: true },
+  degree: { type: String, required: true },
+  fieldOfStudy: { type: String },
+  startDate: { type: Date },
+  endDate: { type: Date },
+  description: { type: String },
+});
+
+const experienceSchema = new mongoose.Schema({
+  jobTitle: { type: String, required: true },
+  company: { type: String, required: true },
+  startDate: { type: Date },
+  endDate: { type: Date },
+  description: { type: String },
+});
+
+const skillSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  level: {
+    type: String,
+    enum: ["beginner", "intermediate", "expert"],
+    default: "beginner",
+  },
+});
+
+const candidateSchema = new mongoose.Schema(
+  {
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      unique: true,
+    },
+
+    dateOfBirth: { type: Date },
+    bio: { type: String, maxLength: 1000 },
+    gender: {
+      type: String,
+      enum: ["homme", "femme"],
+    },
+
+    residence: {
+      wilaya: { type: String },
+      commune: { type: String },
+      address: { type: String },
+    },
+
+    searchPreferences: {
+      wilayas: [{ type: String }],
+      remoteOnly: { type: Boolean, default: false },
+      willingToRelocate: { type: Boolean, default: false },
+    },
+
+    desiredPosition: { type: String },
+
+    desiredJobTypes: [
+      {
+        type: String,
+        enum: [
+          "full-time",
+          "part-time",
+          "remote",
+          "internship",
+          "freelance",
+          "CDI",
+          "CDD",
+        ],
+      },
+    ],
+
+    profilePicture: { type: String },
+    telephone: { type: String },
+    links: {
+      website: { type: String },
+      linkedin: { type: String },
+      github: { type: String },
+      portfolio: { type: String },
+    },
+
+    autoriserProposition: { type: Boolean, default: true },
+
+    favoris: [
+      {
+        offerId: { type: mongoose.Schema.Types.ObjectId, ref: "Offer" },
+        savedAt: { type: Date, default: Date.now },
+      },
+    ],
+
+    cvs: [
+      {
+        url: { type: String, required: true },
+        dateDepot: { type: Date, default: Date.now },
+        score: { type: Number, default: 0 },
+      },
+    ],
+
+    skills: [skillSchema],
+    experiences: [experienceSchema],
+    education: [educationSchema],
+  },
+  { timestamps: true }
+);
+candidateSchema.index({ userId: 1 });
+candidateSchema.index({ "residence.wilaya": 1 });
+candidateSchema.index({ autoriserProposition: 1 });
+export default mongoose.model("Candidate", candidateSchema);
+
+
+=== models\Company.js ===
+import mongoose from "mongoose";
+
+const companySchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true, unique: true },
+    logo: { type: String },
+    website: { type: String },
+    description: { type: String },
+    industry: { type: String },
+    location: { type: String },
+    size: { type: String },
+
+    status: {
+      type: String,
+      enum: ["pending", "active", "rejected"],
+      default: "pending",
+    },
+  },
+  { timestamps: true }
+);
+companySchema.index({ status: 1 });
+companySchema.index({ name: "text" });
+export default mongoose.model("Company", companySchema);
+
+
+=== models\Notification.js ===
+import mongoose from "mongoose";
+
+const notificationSchema = new mongoose.Schema(
+  {
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+    message: { type: String, required: true },
+    type: {
+      type: String,
+      enum: ["info", "alerte", "validation"],
+      default: "info",
+    },
+    lu: { type: Boolean, default: false },
+    date: { type: Date, default: Date.now },
+  },
+  { timestamps: true }
+);
+
+notificationSchema.index({ userId: 1, lu: 1 });
+notificationSchema.index({ userId: 1, date: -1 });
+
+export default mongoose.model("Notification", notificationSchema);
+
+
+=== models\Offer.js ===
+import mongoose from "mongoose";
+
+const offerSchema = new mongoose.Schema(
+  {
+    recruteurId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Recruiter",
+      required: true,
+    },
+    companyId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Company",
+      required: true,
+    },
+
+    titre: { type: String, required: true },
+    description: { type: String, required: true },
+    requirements: { type: String, required: true },
+
+    domaine: { type: String },
+    type: {
+      type: String,
+      enum: [
+        "full-time",
+        "part-time",
+        "remote",
+        "internship",
+        "freelance",
+        "CDI",
+        "CDD",
+      ],
+      default: "full-time",
+    },
+    salaryMin: { type: Number },
+    salaryMax: { type: Number },
+    experienceLevel: { type: String, enum: ["junior", "mid", "senior"] },
+    skills: [{ type: String, index: true }],
+    wilaya: { type: String },
+
+    validationStatus: {
+      type: String,
+      enum: ["draft", "pending", "approved", "rejected", "changes_requested"],
+      default: "pending",
+    },
+    validationHistory: [
+      {
+        status: String,
+        message: String,
+        adminId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+        date: { type: Date, default: Date.now },
+      },
+    ],
+    rejectionReason: String,
+
+    visibility: {
+      isPublic: { type: Boolean, default: true },
+      acceptsDirectApplications: { type: Boolean, default: true },
+    },
+
+    candidateSearchMode: {
+      type: String,
+      enum: ["disabled", "manual", "automatic"],
+      default: "disabled",
+    },
+
+    actif: { type: Boolean, default: false },
+    datePublication: { type: Date },
+    nombreCandidatures: { type: Number, default: 0 },
+  },
+  { timestamps: true }
+);
+
+offerSchema.methods.isVisible = function () {
+  return this.validationStatus === "approved" && this.actif;
+};
+
+offerSchema.index({ titre: "text", description: "text", skills: "text" });
+
+export default mongoose.model("Offer", offerSchema);
+
+
+=== models\Recruiter.js ===
+import mongoose from "mongoose";
+
+const recruiterSchema = new mongoose.Schema(
+  {
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      unique: true,
+    },
+    companyId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Company",
+      required: true,
+    },
+
+    telephone: { type: String },
+    position: { type: String },
+
+    status: {
+      type: String,
+      enum: [
+        "pending_validation",
+        "pending_documents",
+        "pending_info",
+        "pending_info_and_documents",
+        "pending_revalidation",
+        "validated",
+        "rejected",
+      ],
+      default: "pending_validation",
+    },
+
+    rejectionReason: String,
+
+    validationRequests: [
+      {
+        type: {
+          type: String,
+          enum: ["document", "information", "clarification"],
+        },
+        message: String,
+        requiredFields: [String],
+        requiredDocuments: Number,
+        response: {
+          text: String,
+          documents: [String],
+          submittedAt: Date,
+        },
+        status: {
+          type: String,
+          enum: ["pending", "submitted", "approved", "rejected"],
+          default: "pending",
+        },
+        createdAt: { type: Date, default: Date.now },
+        reviewedAt: Date,
+        reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+      },
+    ],
+
+    permissions: {
+      postJobs: { type: Boolean, default: true },
+      reviewCandidates: { type: Boolean, default: true },
+      scheduleInterviews: { type: Boolean, default: true },
+      manageTeam: { type: Boolean, default: false },
+      editCompany: { type: Boolean, default: false },
+    },
+
+    isAdmin: { type: Boolean, default: false },
+
+    favoriteCandidates: [
+      {
+        candidateId: { type: mongoose.Schema.Types.ObjectId, ref: "Candidate" },
+        savedAt: { type: Date, default: Date.now },
+        notes: String,
+      },
+    ],
+
+    invitedBy: { type: mongoose.Schema.Types.ObjectId, ref: "Recruiter" },
+    invitedAt: Date,
+  },
+  { timestamps: true }
+);
+
+recruiterSchema.index({ userId: 1 });
+recruiterSchema.index({ companyId: 1 });
+recruiterSchema.index({ status: 1 });
+
+recruiterSchema.methods.canPerformActions = function () {
+  return this.status === "validated";
+};
+
+recruiterSchema.methods.hasPendingRequests = function () {
+  return this.validationRequests.some((r) => r.status === "pending");
+};
+
+export default mongoose.model("Recruiter", recruiterSchema);
+
+
+=== models\Skills.js ===
+import mongoose from "mongoose";
+
+const skillSchema = new mongoose.Schema({
+  name: { type: String, required: true, unique: true },
+  category: { type: String },
+});
+
+export default mongoose.model("Skill", skillSchema);
+
+
+=== models\SupportTicket.js ===
+import mongoose from "mongoose";
+
+const supportTicketSchema = new mongoose.Schema(
+  {
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      index: true,
+    },
+    subject: { type: String, required: true },
+    description: { type: String, required: true },
+    category: {
+      type: String,
+      enum: [
+        "support_understanding",
+        "technical_issue",
+        "account_profile",
+        "company_recruitment",
+        "documents_verification",
+        "special_request",
+        "feedback_suggestion",
+      ],
+      required: true,
+    },
+    assignedToLabel: {
+      type: String,
+      enum: [
+        "support",
+        "technical",
+        "operational",
+        "recruitment",
+        "moderation",
+        "super_admin",
+        "product",
+      ],
+    },
+    assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: "Admin" },
+    status: {
+      type: String,
+      enum: ["open", "in_progress", "awaiting_user", "resolved", "closed"],
+      default: "open",
+    },
+    priority: {
+      type: String,
+      enum: ["low", "medium", "high", "urgent"],
+      default: "medium",
+    },
+    attachments: [{ type: String }],
+    messages: [
+      {
+        from: { type: String, enum: ["user", "admin"], required: true },
+        content: { type: String, required: true },
+        adminId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+        attachments: [String],
+        createdAt: { type: Date, default: Date.now },
+      },
+    ],
+    chatEnabled: { type: Boolean, default: false },
+    resolvedAt: Date,
+    closedAt: Date,
+  },
+  { timestamps: true }
+);
+
+supportTicketSchema.pre("save", function (next) {
+  if (this.isNew && !this.assignedToLabel) {
+    const categoryToLabel = {
+      support_understanding: "support",
+      technical_issue: "technical",
+      account_profile: "operational",
+      company_recruitment: "recruitment",
+      documents_verification: "moderation",
+      special_request: "super_admin",
+      feedback_suggestion: "product",
+    };
+    this.assignedToLabel = categoryToLabel[this.category] || "support";
+  }
+  next();
+});
+
+supportTicketSchema.index({ status: 1, createdAt: -1 });
+supportTicketSchema.index({ assignedToLabel: 1, status: 1 });
+
+export default mongoose.model("SupportTicket", supportTicketSchema);
+
+
+=== models\User.js ===
+import mongoose from "mongoose";
+
+const userSchema = new mongoose.Schema(
+  {
+    nom: { type: String },
+    email: { type: String, required: true, unique: true },
+    motDePasse: { type: String, required: true },
+    role: {
+      type: String,
+      enum: ["candidat", "recruteur", "admin"],
+      required: true,
+    },
+
+    emailVerified: {
+      type: Boolean,
+      default: false,
+    },
+
+    accountStatus: {
+      type: String,
+      enum: ["active", "suspended", "banned"],
+      default: "active",
+    },
+    suspensionReason: String,
+    suspendedUntil: Date,
+
+    derniereConnexion: Date,
+  },
+  { timestamps: true }
+);
+
+userSchema.index({ email: 1 });
+userSchema.index({ role: 1 });
+userSchema.index({ createdAt: -1 });
+userSchema.index({ accountStatus: 1 });
+
+userSchema.methods.canLogin = function () {
+  if (this.accountStatus === "banned") return false;
+  if (this.accountStatus === "suspended") {
+    if (this.suspendedUntil && new Date() > this.suspendedUntil) {
+      return true;
+    }
+    return false;
+  }
+  return true;
+};
+
+export default mongoose.model("User", userSchema);
+
+
+=== routes\adminRoutes.js ===
+import express from "express";
+import auth from "../middleware/auth.js";
+import { authRole } from "../middleware/roles.js";
+import Admin from "../models/Admin.js";
+import {
+  getRecruiters,
+  validateRecruiter,
+  rejectRecruiter,
+  requestRecruiterDocuments,
+  requestMultipleValidationItems,
+  cancelValidationRequest,
+  getAllUsers,
+  banUser,
+  unBanUser,
+  sendMessageToUser,
+  getCandidateDetailsAdmin,
+  createAdmin,
+  deleteAdmin,
+  getAllAdmins,
+  suspendAdmin,
+  updateAdminPermissions,
+  updateAdminLabel,
+  getPendingCompanies,
+  validateCompany,
+  rejectCompany,
+  getCompanyDetailsAdmin,
+  getAllCompanies,
+  getPendingOffers,
+  approveOffer,
+  rejectOffer,
+  deleteOfferAdmin,
+  getManualSelectionOffers,
+  proposeCandidateToOffer,
+  toggleOfferVisibility,
+  getGlobalStats,
+  getTrends,
+  getAdminLogs,
+  createCompanyByAdmin,
+  getCompanyRecruiters,
+  assignCompanyAdmin,
+  removeCompanyAdmin,
+  updateCompanyByAdmin,
+  getOfferDetailsAdmin,
+  updateOfferByAdmin,
+} from "../controllers/adminController.js";
+
+import { createSkill, deleteSkill } from "../controllers/skillController.js";
+
+import {
+  createAnnouncement,
+  getAllAnnouncements,
+  updateAnnouncement,
+  deleteAnnouncement,
+} from "../controllers/announcementController.js";
+
+import {
+  getTicketsByLabel,
+  getTicketById,
+  respondToTicket,
+  reassignTicket,
+  closeTicket,
+} from "../controllers/adminSupportController.js";
+
+import { uploadAttachments } from "../config/multer.js";
+
+const router = express.Router();
+
+router.use(auth, authRole(["admin"]));
+
+const requirePermission = (permission) => async (req, res, next) => {
+  try {
+    const admin = await Admin.findOne({ userId: req.user.id });
+
+    if (!admin) {
+      return res.status(403).json({ msg: "Admin introuvable" });
+    }
+
+    if (admin.status !== "active") {
+      return res.status(403).json({ msg: "Compte admin suspendu" });
+    }
+
+    if (!admin.hasPermission(permission)) {
+      return res.status(403).json({
+        msg: `Permission "${permission}" requise`,
+        code: "PERMISSION_DENIED",
+      });
+    }
+
+    req.admin = admin;
+    next();
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+router.get("/stats/global", requirePermission("viewStats"), getGlobalStats);
+router.get("/stats/trends", requirePermission("viewStats"), getTrends);
+
+router.get(
+  "/recruteurs",
+  requirePermission("validateRecruiters"),
+  getRecruiters
+);
+router.put(
+  "/recruteurs/valider/:id",
+  requirePermission("validateRecruiters"),
+  validateRecruiter
+);
+router.put(
+  "/recruteurs/rejeter/:id",
+  requirePermission("validateRecruiters"),
+  rejectRecruiter
+);
+router.post(
+  "/recruteurs/:recruiterId/request-documents",
+  requirePermission("validateRecruiters"),
+  requestRecruiterDocuments
+);
+router.post(
+  "/recruteurs/:recruiterId/request-multiple",
+  requirePermission("validateRecruiters"),
+  requestMultipleValidationItems
+);
+
+router.put(
+  "/recruteurs/:id/cancel-request",
+  requirePermission("validateRecruiters"),
+  cancelValidationRequest
+);
+
+router.get("/users", getAllUsers);
+router.put("/users/ban/:id", requirePermission("banUsers"), banUser);
+router.put("/users/unban/:id", requirePermission("banUsers"), unBanUser);
+router.post(
+  "/users/message/:id",
+  requirePermission("sendNotifications"),
+  sendMessageToUser
+);
+
+router.get("/admins", requirePermission("viewStats"), getAllAdmins);
+router.post("/admins", requirePermission("createAdmin"), createAdmin);
+router.delete("/admins/:id", requirePermission("deleteAdmin"), deleteAdmin);
+router.put(
+  "/admins/:id/suspend",
+  requirePermission("deleteAdmin"),
+  suspendAdmin
+);
+router.put(
+  "/admins/:id/permissions",
+  requirePermission("editAdminPermissions"),
+  updateAdminPermissions
+);
+router.put(
+  "/admins/:id/label",
+  requirePermission("assignAdminLabels"),
+  updateAdminLabel
+);
+
+router.get(
+  "/entreprises/all",
+  requirePermission("validateCompanies"),
+  getAllCompanies
+);
+
+router.get(
+  "/entreprises/en-attente",
+  requirePermission("validateCompanies"),
+  getPendingCompanies
+);
+router.put(
+  "/entreprises/valider/:id",
+  requirePermission("validateCompanies"),
+  validateCompany
+);
+router.put(
+  "/entreprises/rejeter/:id",
+  requirePermission("validateCompanies"),
+  rejectCompany
+);
+
+router.get(
+  "/entreprises/:companyId",
+  requirePermission("validateCompanies"),
+  getCompanyDetailsAdmin
+);
+
+router.put(
+  "/entreprises/:id",
+  requirePermission("validateCompanies"),
+  updateCompanyByAdmin
+);
+
+router.get(
+  "/offres/en-attente",
+  requirePermission("validateOffers"),
+  getPendingOffers
+);
+router.put(
+  "/offres/:id/approve",
+  requirePermission("validateOffers"),
+  approveOffer
+);
+router.put(
+  "/offres/:id/reject",
+  requirePermission("validateOffers"),
+  rejectOffer
+);
+router.delete(
+  "/offres/:id",
+  requirePermission("validateOffers"),
+  deleteOfferAdmin
+);
+router.get(
+  "/offres/manuelles",
+  requirePermission("proposeCandidates"),
+  getManualSelectionOffers
+);
+router.post(
+  "/offres/proposer",
+  requirePermission("proposeCandidates"),
+  proposeCandidateToOffer
+);
+
+router.get(
+  "/offres/:id/details",
+  requirePermission("validateOffers"),
+  getOfferDetailsAdmin
+);
+router.put(
+  "/offres/:id/update",
+  requirePermission("validateOffers"),
+  updateOfferByAdmin
+);
+router.put(
+  "/offres/:id/visibility",
+  requirePermission("validateOffers"),
+  toggleOfferVisibility
+);
+
+router.get(
+  "/candidates/:id",
+  requirePermission("viewStats"),
+  getCandidateDetailsAdmin
+);
+
+router.get(
+  "/announcements",
+  requirePermission("manageAnnouncements"),
+  getAllAnnouncements
+);
+router.post(
+  "/announcements",
+  requirePermission("manageAnnouncements"),
+  createAnnouncement
+);
+router.put(
+  "/announcements/:id",
+  requirePermission("manageAnnouncements"),
+  updateAnnouncement
+);
+router.delete(
+  "/announcements/:id",
+  requirePermission("manageAnnouncements"),
+  deleteAnnouncement
+);
+
+router.get(
+  "/tickets",
+  requirePermission("handleSupportTickets"),
+  getTicketsByLabel
+);
+router.get(
+  "/tickets/:ticketId",
+  requirePermission("handleSupportTickets"),
+  getTicketById
+);
+router.post(
+  "/tickets/:ticketId/respond",
+  requirePermission("handleSupportTickets"),
+  uploadAttachments.array("attachments", 3),
+  respondToTicket
+);
+router.put(
+  "/tickets/:ticketId/reassign",
+  requirePermission("handleSupportTickets"),
+  reassignTicket
+);
+router.put(
+  "/tickets/:ticketId/close",
+  requirePermission("handleSupportTickets"),
+  closeTicket
+);
+
+router.get("/logs", requirePermission("viewLogs"), getAdminLogs);
+
+router.post("/skills", createSkill);
+router.delete("/skills/:id", deleteSkill);
+
+router.post(
+  "/entreprises/create",
+  requirePermission("validateCompanies"),
+  createCompanyByAdmin
+);
+
+router.get(
+  "/entreprises/:companyId/recruiters",
+  requirePermission("validateCompanies"),
+  getCompanyRecruiters
+);
+
+router.post(
+  "/entreprises/assign-admin",
+  requirePermission("validateCompanies"),
+  assignCompanyAdmin
+);
+
+router.delete(
+  "/entreprises/remove-admin/:recruiterId",
+  requirePermission("validateCompanies"),
+  removeCompanyAdmin
+);
+
+export default router;
+
+
+=== routes\announcementRoutes.js ===
+import express from "express";
+import auth from "../middleware/auth.js";
+import {
+  getActiveAnnouncements,
+  dismissAnnouncement,
+} from "../controllers/announcementController.js";
+
+const router = express.Router();
+
+router.use(auth);
+
+router.get("/active", getActiveAnnouncements);
+
+router.post("/:announcementId/dismiss", dismissAnnouncement);
+
+export default router;
+
+
+=== routes\authRoutes.js ===
+import express from "express";
+import auth from "../middleware/auth.js";
+import {
+  register,
+  login,
+  verifyEmail,
+  resendConfirmationCode,
+  changeEmail,
+  getCompanies,
+} from "../controllers/authController.js";
+
+const router = express.Router();
+
+router.post("/register", register);
+router.post("/login", login);
+
+router.post("/verify-email", auth, verifyEmail);
+router.post("/resend-code", auth, resendConfirmationCode);
+router.put("/change-email", auth, changeEmail);
+
+router.get("/companies", getCompanies);
+
+export default router;
+
+
+=== routes\candidateRoutes.js ===
+import express from "express";
+import auth from "../middleware/auth.js";
+import { authRole } from "../middleware/roles.js";
+import { requireEmailVerification } from "../middleware/requireEmailVerification.js";
+import { uploadCV, uploadImage } from "../config/multer.js";
+
+import {
+  updateProfile,
+  uploadProfilePicture,
+  uploadCandidateCV,
+  deleteCV,
+  applyToOffer,
+  getHistorique,
+  updateAccount,
+  getProfile,
+  addToFavorites,
+  removeFromFavorites,
+  getFavorites,
+  addSkill,
+  updateSkill,
+  deleteSkill,
+  addExperience,
+  updateExperience,
+  deleteExperience,
+  addEducation,
+  updateEducation,
+  deleteEducation,
+  getCandidateStats,
+  getRecommendedOffers,
+  confirmInterview,
+} from "../controllers/candidateController.js";
+
+const router = express.Router();
+
+router.use(auth, authRole(["candidat"]));
+
+router.get("/profil", getProfile);
+router.put("/profil", updateProfile);
+router.put("/compte", updateAccount);
+router.get("/stats", getCandidateStats);
+
+router.post("/upload-photo", uploadImage.single("photo"), uploadProfilePicture);
+router.post("/upload-cv", uploadCV.single("cv"), uploadCandidateCV);
+router.delete("/delete-cv/:cvId", deleteCV);
+
+router.post("/profil/skills", addSkill);
+router.put("/profil/skills/:skillId", updateSkill);
+router.delete("/profil/skills/:skillId", deleteSkill);
+
+router.post("/profil/experiences", addExperience);
+router.put("/profil/experiences/:experienceId", updateExperience);
+router.delete("/profil/experiences/:experienceId", deleteExperience);
+
+router.post("/profil/education", addEducation);
+router.put("/profil/education/:educationId", updateEducation);
+router.delete("/profil/education/:educationId", deleteEducation);
+
+router.post("/postuler", requireEmailVerification, applyToOffer);
+router.get("/historique", getHistorique);
+router.get("/favorites", getFavorites);
+router.post("/favorites/:offerId", addToFavorites);
+router.delete("/favorites/:offerId", removeFromFavorites);
+
+router.get("/recommended-offers", getRecommendedOffers);
+
+router.put("/applications/:applicationId/confirm-interview", confirmInterview);
+
+export default router;
+
+
+=== routes\notificationRoutes.js ===
+import express from "express";
+import auth from "../middleware/auth.js";
+import {
+  getMyNotifications,
+  getUnreadCount,
+  markAsRead,
+} from "../controllers/notificationController.js";
+
+const router = express.Router();
+
+router.use(auth);
+
+router.get("/", getMyNotifications);
+router.get("/unread-count", getUnreadCount);
+router.put("/:id/read", markAsRead);
+
+export default router;
+
+
+=== routes\offerRoutes.js ===
+import express from "express";
+import {
+  getAllActiveOffers,
+  getOfferDetails,
+} from "../controllers/offerController.js";
+
+const router = express.Router();
+
+router.get("/", getAllActiveOffers);
+
+router.get("/:id", getOfferDetails);
+
+export default router;
+
+
+=== routes\recruiterRoutes.js ===
+import express from "express";
+import auth from "../middleware/auth.js";
+import { optionalAuth } from "../middleware/optionalAuth.js";
+import { authRole } from "../middleware/roles.js";
+import { requireEmailVerification } from "../middleware/requireEmailVerification.js";
+import { uploadImage, uploadAttachments } from "../config/multer.js";
+import {
+  getRecruiterById,
+  createOffer,
+  getMyOffers,
+  updateOffer,
+  deactivateOffer,
+  getOfferApplications,
+  updateApplicationStatus,
+  updateRecruiterProfile,
+  updateCompanyDetails,
+  getRecruiterDashboard,
+  getRecruiterProfileEndpoint,
+  getCompanyTeam,
+  getOfferStats,
+  scheduleInterview,
+  submitValidationResponse,
+  getCandidateFullProfile,
+} from "../controllers/recruiterController.js";
+
+const router = express.Router();
+router.get("/public/:id", optionalAuth, getRecruiterById);
+
+router.use(auth, authRole(["recruteur"]));
+
+router.get("/profile", getRecruiterProfileEndpoint);
+router.put("/profile", updateRecruiterProfile);
+router.get("/candidates/:candidateId", getCandidateFullProfile);
+
+router.get("/dashboard", getRecruiterDashboard);
+
+router.post(
+  "/validation-response",
+  uploadAttachments.array("documents", 5),
+  submitValidationResponse
+);
+
+router.post("/offers", requireEmailVerification, createOffer);
+router.get("/my-offers", getMyOffers);
+router.put("/offers/:id", updateOffer);
+router.put("/offers/:id/deactivate", deactivateOffer);
+router.get("/offers/:offerId/stats", getOfferStats);
+
+router.get("/offers/:offerId/applications", getOfferApplications);
+router.put("/applications/:appId/status", updateApplicationStatus);
+router.post("/applications/:appId/schedule-interview", scheduleInterview);
+
+router.put("/company", updateCompanyDetails);
+router.get("/company/team", getCompanyTeam);
+
+export default router;
+
+
+=== routes\skillRoutes.js ===
+import express from "express";
+import { getSkills } from "../controllers/skillController.js";
+import auth from "../middleware/auth.js";
+
+const router = express.Router();
+
+router.get("/", auth, getSkills);
+
+export default router;
+
+
+=== routes\supportRoutes.js ===
+import express from "express";
+import auth from "../middleware/auth.js";
+import * as supportController from "../controllers/supportController.js";
+import { uploadAttachments } from "../config/multer.js";
+
+const router = express.Router();
+
+router.use(auth);
+
+router.post(
+  "/tickets",
+  uploadAttachments.array("attachments", 5),
+  supportController.createTicket
+);
+router.get("/tickets", supportController.getMyTickets);
+router.get("/tickets/:ticketId", supportController.getTicketDetails);
+router.post(
+  "/tickets/:ticketId/reply",
+  uploadAttachments.array("attachments", 3),
+  supportController.replyToTicket
+);
+
+export default router;
+
+
+=== startup\seedAdmin.js ===
+import bcrypt from "bcryptjs";
+import User from "../models/User.js";
+import Admin from "../models/Admin.js";
+
+export const seedAdmin = async () => {
+  try {
+    const exist = await User.findOne({ role: "admin" });
+    if (exist) {
+      console.log("👑 Admin déjà existant.");
+      return;
+    }
+
+    const hash = await bcrypt.hash("admin", 10);
+
+    const user = await User.create({
+      nom: "Super Admin",
+      email: "admin@recrutement.com",
+      motDePasse: hash,
+      role: "admin",
+      emailVerified: true,
+      accountStatus: "active",
+    });
+
+    await Admin.create({
+      userId: user._id,
+      label: "super_admin",
+      status: "active",
+      permissions: {
+        createAdmin: true,
+        deleteAdmin: true,
+        editAdminPermissions: true,
+        assignAdminLabels: true,
+        validateOffers: true,
+        validateRecruiters: true,
+        validateCompanies: true,
+        banUsers: true,
+        suspendUsers: true,
+        proposeCandidates: true,
+        manageAnnouncements: true,
+        sendNotifications: true,
+        handleSupportTickets: true,
+        viewStats: true,
+        viewLogs: true,
+      },
+    });
+
+    console.log("✅ Super Admin créé avec toutes les permissions");
+  } catch (err) {
+    console.error("❌ Erreur création admin:", err.message);
+  }
+};
+
+
+=== startup\setupFolders.js ===
+import fs from "fs";
+
+export default function setupFolders() {
+  const folders = [
+    "uploads",
+    "uploads/cv",
+    "uploads/images",
+    "uploads/attachments",
+    "uploads/documents",
+  ];
+
+  folders.forEach((dir) => {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+      console.log(`📁 Dossier créé : ${dir}`);
+    }
+  });
+}
+
+
+=== utils\profileCompletion.js ===
+export const calculateProfileCompletion = (candidate, user) => {
+  const checks = {
+    nom: !!user?.nom,
+    telephone: !!candidate?.telephone,
+    residence: !!candidate?.residence?.wilaya,
+
+    bio: !!candidate?.bio,
+    dateOfBirth: !!candidate?.dateOfBirth,
+    gender: !!candidate?.gender,
+    profilePicture: !!candidate?.profilePicture,
+
+    desiredPosition: !!candidate?.desiredPosition,
+    cv: candidate?.cvs?.length > 0,
+    skills: candidate?.skills?.length > 0,
+    experiences: candidate?.experiences?.length > 0,
+    education: candidate?.education?.length > 0,
+  };
+
+  const completed = Object.values(checks).filter(Boolean).length;
+  const total = Object.keys(checks).length;
+
+  const minimumRequiredForApplication = {
+    telephone: !!candidate?.telephone,
+    residence: !!candidate?.residence?.wilaya,
+    cv: candidate?.cvs?.length > 0,
+    skills: candidate?.skills?.length > 0,
+  };
+
+  const canApply = Object.values(minimumRequiredForApplication).every(Boolean);
+  const missingForApplication = Object.entries(minimumRequiredForApplication)
+    .filter(([_, v]) => !v)
+    .map(([k]) => {
+      const labels = {
+        telephone: "Numéro de téléphone",
+        residence: "Localisation (wilaya)",
+        cv: "CV",
+        skills: "Au moins une compétence",
+      };
+      return labels[k] || k;
+    });
+
+  return {
+    percentage: Math.round((completed / total) * 100),
+    missing: Object.entries(checks)
+      .filter(([_, v]) => !v)
+      .map(([k]) => k),
+    isComplete: completed === total,
+    canApply,
+    missingForApplication,
+  };
+};
