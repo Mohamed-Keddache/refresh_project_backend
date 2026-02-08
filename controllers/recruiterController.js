@@ -7,6 +7,8 @@ import Notification from "../models/Notification.js";
 import Application from "../models/Application.js";
 import Admin from "../models/Admin.js";
 import bcrypt from "bcryptjs";
+import AnemOffer from "../models/AnemOffer.js";
+import { createAnemOffer } from "./anemOfferController.js";
 
 const getRecruiterProfile = async (userId) => {
   const recruiter = await Recruiter.findOne({ userId }).populate("companyId");
@@ -61,11 +63,22 @@ export const createOffer = async (req, res) => {
       wilaya,
       visibility,
       candidateSearchMode,
+      allowRepostulation,
+      enableAnem, // New field for ANEM
     } = req.body;
 
     if (!titre || !description || !requirements) {
       return res.status(400).json({
         msg: "Titre, description et requirements sont obligatoires.",
+      });
+    }
+
+    // Check ANEM eligibility if trying to enable
+    if (enableAnem && !recruiter.canCreateAnemOffer()) {
+      return res.status(403).json({
+        msg: "Vous devez être enregistré ANEM pour activer cette fonctionnalité.",
+        code: "ANEM_NOT_REGISTERED",
+        anemStatus: recruiter.anem.status,
       });
     }
 
@@ -79,6 +92,8 @@ export const createOffer = async (req, res) => {
       type: type || "full-time",
       salaryMin,
       salaryMax,
+      allowRepostulation:
+        allowRepostulation !== undefined ? allowRepostulation : true,
       experienceLevel,
       skills: skills || [],
       wilaya,
@@ -94,19 +109,42 @@ export const createOffer = async (req, res) => {
 
     const savedOffer = await newOffer.save();
 
+    // Create ANEM offer association if enabled
+    let anemData = null;
+    if (enableAnem && recruiter.canCreateAnemOffer()) {
+      try {
+        anemData = await createAnemOffer(
+          savedOffer._id,
+          recruiter._id,
+          recruiter.anem.registrationId,
+          recruiter.anem.anemId,
+        );
+      } catch (anemErr) {
+        console.error("Error creating ANEM offer:", anemErr);
+        // Don't fail the whole request, just log
+      }
+    }
+
+    // Notify admins
     const admins = await User.find({ role: "admin" });
     const notificationPromises = admins.map((admin) =>
       Notification.create({
         userId: admin._id,
         message: `Nouvelle offre à valider : "${savedOffer.titre}" de ${recruiter.companyId.name}`,
         type: "info",
-      })
+      }),
     );
     await Promise.all(notificationPromises);
 
     res.status(201).json({
       msg: "Offre créée et en attente de validation ✅",
       offer: savedOffer,
+      anem: anemData
+        ? {
+            enabled: true,
+            anemId: anemData.anemId,
+          }
+        : null,
     });
   } catch (err) {
     res.status(500).json({ msg: err.message });
@@ -120,12 +158,147 @@ export const getMyOffers = async (req, res) => {
     const offers = await Offer.find({ recruteurId: recruiter._id }).sort({
       createdAt: -1,
     });
-    res.json(offers);
+
+    // Get ANEM status for all offers
+    const offerIds = offers.map((o) => o._id);
+    const anemOffers = await AnemOffer.find({
+      offerId: { $in: offerIds },
+    }).lean();
+    const anemMap = new Map(anemOffers.map((a) => [a.offerId.toString(), a]));
+
+    const enrichedOffers = offers.map((offer) => {
+      const anem = anemMap.get(offer._id.toString());
+      return {
+        ...offer.toObject(),
+        anem: anem
+          ? {
+              enabled: anem.anemEnabled,
+              anemId: anem.anemId,
+              enabledAt: anem.enabledAt,
+            }
+          : null,
+      };
+    });
+
+    res.json(enrichedOffers);
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
 };
 
+// recruiterController.js - Améliorer getMyOffers
+export const getMyOffersWithStats = async (req, res) => {
+  try {
+    const recruiter = await getRecruiterProfile(req.user.id);
+
+    const offers = await Offer.aggregate([
+      { $match: { recruteurId: recruiter._id } },
+      {
+        $lookup: {
+          from: "applications",
+          localField: "_id",
+          foreignField: "offerId",
+          as: "applications",
+        },
+      },
+      {
+        $lookup: {
+          from: "anemoffers",
+          localField: "_id",
+          foreignField: "offerId",
+          as: "anemData",
+        },
+      },
+      {
+        $addFields: {
+          totalApplications: { $size: "$applications" },
+          newApplications: {
+            $size: {
+              $filter: {
+                input: "$applications",
+                cond: { $eq: ["$$this.seenByRecruiter", false] },
+              },
+            },
+          },
+          inDiscussion: {
+            $size: {
+              $filter: {
+                input: "$applications",
+                cond: { $eq: ["$$this.recruiterStatus", "en_discussion"] },
+              },
+            },
+          },
+          starredCount: {
+            $size: {
+              $filter: {
+                input: "$applications",
+                cond: { $eq: ["$$this.isStarred", true] },
+              },
+            },
+          },
+          anem: {
+            $cond: {
+              if: { $gt: [{ $size: "$anemData" }, 0] },
+              then: {
+                enabled: { $arrayElemAt: ["$anemData.anemEnabled", 0] },
+                anemId: { $arrayElemAt: ["$anemData.anemId", 0] },
+                enabledAt: { $arrayElemAt: ["$anemData.enabledAt", 0] },
+              },
+              else: null,
+            },
+          },
+        },
+      },
+      {
+        $project: {
+          applications: 0,
+          anemData: 0,
+        },
+      },
+      { $sort: { createdAt: -1 } },
+    ]);
+
+    res.json(offers);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+export const getRecruiterOfferDetails = async (req, res) => {
+  try {
+    const recruiter = await getRecruiterProfile(req.user.id);
+    const { id } = req.params;
+
+    const offer = await Offer.findById(id);
+
+    if (!offer) {
+      return res.status(404).json({ msg: "Offre introuvable" });
+    }
+
+    // Security Check: Ensure the offer belongs to this recruiter
+    if (offer.recruteurId.toString() !== recruiter._id.toString()) {
+      return res
+        .status(403)
+        .json({ msg: "Action non autorisée. Ce n'est pas votre offre." });
+    }
+
+    // Get ANEM details to pre-fill the form if needed
+    const anemOffer = await AnemOffer.findOne({
+      offerId: offer._id,
+    }).lean();
+
+    res.json({
+      ...offer.toObject(),
+      anem: anemOffer
+        ? {
+            enabled: anemOffer.anemEnabled,
+            anemId: anemOffer.anemId,
+          }
+        : null,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
 export const updateOffer = async (req, res) => {
   try {
     const recruiter = await getRecruiterProfile(req.user.id);
@@ -137,13 +310,67 @@ export const updateOffer = async (req, res) => {
       return res.status(403).json({ msg: "Action non autorisée" });
     }
 
+    const { enableAnem, ...offerData } = req.body;
+
+    // Handle ANEM toggle
+    if (enableAnem !== undefined) {
+      const existingAnem = await AnemOffer.findOne({ offerId: offer._id });
+
+      if (enableAnem) {
+        // Enable ANEM
+        if (!recruiter.canCreateAnemOffer()) {
+          return res.status(403).json({
+            msg: "Vous devez être enregistré ANEM pour activer cette fonctionnalité.",
+            code: "ANEM_NOT_REGISTERED",
+            anemStatus: recruiter.anem.status,
+          });
+        }
+
+        if (existingAnem) {
+          existingAnem.anemEnabled = true;
+          existingAnem.anemId = recruiter.anem.anemId;
+          existingAnem.enabledAt = new Date();
+          existingAnem.disabledAt = undefined;
+          await existingAnem.save();
+        } else {
+          await createAnemOfferAssociation(
+            offer._id,
+            recruiter._id,
+            recruiter.anem.registrationId,
+            recruiter.anem.anemId,
+          );
+        }
+      } else {
+        // Disable ANEM
+        if (existingAnem && existingAnem.anemEnabled) {
+          existingAnem.anemEnabled = false;
+          existingAnem.disabledAt = new Date();
+          await existingAnem.save();
+        }
+      }
+    }
+
     const updatedOffer = await Offer.findByIdAndUpdate(
       req.params.id,
-      { $set: req.body },
-      { new: true }
+      { $set: offerData },
+      { new: true },
     );
 
-    res.json({ msg: "Offre mise à jour ✅", offer: updatedOffer });
+    // Get updated ANEM status
+    const anemOffer = await AnemOffer.findOne({
+      offerId: updatedOffer._id,
+    }).lean();
+
+    res.json({
+      msg: "Offre mise à jour ✅",
+      offer: updatedOffer,
+      anem: anemOffer
+        ? {
+            enabled: anemOffer.anemEnabled,
+            anemId: anemOffer.anemId,
+          }
+        : null,
+    });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
@@ -163,97 +390,6 @@ export const deactivateOffer = async (req, res) => {
     await offer.save();
 
     res.json({ msg: "Offre désactivée ⛔", offer });
-  } catch (err) {
-    res.status(500).json({ msg: err.message });
-  }
-};
-
-export const getOfferApplications = async (req, res) => {
-  try {
-    const recruiter = await getRecruiterProfile(req.user.id);
-    const { offerId } = req.params;
-
-    const page = parseInt(req.query.page, 10) || 1;
-    const limit = parseInt(req.query.limit, 10) || 20;
-    const skip = (page - 1) * limit;
-
-    const offerCheck = await Offer.findOne({
-      _id: offerId,
-      recruteurId: recruiter._id,
-    })
-      .select("_id")
-      .lean();
-
-    if (!offerCheck) {
-      return res
-        .status(404)
-        .json({ msg: "Offre introuvable ou non autorisée" });
-    }
-
-    const applications = await Application.find({ offerId: offerId })
-      .sort({ datePostulation: -1 })
-      .skip(skip)
-      .limit(limit)
-
-      .select("-coverLetter")
-      .populate({
-        path: "candidateId",
-
-        select: "cvs userId profilePicture location",
-        populate: {
-          path: "userId",
-          select: "nom email",
-        },
-      })
-      .lean();
-
-    const validApplications = applications.filter(
-      (app) => app.candidateId !== null
-    );
-
-    const total = await Application.countDocuments({ offerId: offerId });
-
-    return res.json({
-      data: validApplications,
-      meta: {
-        total,
-        page,
-        limit,
-        totalPages: Math.ceil(total / limit),
-      },
-    });
-  } catch (err) {
-    return res.status(500).json({ msg: err.message });
-  }
-};
-
-export const updateApplicationStatus = async (req, res) => {
-  try {
-    const { statut } = req.body;
-    const { appId } = req.params;
-    const recruiter = await getRecruiterProfile(req.user.id);
-
-    const application = await Application.findById(appId).populate("offerId");
-
-    if (!application)
-      return res.status(404).json({ msg: "Candidature introuvable" });
-
-    const offer = await Offer.findById(application.offerId);
-
-    if (offer.recruteurId.toString() !== recruiter._id.toString()) {
-      return res.status(403).json({ msg: "Action non autorisée" });
-    }
-
-    application.status = statut;
-    await application.save();
-
-    await Notification.create({
-      userId: application.candidateId,
-      message: `Votre candidature pour "${offer.titre}" est passée au statut : ${statut}.`,
-      type: "info",
-    });
-
-    res.json({ msg: `Statut mis à jour : ${statut}`, application });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
@@ -332,7 +468,7 @@ export const updateCompanyDetails = async (req, res) => {
           logo,
         },
       },
-      { new: true }
+      { new: true },
     );
 
     res.json({
@@ -364,6 +500,7 @@ export const getRecruiterDashboard = async (req, res) => {
       applicationsByStatus,
       topOffers,
       recentApplications,
+      anemOffersCount,
     ] = await Promise.all([
       Offer.countDocuments({
         recruteurId: recruiter._id,
@@ -400,6 +537,10 @@ export const getRecruiterDashboard = async (req, res) => {
         .populate("offerId", "titre")
         .sort({ datePostulation: -1 })
         .limit(10),
+      AnemOffer.countDocuments({
+        recruiterId: recruiter._id,
+        anemEnabled: true,
+      }),
     ]);
 
     const statusMap = {};
@@ -435,7 +576,7 @@ export const getRecruiterDashboard = async (req, res) => {
     }
 
     const pendingRequests = recruiter.validationRequests.filter(
-      (r) => r.status === "pending"
+      (r) => r.status === "pending",
     );
     if (pendingRequests.length > 0) {
       alerts.push({
@@ -452,6 +593,7 @@ export const getRecruiterDashboard = async (req, res) => {
         rejectedOffers,
         totalApplications,
         newApplicationsThisWeek,
+        anemOffersCount,
       },
       applicationsByStatus: statusMap,
       topOffers,
@@ -462,6 +604,11 @@ export const getRecruiterDashboard = async (req, res) => {
         logo: recruiter.companyId.logo,
       },
       recruiterStatus: recruiter.status,
+      anem: {
+        status: recruiter.anem.status,
+        anemId: recruiter.anem.anemId,
+        isRegistered: recruiter.canCreateAnemOffer(),
+      },
       alerts,
       permissions: recruiter.permissions,
     });
@@ -484,25 +631,27 @@ export const getOfferStats = async (req, res) => {
       return res.status(404).json({ msg: "Offre introuvable" });
     }
 
-    const [applicationsByStatus, applicationsByDay] = await Promise.all([
-      Application.aggregate([
-        { $match: { offerId: offer._id } },
-        { $group: { _id: "$status", count: { $sum: 1 } } },
-      ]),
-      Application.aggregate([
-        { $match: { offerId: offer._id } },
-        {
-          $group: {
-            _id: {
-              $dateToString: { format: "%Y-%m-%d", date: "$datePostulation" },
+    const [applicationsByStatus, applicationsByDay, anemOffer] =
+      await Promise.all([
+        Application.aggregate([
+          { $match: { offerId: offer._id } },
+          { $group: { _id: "$status", count: { $sum: 1 } } },
+        ]),
+        Application.aggregate([
+          { $match: { offerId: offer._id } },
+          {
+            $group: {
+              _id: {
+                $dateToString: { format: "%Y-%m-%d", date: "$datePostulation" },
+              },
+              count: { $sum: 1 },
             },
-            count: { $sum: 1 },
           },
-        },
-        { $sort: { _id: 1 } },
-        { $limit: 30 },
-      ]),
-    ]);
+          { $sort: { _id: 1 } },
+          { $limit: 30 },
+        ]),
+        AnemOffer.findOne({ offerId: offer._id }).lean(),
+      ]);
 
     const statusMap = {};
     applicationsByStatus.forEach((s) => {
@@ -518,62 +667,22 @@ export const getOfferStats = async (req, res) => {
         datePublication: offer.datePublication,
         nombreCandidatures: offer.nombreCandidatures,
       },
+      anem: anemOffer
+        ? {
+            enabled: anemOffer.anemEnabled,
+            anemId: anemOffer.anemId,
+            enabledAt: anemOffer.enabledAt,
+          }
+        : null,
       applicationsByStatus: statusMap,
       applicationsByDay,
       conversionRate:
         offer.nombreCandidatures > 0
           ? Math.round(
-              ((statusMap["accepté"] || 0) / offer.nombreCandidatures) * 100
+              ((statusMap["retenue"] || 0) / offer.nombreCandidatures) * 100,
             )
           : 0,
     });
-  } catch (err) {
-    res.status(500).json({ msg: err.message });
-  }
-};
-
-export const scheduleInterview = async (req, res) => {
-  try {
-    const recruiter = await getRecruiterProfile(req.user.id);
-    const { appId } = req.params;
-    const { scheduledAt, location, meetingLink, notes } = req.body;
-
-    const application = await Application.findById(appId).populate("offerId");
-    if (!application) {
-      return res.status(404).json({ msg: "Candidature introuvable." });
-    }
-
-    const offer = await Offer.findById(application.offerId);
-    if (offer.recruteurId.toString() !== recruiter._id.toString()) {
-      return res.status(403).json({ msg: "Non autorisé." });
-    }
-
-    if (!recruiter.permissions.scheduleInterviews && !recruiter.isAdmin) {
-      return res.status(403).json({
-        msg: "Vous n'avez pas la permission de programmer des entretiens.",
-      });
-    }
-
-    application.status = "entretien";
-    application.interviewDetails = {
-      scheduledAt: new Date(scheduledAt),
-      location,
-      meetingLink,
-      notes,
-      confirmedByCandidate: false,
-    };
-    await application.save();
-
-    const candidate = await Candidate.findById(application.candidateId);
-    await Notification.create({
-      userId: candidate.userId,
-      message: `Entretien programmé pour "${offer.titre}" le ${new Date(
-        scheduledAt
-      ).toLocaleDateString("fr-FR")}`,
-      type: "validation",
-    });
-
-    res.json({ msg: "Entretien programmé avec succès.", application });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
@@ -583,7 +692,8 @@ export const getRecruiterProfileEndpoint = async (req, res) => {
   try {
     const recruiter = await Recruiter.findOne({ userId: req.user.id })
       .populate("userId", "nom email emailVerified")
-      .populate("companyId");
+      .populate("companyId")
+      .populate("anem.registrationId");
 
     if (!recruiter) {
       return res.status(404).json({ msg: "Profil recruteur introuvable" });
@@ -623,7 +733,7 @@ export const getRecruiterProfileEndpoint = async (req, res) => {
     }
 
     const pendingRequests = recruiter.validationRequests?.filter(
-      (r) => r.status === "pending"
+      (r) => r.status === "pending",
     );
 
     if (pendingRequests?.length > 0) {
@@ -643,6 +753,13 @@ export const getRecruiterProfileEndpoint = async (req, res) => {
         recruiter.status === "validated" &&
         recruiter.companyId?.status === "active" &&
         recruiter.permissions.postJobs,
+      anem: {
+        status: recruiter.anem.status,
+        anemId: recruiter.anem.anemId,
+        isRegistered: recruiter.canCreateAnemOffer(),
+        hasSeenModal: recruiter.anem.hasSeenAnemModal,
+        declinedAnem: recruiter.anem.declinedAnem,
+      },
     });
   } catch (err) {
     res.status(500).json({ msg: err.message });
@@ -709,7 +826,7 @@ export const submitValidationResponse = async (req, res) => {
         userId: admin.userId._id,
         message: `Le recruteur a répondu à une demande de validation.`,
         type: "info",
-      })
+      }),
     );
     await Promise.all(notifPromises);
 
@@ -718,6 +835,7 @@ export const submitValidationResponse = async (req, res) => {
     res.status(500).json({ msg: err.message });
   }
 };
+
 export const getRecruiterById = async (req, res) => {
   try {
     const { id } = req.params;
@@ -770,6 +888,7 @@ export const getRecruiterById = async (req, res) => {
         validationRequests: recruiter.validationRequests,
         rejectionReason: recruiter.rejectionReason,
         userId: recruiter.userId._id,
+        anem: recruiter.anem,
       };
     }
 
@@ -778,6 +897,7 @@ export const getRecruiterById = async (req, res) => {
     res.status(500).json({ msg: err.message });
   }
 };
+
 export const getCandidateFullProfile = async (req, res) => {
   try {
     const { candidateId } = req.params;

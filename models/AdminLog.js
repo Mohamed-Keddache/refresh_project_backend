@@ -1,3 +1,4 @@
+// === models/AdminLog.js ===
 import mongoose from "mongoose";
 
 const adminLogSchema = new mongoose.Schema(
@@ -11,6 +12,7 @@ const adminLogSchema = new mongoose.Schema(
     action: {
       type: String,
       enum: [
+        // Existing actions
         "admin_created",
         "admin_deleted",
         "admin_suspended",
@@ -22,13 +24,22 @@ const adminLogSchema = new mongoose.Schema(
         "recruiter_suspended",
         "recruiter_documents_requested",
         "recruiter_revalidated",
+        "recruiter_request_canceled",
+        "recruiter_multiple_requests",
         "company_validated",
         "company_rejected",
         "company_suspended",
+        "company_created_by_admin",
+        "company_updated_by_admin",
+        "company_admin_assigned",
+        "company_admin_removed",
         "offer_approved",
         "offer_rejected",
         "offer_changes_requested",
         "offer_deleted",
+        "offer_updated_by_admin",
+        "offer_activated_admin",
+        "offer_deactivated_admin",
         "user_banned",
         "user_unbanned",
         "user_message_sent",
@@ -39,10 +50,17 @@ const adminLogSchema = new mongoose.Schema(
         "ticket_responded",
         "ticket_closed",
         "ticket_reassigned",
-        "company_created_by_admin",
-        "company_updated_by_admin",
-        "company_admin_assigned",
-        "company_admin_removed",
+        // ANEM actions
+        "anem_demande_viewed",
+        "anem_demande_assigned",
+        "anem_demande_in_progress",
+        "anem_pdf_downloaded",
+        "anem_id_approved",
+        "anem_id_rejected",
+        "anem_registration_success",
+        "anem_registration_failed",
+        "anem_bulk_status_update",
+        "anem_note_added",
       ],
       required: true,
       index: true,
@@ -58,6 +76,7 @@ const adminLogSchema = new mongoose.Schema(
         "announcement",
         "ticket",
         "admin",
+        "anem_registration",
       ],
     },
     targetId: { type: mongoose.Schema.Types.ObjectId },
@@ -65,11 +84,12 @@ const adminLogSchema = new mongoose.Schema(
     ip: { type: String },
     userAgent: { type: String },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 adminLogSchema.index({ createdAt: -1 });
 adminLogSchema.index({ action: 1, createdAt: -1 });
+adminLogSchema.index({ targetType: 1, targetId: 1 });
 
 const AdminLog = mongoose.model("AdminLog", adminLogSchema);
 
@@ -78,7 +98,7 @@ export const logAdminAction = async (
   action,
   target = {},
   details = {},
-  req = null
+  req = null,
 ) => {
   try {
     await AdminLog.create({
@@ -87,8 +107,8 @@ export const logAdminAction = async (
       targetType: target.type,
       targetId: target.id,
       details,
-      ip: req?.ip,
-      userAgent: req?.get("User-Agent"),
+      ip: req?.ip || req?.connection?.remoteAddress,
+      userAgent: req?.get?.("User-Agent") || req?.headers?.["user-agent"],
     });
   } catch (err) {
     console.error("Erreur lors du logging admin:", err);

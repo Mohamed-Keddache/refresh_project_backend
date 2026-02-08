@@ -44,7 +44,15 @@ import {
   updateOfferByAdmin,
 } from "../controllers/adminController.js";
 
-import { createSkill, deleteSkill } from "../controllers/skillController.js";
+import {
+  getSkills,
+  createSkill,
+  deleteSkill,
+  getProposedSkills,
+  approveProposedSkill,
+  rejectProposedSkill,
+  getProposedSkillsStats,
+} from "../controllers/skillController.js";
 
 import {
   createAnnouncement,
@@ -60,6 +68,13 @@ import {
   reassignTicket,
   closeTicket,
 } from "../controllers/adminSupportController.js";
+
+import {
+  toggleEmailVerificationMode,
+  getEmailVerificationMode,
+  toggleSkillProposal,
+  getAllSettings,
+} from "../controllers/adminSettingsController.js";
 
 import { uploadAttachments } from "../config/multer.js";
 
@@ -99,33 +114,33 @@ router.get("/stats/trends", requirePermission("viewStats"), getTrends);
 router.get(
   "/recruteurs",
   requirePermission("validateRecruiters"),
-  getRecruiters
+  getRecruiters,
 );
 router.put(
   "/recruteurs/valider/:id",
   requirePermission("validateRecruiters"),
-  validateRecruiter
+  validateRecruiter,
 );
 router.put(
   "/recruteurs/rejeter/:id",
   requirePermission("validateRecruiters"),
-  rejectRecruiter
+  rejectRecruiter,
 );
 router.post(
   "/recruteurs/:recruiterId/request-documents",
   requirePermission("validateRecruiters"),
-  requestRecruiterDocuments
+  requestRecruiterDocuments,
 );
 router.post(
   "/recruteurs/:recruiterId/request-multiple",
   requirePermission("validateRecruiters"),
-  requestMultipleValidationItems
+  requestMultipleValidationItems,
 );
 
 router.put(
   "/recruteurs/:id/cancel-request",
   requirePermission("validateRecruiters"),
-  cancelValidationRequest
+  cancelValidationRequest,
 );
 
 router.get("/users", getAllUsers);
@@ -134,7 +149,7 @@ router.put("/users/unban/:id", requirePermission("banUsers"), unBanUser);
 router.post(
   "/users/message/:id",
   requirePermission("sendNotifications"),
-  sendMessageToUser
+  sendMessageToUser,
 );
 
 router.get("/admins", requirePermission("viewStats"), getAllAdmins);
@@ -143,181 +158,211 @@ router.delete("/admins/:id", requirePermission("deleteAdmin"), deleteAdmin);
 router.put(
   "/admins/:id/suspend",
   requirePermission("deleteAdmin"),
-  suspendAdmin
+  suspendAdmin,
 );
 router.put(
   "/admins/:id/permissions",
   requirePermission("editAdminPermissions"),
-  updateAdminPermissions
+  updateAdminPermissions,
 );
 router.put(
   "/admins/:id/label",
   requirePermission("assignAdminLabels"),
-  updateAdminLabel
+  updateAdminLabel,
 );
 
 router.get(
   "/entreprises/all",
   requirePermission("validateCompanies"),
-  getAllCompanies
+  getAllCompanies,
 );
 
 router.get(
   "/entreprises/en-attente",
   requirePermission("validateCompanies"),
-  getPendingCompanies
+  getPendingCompanies,
 );
 router.put(
   "/entreprises/valider/:id",
   requirePermission("validateCompanies"),
-  validateCompany
+  validateCompany,
 );
 router.put(
   "/entreprises/rejeter/:id",
   requirePermission("validateCompanies"),
-  rejectCompany
+  rejectCompany,
 );
 
 router.get(
   "/entreprises/:companyId",
   requirePermission("validateCompanies"),
-  getCompanyDetailsAdmin
+  getCompanyDetailsAdmin,
 );
 
 router.put(
   "/entreprises/:id",
   requirePermission("validateCompanies"),
-  updateCompanyByAdmin
+  updateCompanyByAdmin,
 );
 
 router.get(
   "/offres/en-attente",
   requirePermission("validateOffers"),
-  getPendingOffers
+  getPendingOffers,
 );
 router.put(
   "/offres/:id/approve",
   requirePermission("validateOffers"),
-  approveOffer
+  approveOffer,
 );
 router.put(
   "/offres/:id/reject",
   requirePermission("validateOffers"),
-  rejectOffer
+  rejectOffer,
 );
 router.delete(
   "/offres/:id",
   requirePermission("validateOffers"),
-  deleteOfferAdmin
+  deleteOfferAdmin,
 );
 router.get(
   "/offres/manuelles",
   requirePermission("proposeCandidates"),
-  getManualSelectionOffers
+  getManualSelectionOffers,
 );
 router.post(
   "/offres/proposer",
   requirePermission("proposeCandidates"),
-  proposeCandidateToOffer
+  proposeCandidateToOffer,
 );
 
 router.get(
   "/offres/:id/details",
   requirePermission("validateOffers"),
-  getOfferDetailsAdmin
+  getOfferDetailsAdmin,
 );
 router.put(
   "/offres/:id/update",
   requirePermission("validateOffers"),
-  updateOfferByAdmin
+  updateOfferByAdmin,
 );
 router.put(
   "/offres/:id/visibility",
   requirePermission("validateOffers"),
-  toggleOfferVisibility
+  toggleOfferVisibility,
 );
 
 router.get(
   "/candidates/:id",
   requirePermission("viewStats"),
-  getCandidateDetailsAdmin
+  getCandidateDetailsAdmin,
 );
 
 router.get(
   "/announcements",
   requirePermission("manageAnnouncements"),
-  getAllAnnouncements
+  getAllAnnouncements,
 );
 router.post(
   "/announcements",
   requirePermission("manageAnnouncements"),
-  createAnnouncement
+  createAnnouncement,
 );
 router.put(
   "/announcements/:id",
   requirePermission("manageAnnouncements"),
-  updateAnnouncement
+  updateAnnouncement,
 );
 router.delete(
   "/announcements/:id",
   requirePermission("manageAnnouncements"),
-  deleteAnnouncement
+  deleteAnnouncement,
 );
 
 router.get(
   "/tickets",
   requirePermission("handleSupportTickets"),
-  getTicketsByLabel
+  getTicketsByLabel,
 );
 router.get(
   "/tickets/:ticketId",
   requirePermission("handleSupportTickets"),
-  getTicketById
+  getTicketById,
 );
 router.post(
   "/tickets/:ticketId/respond",
   requirePermission("handleSupportTickets"),
   uploadAttachments.array("attachments", 3),
-  respondToTicket
+  respondToTicket,
 );
 router.put(
   "/tickets/:ticketId/reassign",
   requirePermission("handleSupportTickets"),
-  reassignTicket
+  reassignTicket,
 );
 router.put(
   "/tickets/:ticketId/close",
   requirePermission("handleSupportTickets"),
-  closeTicket
+  closeTicket,
 );
 
 router.get("/logs", requirePermission("viewLogs"), getAdminLogs);
 
-router.post("/skills", createSkill);
-router.delete("/skills/:id", deleteSkill);
-
 router.post(
   "/entreprises/create",
   requirePermission("validateCompanies"),
-  createCompanyByAdmin
+  createCompanyByAdmin,
 );
 
 router.get(
   "/entreprises/:companyId/recruiters",
   requirePermission("validateCompanies"),
-  getCompanyRecruiters
+  getCompanyRecruiters,
 );
 
 router.post(
   "/entreprises/assign-admin",
   requirePermission("validateCompanies"),
-  assignCompanyAdmin
+  assignCompanyAdmin,
 );
 
 router.delete(
   "/entreprises/remove-admin/:recruiterId",
   requirePermission("validateCompanies"),
-  removeCompanyAdmin
+  removeCompanyAdmin,
+);
+
+// System Settings
+router.get("/settings", getAllSettings);
+router.get("/settings/email-verification-mode", getEmailVerificationMode);
+router.post("/settings/email-verification-mode", toggleEmailVerificationMode);
+router.post("/settings/skill-proposal", toggleSkillProposal);
+
+// Official skills management (admin can create/delete official skills)
+router.get("/skills", requirePermission("viewStats"), getSkills);
+router.post("/skills", requirePermission("validateOffers"), createSkill);
+router.delete("/skills/:id", requirePermission("validateOffers"), deleteSkill);
+
+// Proposed skills management (already partially added, ensure all are present)
+router.get(
+  "/skills/proposed",
+  requirePermission("validateOffers"),
+  getProposedSkills,
+);
+router.get(
+  "/skills/proposed/stats",
+  requirePermission("viewStats"),
+  getProposedSkillsStats,
+);
+router.post(
+  "/skills/proposed/:id/approve",
+  requirePermission("validateOffers"),
+  approveProposedSkill,
+);
+router.post(
+  "/skills/proposed/:id/reject",
+  requirePermission("validateOffers"),
+  rejectProposedSkill,
 );
 
 export default router;

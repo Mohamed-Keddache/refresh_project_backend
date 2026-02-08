@@ -37,6 +37,12 @@ const offerSchema = new mongoose.Schema(
     skills: [{ type: String, index: true }],
     wilaya: { type: String },
 
+    // --- ANEM UPDATE ---
+    isAnem: { type: Boolean, default: false },
+    // -------------------
+
+    allowRepostulation: { type: Boolean, default: true },
+
     validationStatus: {
       type: String,
       enum: ["draft", "pending", "approved", "rejected", "changes_requested"],
@@ -67,7 +73,7 @@ const offerSchema = new mongoose.Schema(
     datePublication: { type: Date },
     nombreCandidatures: { type: Number, default: 0 },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 offerSchema.methods.isVisible = function () {

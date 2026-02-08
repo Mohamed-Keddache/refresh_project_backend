@@ -1,5 +1,7 @@
+// === controllers/offerController.js ===
 import Offer from "../models/Offer.js";
 import Company from "../models/Company.js";
+import AnemOffer from "../models/AnemOffer.js";
 
 const toCursor = (payload) => {
   return Buffer.from(JSON.stringify(payload)).toString("base64");
@@ -26,6 +28,7 @@ export const getAllActiveOffers = async (req, res) => {
       experienceLevel,
       minSalary,
       maxSalary,
+      hasAnem,
     } = req.query;
 
     let query = { actif: true, validationStatus: "approved" };
@@ -52,6 +55,18 @@ export const getAllActiveOffers = async (req, res) => {
 
     if (maxSalary) {
       query.salaryMin = { $lte: parseInt(maxSalary) };
+    }
+
+    // ANEM filter
+    if (hasAnem === "true" || hasAnem === "false") {
+      const anemOfferIds = await AnemOffer.find({ anemEnabled: true }).distinct(
+        "offerId",
+      );
+      if (hasAnem === "true") {
+        query._id = { $in: anemOfferIds };
+      } else {
+        query._id = { $nin: anemOfferIds };
+      }
     }
 
     if (search) {
@@ -115,10 +130,24 @@ export const getAllActiveOffers = async (req, res) => {
     const hasNextPage = offers.length > limit;
     const data = hasNextPage ? offers.slice(0, limit) : offers;
 
+    // Get ANEM status for returned offers
+    const offerIds = data.map((o) => o._id);
+    const anemOffers = await AnemOffer.find({
+      offerId: { $in: offerIds },
+      anemEnabled: true,
+    }).lean();
+    const anemMap = new Map(
+      anemOffers.map((a) => [a.offerId.toString(), true]),
+    );
+
     const enrichedData = data.map((offer) => {
       const isNew =
         new Date() - new Date(offer.datePublication) < 2 * 24 * 60 * 60 * 1000;
-      return { ...offer.toObject(), isNew };
+      return {
+        ...offer.toObject(),
+        isNew,
+        hasAnem: anemMap.has(offer._id.toString()),
+      };
     });
 
     let nextCursor = null;
@@ -161,7 +190,17 @@ export const getOfferDetails = async (req, res) => {
     const isNew =
       new Date() - new Date(offer.datePublication) < 2 * 24 * 60 * 60 * 1000;
 
-    res.json({ ...offer.toObject(), isNew });
+    // Check ANEM status
+    const anemOffer = await AnemOffer.findOne({
+      offerId: offer._id,
+      anemEnabled: true,
+    }).lean();
+
+    res.json({
+      ...offer.toObject(),
+      isNew,
+      hasAnem: !!anemOffer,
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ msg: err.message });

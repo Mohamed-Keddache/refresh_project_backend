@@ -1,3 +1,4 @@
+// === models/Recruiter.js ===
 import mongoose from "mongoose";
 
 const recruiterSchema = new mongoose.Schema(
@@ -68,6 +69,50 @@ const recruiterSchema = new mongoose.Schema(
 
     isAdmin: { type: Boolean, default: false },
 
+    // ==========================================
+    // ANEM Registration Status
+    // ==========================================
+    anem: {
+      // Reference to the AnemRegistration document
+      registrationId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "AnemRegistration",
+      },
+
+      // Current status synced from AnemRegistration
+      status: {
+        type: String,
+        enum: [
+          "not_started",
+          "draft",
+          "pending",
+          "pending_verification",
+          "in_progress",
+          "registered",
+          "failed",
+          "rejected",
+        ],
+        default: "not_started",
+      },
+
+      // Verified ANEM ID (copied here for quick access)
+      anemId: { type: String },
+
+      // When successfully registered
+      registeredAt: { type: Date },
+
+      // Track if user has seen the initial ANEM modal (first offer creation)
+      hasSeenAnemModal: { type: Boolean, default: false },
+      modalSeenAt: { type: Date },
+
+      // Track if user explicitly declined ANEM (said "No" to first question)
+      declinedAnem: { type: Boolean, default: false },
+      declinedAt: { type: Date },
+
+      // Last status update timestamp
+      lastStatusUpdate: { type: Date },
+    },
+
     favoriteCandidates: [
       {
         candidateId: { type: mongoose.Schema.Types.ObjectId, ref: "Candidate" },
@@ -79,12 +124,14 @@ const recruiterSchema = new mongoose.Schema(
     invitedBy: { type: mongoose.Schema.Types.ObjectId, ref: "Recruiter" },
     invitedAt: Date,
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 recruiterSchema.index({ userId: 1 });
 recruiterSchema.index({ companyId: 1 });
 recruiterSchema.index({ status: 1 });
+recruiterSchema.index({ "anem.status": 1 });
+recruiterSchema.index({ "anem.anemId": 1 });
 
 recruiterSchema.methods.canPerformActions = function () {
   return this.status === "validated";
@@ -92,6 +139,39 @@ recruiterSchema.methods.canPerformActions = function () {
 
 recruiterSchema.methods.hasPendingRequests = function () {
   return this.validationRequests.some((r) => r.status === "pending");
+};
+
+recruiterSchema.methods.isAnemRegistered = function () {
+  return this.anem.status === "registered" && this.anem.anemId;
+};
+
+recruiterSchema.methods.canCreateAnemOffer = function () {
+  return this.anem.status === "registered" && this.anem.anemId;
+};
+
+recruiterSchema.methods.shouldShowAnemModal = function (offerCount) {
+  // Show modal if:
+  // 1. First offer creation AND hasn't seen modal yet
+  // 2. OR trying to enable ANEM toggle but not registered and hasn't declined
+  if (offerCount === 0 && !this.anem.hasSeenAnemModal) {
+    return { show: true, reason: "first_offer" };
+  }
+  return { show: false, reason: null };
+};
+
+recruiterSchema.methods.updateAnemStatus = async function (
+  newStatus,
+  anemId = null,
+) {
+  this.anem.status = newStatus;
+  this.anem.lastStatusUpdate = new Date();
+
+  if (newStatus === "registered" && anemId) {
+    this.anem.anemId = anemId;
+    this.anem.registeredAt = new Date();
+  }
+
+  await this.save();
 };
 
 export default mongoose.model("Recruiter", recruiterSchema);

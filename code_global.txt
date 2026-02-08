@@ -1,0 +1,2493 @@
+# GLOBAL USER CONTEXT CODE
+# Generated automatically
+
+
+
+=== config/cloudinary.js ===
+import { v2 as cloudinary } from "cloudinary";
+import { Readable } from "stream";
+
+// Configure Cloudinary
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+/**
+ * Upload a file buffer to Cloudinary
+ * @param {Buffer} buffer - File buffer
+ * @param {Object} options - Upload options
+ * @returns {Promise<Object>} Cloudinary upload result
+ */
+export const uploadToCloudinary = (buffer, options = {}) => {
+  return new Promise((resolve, reject) => {
+    const uploadOptions = {
+      resource_type: "auto",
+      ...options,
+    };
+
+    const uploadStream = cloudinary.uploader.upload_stream(
+      uploadOptions,
+      (error, result) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve(result);
+        }
+      },
+    );
+
+    const readableStream = new Readable();
+    readableStream.push(buffer);
+    readableStream.push(null);
+    readableStream.pipe(uploadStream);
+  });
+};
+
+/**
+ * Delete a file from Cloudinary
+ * @param {string} publicId - Cloudinary public ID
+ * @param {string} resourceType - Resource type (image, raw, video)
+ * @returns {Promise<Object>}
+ */
+export const deleteFromCloudinary = async (
+  publicId,
+  resourceType = "image",
+) => {
+  try {
+    const result = await cloudinary.uploader.destroy(publicId, {
+      resource_type: resourceType,
+    });
+    return result;
+  } catch (error) {
+    console.error(`Failed to delete from Cloudinary: ${publicId}`, error);
+    // Don't throw - we don't want deletion failures to break the app
+    return { result: "error", error: error.message };
+  }
+};
+
+/**
+ * Extract public ID from Cloudinary URL
+ * @param {string} url - Cloudinary URL
+ * @returns {string|null} Public ID
+ */
+export const getPublicIdFromUrl = (url) => {
+  if (!url || !url.includes("cloudinary.com")) {
+    return null;
+  }
+
+  try {
+    // Handle both image and raw URLs
+    // Format: https://res.cloudinary.com/{cloud}/image/upload/{version}/{folder}/{publicId}.{ext}
+    // or: https://res.cloudinary.com/{cloud}/raw/upload/{version}/{folder}/{publicId}.{ext}
+    const regex =
+      /\/(?:image|raw|video)\/upload\/(?:v\d+\/)?(.+?)(?:\.[^.]+)?$/;
+    const match = url.match(regex);
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Upload CV to Cloudinary
+ * @param {Buffer} buffer - File buffer
+ * @param {string} filename - Original filename
+ * @param {string} userId - User ID for folder organization
+ * @returns {Promise<Object>}
+ */
+export const uploadCV = async (buffer, filename, userId) => {
+  const extension = filename.split(".").pop().toLowerCase();
+
+  return uploadToCloudinary(buffer, {
+    folder: `recruitment/cvs/${userId}`,
+    resource_type: "raw",
+    public_id: `cv_${Date.now()}`,
+    format: extension,
+    tags: ["cv", userId],
+  });
+};
+
+/**
+ * Upload profile image to Cloudinary
+ * @param {Buffer} buffer - File buffer
+ * @param {string} userId - User ID for folder organization
+ * @returns {Promise<Object>}
+ */
+export const uploadProfileImage = async (buffer, userId) => {
+  return uploadToCloudinary(buffer, {
+    folder: `recruitment/profiles/${userId}`,
+    resource_type: "image",
+    public_id: `profile_${Date.now()}`,
+    transformation: [
+      { width: 400, height: 400, crop: "fill", gravity: "face" },
+      { quality: "auto:good" },
+      { fetch_format: "auto" },
+    ],
+    tags: ["profile", userId],
+  });
+};
+
+/**
+ * Upload attachment to Cloudinary
+ * @param {Buffer} buffer - File buffer
+ * @param {string} filename - Original filename
+ * @param {string} folder - Target folder
+ * @returns {Promise<Object>}
+ */
+export const uploadAttachment = async (
+  buffer,
+  filename,
+  folder = "attachments",
+) => {
+  const extension = filename.split(".").pop().toLowerCase();
+  const isImage = ["jpg", "jpeg", "png", "webp", "gif"].includes(extension);
+
+  return uploadToCloudinary(buffer, {
+    folder: `recruitment/${folder}`,
+    resource_type: isImage ? "image" : "raw",
+    public_id: `attachment_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+    format: isImage ? undefined : extension,
+    tags: ["attachment"],
+  });
+};
+
+/**
+ * Delete multiple files from Cloudinary
+ * @param {string[]} urls - Array of Cloudinary URLs
+ */
+export const deleteMultipleFromCloudinary = async (urls) => {
+  const deletePromises = urls.map(async (url) => {
+    const publicId = getPublicIdFromUrl(url);
+    if (publicId) {
+      // Determine resource type from URL
+      const resourceType = url.includes("/raw/") ? "raw" : "image";
+      return deleteFromCloudinary(publicId, resourceType);
+    }
+  });
+
+  await Promise.allSettled(deletePromises);
+};
+
+export default {
+  uploadToCloudinary,
+  deleteFromCloudinary,
+  getPublicIdFromUrl,
+  uploadCV,
+  uploadProfileImage,
+  uploadAttachment,
+  deleteMultipleFromCloudinary,
+};
+
+
+=== config/db.js ===
+import mongoose from "mongoose";
+
+const connectDB = async () => {
+  try {
+    await mongoose.connect(process.env.MONGO_URI);
+    console.log("🟢 Connecté à MongoDB");
+  } catch (err) {
+    console.error("❌ Erreur MongoDB :", err.message);
+    process.exit(1);
+  }
+};
+
+export default connectDB;
+
+
+=== config/email.js ===
+import nodemailer from "nodemailer";
+
+export const transporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
+});
+
+
+=== config/multer.js ===
+import multer from "multer";
+import path from "path";
+
+// Use memory storage for Cloudinary uploads
+const memoryStorage = multer.memoryStorage();
+
+// File filter for CVs
+const fileFilterCV = (req, file, cb) => {
+  const allowed = [".pdf", ".doc", ".docx"];
+  const ext = path.extname(file.originalname).toLowerCase();
+
+  if (!allowed.includes(ext)) {
+    return cb(new Error("Seulement PDF, DOC ou DOCX autorisés"));
+  }
+  cb(null, true);
+};
+
+// File filter for images
+const fileFilterImage = (req, file, cb) => {
+  const allowed = [".jpg", ".jpeg", ".png", ".webp"];
+  const ext = path.extname(file.originalname).toLowerCase();
+
+  if (!allowed.includes(ext)) {
+    return cb(new Error("Seulement JPG, JPEG, PNG ou WEBP autorisés"));
+  }
+  cb(null, true);
+};
+
+// File filter for attachments (both images and documents)
+const fileFilterAttachments = (req, file, cb) => {
+  const allowed = [".pdf", ".doc", ".docx", ".jpg", ".jpeg", ".png", ".webp"];
+  const ext = path.extname(file.originalname).toLowerCase();
+
+  if (!allowed.includes(ext)) {
+    return cb(new Error("Type de fichier non autorisé"));
+  }
+  cb(null, true);
+};
+
+// CV upload middleware
+export const uploadCV = multer({
+  storage: memoryStorage,
+  fileFilter: fileFilterCV,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+});
+
+// Image upload middleware
+export const uploadImage = multer({
+  storage: memoryStorage,
+  fileFilter: fileFilterImage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+});
+
+// Attachments upload middleware
+export const uploadAttachments = multer({
+  storage: memoryStorage,
+  fileFilter: fileFilterAttachments,
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+});
+
+// Error handler for multer
+export const handleMulterError = (err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    if (err.code === "LIMIT_FILE_SIZE") {
+      return res.status(400).json({ msg: "Fichier trop volumineux" });
+    }
+    if (err.code === "LIMIT_FILE_COUNT") {
+      return res.status(400).json({ msg: "Trop de fichiers" });
+    }
+    return res.status(400).json({ msg: err.message });
+  }
+  if (err) {
+    return res.status(400).json({ msg: err.message });
+  }
+  next();
+};
+
+export default { uploadCV, uploadImage, uploadAttachments, handleMulterError };
+
+
+=== controllers/authController.js ===
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import User from "../models/User.js";
+import Candidate from "../models/Candidate.js";
+import Company from "../models/Company.js";
+import Recruiter from "../models/Recruiter.js"; // Kept from your code
+import VerificationToken from "../models/VerificationToken.js"; // AI Feature
+import SystemSettings from "../models/SystemSettings.js"; // AI Feature
+import {
+  sendVerificationEmail,
+  sendWelcomeEmail,
+} from "../services/emailService.js"; // AI Feature
+
+const generateToken = (user) => {
+  return jwt.sign(
+    {
+      id: user._id,
+      role: user.role,
+      emailVerified: user.emailVerified,
+    },
+    process.env.JWT_SECRET,
+    { expiresIn: "1d" },
+  );
+};
+
+// Helper function from your code
+function getRecruiterStatusMessage(status) {
+  const messages = {
+    pending_validation:
+      "Votre compte est en attente de validation par un administrateur.",
+    pending_documents:
+      "Des documents vous ont été demandés. Veuillez les fournir.",
+    pending_info: "Des informations complémentaires vous ont été demandées.",
+    pending_info_and_documents:
+      "Des informations et des documents vous ont été demandés.",
+    pending_revalidation: "Vos réponses sont en cours d'examen.",
+  };
+  return messages[status] || "Statut en attente.";
+}
+
+export const register = async (req, res) => {
+  try {
+    const {
+      nom,
+      email,
+      motDePasse,
+      role,
+      companyId,
+      nouveauNomEntreprise,
+      nouveauSiteWeb,
+    } = req.body;
+
+    // 1. Check for existing user
+    const exist = await User.findOne({ email: email.toLowerCase() });
+    if (exist) {
+      return res.status(400).json({ msg: "Email déjà utilisé" });
+    }
+
+    // 2. Hash password
+    const hash = await bcrypt.hash(motDePasse, 12);
+
+    // 3. Create user (AI Structure with Cleanup capability)
+    const user = await User.create({
+      nom,
+      email: email.toLowerCase(),
+      motDePasse: hash,
+      role,
+      emailVerified: false,
+      accountStatus: "active",
+    });
+
+    try {
+      // 4. Handle Role Specifics
+      if (role === "recruteur") {
+        let finalCompanyId;
+
+        // Handle Company Logic (AI + Your Logic merged)
+        if (companyId) {
+          const comp = await Company.findById(companyId);
+          if (!comp) {
+            await User.findByIdAndDelete(user._id);
+            return res.status(400).json({ msg: "Entreprise introuvable" });
+          }
+          finalCompanyId = comp._id;
+        } else if (nouveauNomEntreprise) {
+          const newComp = await Company.create({
+            name: nouveauNomEntreprise,
+            website: nouveauSiteWeb,
+            status: "pending",
+          });
+          finalCompanyId = newComp._id;
+        } else {
+          // Cleanup if no company selected
+          await User.findByIdAndDelete(user._id);
+          return res.status(400).json({
+            msg: "Vous devez sélectionner ou créer une entreprise.",
+          });
+        }
+
+        // --- RESTORED YOUR CODE: Create Recruiter Model ---
+        await Recruiter.create({
+          userId: user._id,
+          companyId: finalCompanyId,
+          position: "Recruteur", // Default or from body if you add it later
+          status: "pending_validation",
+          isAdmin: !companyId, // Logic: If creating new company, you are admin
+        });
+        // --------------------------------------------------
+      } else if (role === "candidat") {
+        await Candidate.create({ userId: user._id });
+      }
+
+      // 5. Send verification email (AI Feature: Uses SystemSettings)
+      // This checks DB to see if we are in 'development' (123456) or 'smtp' mode
+      const verificationMode = await SystemSettings.getSetting(
+        "email_verification_mode",
+        "development",
+      );
+
+      if (verificationMode === "smtp") {
+        const { code } = await VerificationToken.createVerificationToken(
+          user._id,
+          "email_verification",
+          15,
+        );
+        await sendVerificationEmail(user.email, code, user.nom);
+      } else {
+        console.log(
+          `📨 [DEV MODE] User Registered: ${user.email}. Code will be static: 123456`,
+        );
+      }
+
+      const token = generateToken(user);
+
+      res.status(201).json({
+        msg: "Inscription réussie. Vérifiez votre email.",
+        token,
+        user: {
+          id: user._id,
+          email: user.email,
+          role: user.role,
+          emailVerified: false,
+        },
+        needsEmailVerification: true,
+      });
+    } catch (err) {
+      // Critical: If Recruiter or Company creation fails, delete the User so they aren't stuck.
+      await User.findByIdAndDelete(user._id);
+      throw err;
+    }
+  } catch (err) {
+    console.error("Registration error:", err);
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const login = async (req, res) => {
+  try {
+    const { email, motDePasse } = req.body;
+
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) {
+      return res.status(404).json({ msg: "Utilisateur non trouvé" });
+    }
+
+    const ok = await bcrypt.compare(motDePasse, user.motDePasse);
+    if (!ok) {
+      return res.status(401).json({ msg: "Mot de passe incorrect" });
+    }
+
+    // --- RESTORED YOUR CODE: Detailed Status Checks ---
+    if (!user.canLogin()) {
+      if (user.accountStatus === "banned") {
+        return res.status(403).json({
+          msg: "Votre compte a été banni. Veuillez contacter l'administrateur.",
+          code: "ACCOUNT_BANNED",
+        });
+      }
+      if (user.accountStatus === "suspended") {
+        return res.status(403).json({
+          msg: `Votre compte est suspendu${
+            user.suspendedUntil
+              ? ` jusqu'au ${user.suspendedUntil.toLocaleDateString("fr-FR")}`
+              : ""
+          }.`,
+          code: "ACCOUNT_SUSPENDED",
+          reason: user.suspensionReason,
+        });
+      }
+    }
+
+    // --- RESTORED YOUR CODE: Recruiter Specific Flow ---
+    if (user.role === "recruteur") {
+      if (!user.emailVerified) {
+        return res.status(403).json({
+          msg: "Veuillez confirmer votre email avant de vous connecter.",
+          code: "EMAIL_NOT_VERIFIED",
+          needEmailVerification: true,
+        });
+      }
+
+      const recruiter = await Recruiter.findOne({ userId: user._id });
+      if (recruiter) {
+        if (recruiter.status === "rejected") {
+          return res.status(403).json({
+            msg: "Votre compte recruteur a été refusé.",
+            code: "RECRUITER_REJECTED",
+            reason: recruiter.rejectionReason,
+          });
+        }
+
+        // Logic for Limited Access (Pending Validation)
+        if (recruiter.status !== "validated") {
+          const token = generateToken(user);
+          user.derniereConnexion = new Date();
+          await user.save();
+
+          return res.json({
+            msg: "Connexion réussie (accès limité)",
+            token,
+            user: {
+              id: user._id,
+              nom: user.nom,
+              email: user.email,
+              role: user.role,
+              emailVerified: user.emailVerified,
+            },
+            recruiterStatus: recruiter.status,
+            limitedAccess: true,
+            statusMessage: getRecruiterStatusMessage(recruiter.status),
+          });
+        }
+      }
+    }
+
+    // Standard Login
+    const token = generateToken(user);
+    user.derniereConnexion = new Date();
+    await user.save();
+
+    res.json({
+      msg: "Connexion réussie ✅",
+      token,
+      user: {
+        id: user._id,
+        nom: user.nom,
+        email: user.email,
+        role: user.role,
+        emailVerified: user.emailVerified,
+      },
+      needsEmailVerification: !user.emailVerified,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const resendConfirmationCode = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ msg: "Utilisateur introuvable" });
+    }
+
+    if (user.emailVerified) {
+      return res.status(400).json({ msg: "Email déjà vérifié" });
+    }
+
+    // AI Feature: Check SystemSettings to decide how to send
+    const verificationMode = await SystemSettings.getSetting(
+      "email_verification_mode",
+      "development",
+    );
+
+    if (verificationMode === "smtp") {
+      const { code, expiresAt } =
+        await VerificationToken.createVerificationToken(
+          user._id,
+          "email_verification",
+          15,
+        );
+
+      await sendVerificationEmail(user.email, code, user.nom);
+
+      res.json({
+        msg: "Code de confirmation envoyé 📨",
+        expiresAt,
+      });
+    } else {
+      // Development mode behavior
+      console.log(
+        `📨 [DEV MODE] Code de confirmation pour ${user.email}: 123456`,
+      );
+      res.json({
+        msg: "Code de confirmation envoyé (Mode développement: utilisez 123456) 📨",
+      });
+    }
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const verifyEmail = async (req, res) => {
+  try {
+    const { code } = req.body;
+    const userId = req.user.id;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ msg: "Utilisateur introuvable" });
+    }
+
+    if (user.emailVerified) {
+      return res.status(400).json({ msg: "Email déjà vérifié" });
+    }
+
+    const verificationMode = await SystemSettings.getSetting(
+      "email_verification_mode",
+      "development",
+    );
+
+    let isValid = false;
+
+    if (verificationMode === "development") {
+      // Development mode: accept static code
+      isValid = code === "123456";
+      if (!isValid) {
+        return res
+          .status(400)
+          .json({
+            msg: "Code incorrect. Utilisez 123456 en mode développement.",
+          });
+      }
+    } else {
+      // Production mode: verify against database using VerificationToken
+      const result = await VerificationToken.verifyCode(
+        userId,
+        code,
+        "email_verification",
+      );
+
+      if (!result.valid) {
+        return res.status(400).json({
+          msg: result.error,
+          attemptsRemaining: result.attemptsRemaining,
+        });
+      }
+      isValid = true;
+    }
+
+    if (isValid) {
+      user.emailVerified = true;
+      await user.save();
+
+      // Send welcome email (Fire and forget - don't await/crash if it fails)
+      try {
+        await sendWelcomeEmail(user.email, user.nom);
+      } catch (emailErr) {
+        console.error("Failed to send welcome email:", emailErr);
+      }
+
+      const newToken = generateToken(user);
+
+      return res.json({
+        msg: "E-mail confirmé avec succès ! 🎉",
+        token: newToken,
+        user: {
+          id: user._id,
+          nom: user.nom,
+          email: user.email,
+          role: user.role,
+          emailVerified: true,
+        },
+      });
+    }
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const changeEmail = async (req, res) => {
+  try {
+    const { newEmail } = req.body;
+    const userId = req.user.id;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ msg: "Utilisateur introuvable" });
+    }
+
+    if (user.emailVerified) {
+      return res.status(400).json({
+        msg: "Impossible de changer l'email car il est déjà vérifié.",
+      });
+    }
+
+    const normalizedEmail = newEmail.toLowerCase();
+    const exist = await User.findOne({
+      email: normalizedEmail,
+      _id: { $ne: userId },
+    });
+    if (exist) {
+      return res.status(400).json({ msg: "Cet email est déjà utilisé." });
+    }
+
+    user.email = normalizedEmail;
+    await user.save();
+
+    // AI Feature: Delete any old verification tokens for safety
+    await VerificationToken.deleteMany({ userId, type: "email_verification" });
+
+    res.json({
+      msg: `Email mis à jour vers ${normalizedEmail}. Veuillez confirmer ce nouvel email.`,
+      email: normalizedEmail,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getCompanies = async (req, res) => {
+  try {
+    // AI Optimization: Added .sort() and .lean() for better performance
+    const companies = await Company.find({ status: "active" })
+      .select("_id name")
+      .sort({ name: 1 })
+      .lean();
+
+    res.json(companies);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export default {
+  register,
+  login,
+  verifyEmail,
+  resendConfirmationCode,
+  changeEmail,
+  getCompanies,
+};
+
+
+=== controllers/offerController.js ===
+// === controllers/offerController.js ===
+import Offer from "../models/Offer.js";
+import Company from "../models/Company.js";
+import AnemOffer from "../models/AnemOffer.js";
+
+const toCursor = (payload) => {
+  return Buffer.from(JSON.stringify(payload)).toString("base64");
+};
+
+const fromCursor = (cursor) => {
+  try {
+    return JSON.parse(Buffer.from(cursor, "base64").toString("utf8"));
+  } catch (e) {
+    return null;
+  }
+};
+
+export const getAllActiveOffers = async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 10;
+    const {
+      cursor,
+      wilaya,
+      sort,
+      search,
+      type,
+      domaine,
+      experienceLevel,
+      minSalary,
+      maxSalary,
+      hasAnem,
+    } = req.query;
+
+    let query = { actif: true, validationStatus: "approved" };
+
+    if (wilaya) {
+      query.wilaya = { $regex: new RegExp(`^${wilaya}$`, "i") };
+    }
+
+    if (type) {
+      query.type = type;
+    }
+
+    if (domaine) {
+      query.domaine = domaine;
+    }
+
+    if (experienceLevel) {
+      query.experienceLevel = experienceLevel;
+    }
+
+    if (minSalary) {
+      query.salaryMax = { $gte: parseInt(minSalary) };
+    }
+
+    if (maxSalary) {
+      query.salaryMin = { $lte: parseInt(maxSalary) };
+    }
+
+    // ANEM filter
+    if (hasAnem === "true" || hasAnem === "false") {
+      const anemOfferIds = await AnemOffer.find({ anemEnabled: true }).distinct(
+        "offerId",
+      );
+      if (hasAnem === "true") {
+        query._id = { $in: anemOfferIds };
+      } else {
+        query._id = { $nin: anemOfferIds };
+      }
+    }
+
+    if (search) {
+      const matchingCompanies = await Company.find({
+        name: { $regex: search, $options: "i" },
+      }).select("_id");
+
+      const companyIds = matchingCompanies.map((c) => c._id);
+
+      query.$or = [
+        { titre: { $regex: search, $options: "i" } },
+        { description: { $regex: search, $options: "i" } },
+        { skills: { $in: [new RegExp(search, "i")] } },
+        { companyId: { $in: companyIds } },
+      ];
+    }
+
+    if (cursor) {
+      const decrypted = fromCursor(cursor);
+
+      if (decrypted) {
+        const { id, value } = decrypted;
+
+        if (sort === "popular") {
+          query.$and = [
+            ...(query.$and || []),
+            {
+              $or: [
+                { nombreCandidatures: { $lt: value } },
+                { nombreCandidatures: value, _id: { $lt: id } },
+              ],
+            },
+          ];
+        } else {
+          query.$and = [
+            ...(query.$and || []),
+            {
+              $or: [
+                { datePublication: { $lt: new Date(value) } },
+                { datePublication: new Date(value), _id: { $lt: id } },
+              ],
+            },
+          ];
+        }
+      }
+    }
+
+    let sortQuery = {};
+    if (sort === "popular") {
+      sortQuery = { nombreCandidatures: -1, _id: -1 };
+    } else {
+      sortQuery = { datePublication: -1, _id: -1 };
+    }
+
+    const offers = await Offer.find(query)
+      .populate("companyId", "name logo location industry")
+      .populate("recruteurId", "position")
+      .sort(sortQuery)
+      .limit(limit + 1);
+
+    const hasNextPage = offers.length > limit;
+    const data = hasNextPage ? offers.slice(0, limit) : offers;
+
+    // Get ANEM status for returned offers
+    const offerIds = data.map((o) => o._id);
+    const anemOffers = await AnemOffer.find({
+      offerId: { $in: offerIds },
+      anemEnabled: true,
+    }).lean();
+    const anemMap = new Map(
+      anemOffers.map((a) => [a.offerId.toString(), true]),
+    );
+
+    const enrichedData = data.map((offer) => {
+      const isNew =
+        new Date() - new Date(offer.datePublication) < 2 * 24 * 60 * 60 * 1000;
+      return {
+        ...offer.toObject(),
+        isNew,
+        hasAnem: anemMap.has(offer._id.toString()),
+      };
+    });
+
+    let nextCursor = null;
+    if (hasNextPage && data.length > 0) {
+      const lastItem = data[data.length - 1];
+
+      const cursorValue =
+        sort === "popular"
+          ? lastItem.nombreCandidatures
+          : lastItem.datePublication;
+
+      nextCursor = toCursor({
+        id: lastItem._id,
+        value: cursorValue,
+      });
+    }
+
+    res.json({
+      data: enrichedData,
+      meta: {
+        nextCursor,
+        hasNextPage,
+        limit,
+      },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getOfferDetails = async (req, res) => {
+  try {
+    const offer = await Offer.findOne({ _id: req.params.id, actif: true })
+      .populate("companyId", "name logo website description location size")
+      .populate("recruteurId", "position");
+
+    if (!offer) return res.status(404).json({ msg: "Offre introuvable" });
+
+    const isNew =
+      new Date() - new Date(offer.datePublication) < 2 * 24 * 60 * 60 * 1000;
+
+    // Check ANEM status
+    const anemOffer = await AnemOffer.findOne({
+      offerId: offer._id,
+      anemEnabled: true,
+    }).lean();
+
+    res.json({
+      ...offer.toObject(),
+      isNew,
+      hasAnem: !!anemOffer,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+=== controllers/skillController.js ===
+import Skill from "../models/Skills.js";
+import ProposedSkill from "../models/ProposedSkill.js";
+import Candidate from "../models/Candidate.js";
+import SystemSettings from "../models/SystemSettings.js";
+
+/**
+ * Get skills with search
+ * GET /api/skills
+ */
+export const getSkills = async (req, res) => {
+  try {
+    const { search, category } = req.query;
+    let query = {};
+
+    if (search) {
+      query.name = { $regex: search, $options: "i" };
+    }
+
+    if (category) {
+      query.category = category;
+    }
+
+    const skills = await Skill.find(query).sort({ name: 1 }).limit(50).lean();
+
+    // Get distinct categories for filtering
+    const categories = await Skill.distinct("category");
+
+    res.json({
+      skills,
+      categories: categories.filter(Boolean),
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+/**
+ * Check if skill proposal is enabled
+ * GET /api/skills/proposal-status
+ */
+export const getSkillProposalStatus = async (req, res) => {
+  try {
+    const enabled = await SystemSettings.getSetting(
+      "skill_proposal_enabled",
+      true,
+    );
+    res.json({ enabled });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+/**
+ * Create skill (admin only)
+ * POST /api/admin/skills
+ */
+export const createSkill = async (req, res) => {
+  try {
+    const { name, category } = req.body;
+    const normalizedName = name.trim().toLowerCase();
+
+    const exist = await Skill.findOne({ name: normalizedName });
+    if (exist) {
+      return res.status(400).json({ msg: "Cette compétence existe déjà." });
+    }
+
+    const newSkill = await Skill.create({
+      name: normalizedName,
+      category: category?.trim() || null,
+    });
+
+    res.status(201).json(newSkill);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+/**
+ * Delete skill (admin only)
+ * DELETE /api/admin/skills/:id
+ */
+export const deleteSkill = async (req, res) => {
+  try {
+    const skill = await Skill.findByIdAndDelete(req.params.id);
+    if (!skill) {
+      return res.status(404).json({ msg: "Compétence introuvable" });
+    }
+    res.json({ msg: "Compétence supprimée" });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+/**
+ * Get all proposed skills (admin only)
+ * GET /api/admin/skills/proposed
+ */
+export const getProposedSkills = async (req, res) => {
+  try {
+    const { status = "pending", page = 1, limit = 20 } = req.query;
+    const skip = (page - 1) * limit;
+
+    let query = {};
+    if (status !== "all") {
+      query.status = status;
+    }
+
+    const [proposedSkills, total] = await Promise.all([
+      ProposedSkill.find(query)
+        .sort({ proposalCount: -1, createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .populate("proposedBy.userId", "nom email")
+        .populate("reviewedBy", "nom")
+        .lean(),
+      ProposedSkill.countDocuments(query),
+    ]);
+
+    res.json({
+      data: proposedSkills,
+      meta: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / limit),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+/**
+ * Approve proposed skill and add to official list (admin only)
+ * POST /api/admin/skills/proposed/:id/approve
+ */
+export const approveProposedSkill = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { domain } = req.body;
+
+    const proposedSkill = await ProposedSkill.findById(id);
+    if (!proposedSkill) {
+      return res.status(404).json({ msg: "Compétence proposée introuvable" });
+    }
+
+    if (proposedSkill.status !== "pending") {
+      return res
+        .status(400)
+        .json({ msg: "Cette compétence a déjà été traitée" });
+    }
+
+    // Check if skill already exists in official list
+    let officialSkill = await Skill.findOne({ name: proposedSkill.label });
+
+    if (!officialSkill) {
+      // Create official skill
+      officialSkill = await Skill.create({
+        name: proposedSkill.label,
+        category: domain?.trim() || null,
+        wasProposed: true,
+        proposedSkillId: proposedSkill._id,
+      });
+    }
+
+    // Update proposed skill status
+    proposedSkill.status = "approved";
+    proposedSkill.domain = domain?.trim() || null;
+    proposedSkill.approvedSkillId = officialSkill._id;
+    proposedSkill.reviewedBy = req.user.id;
+    proposedSkill.reviewedAt = new Date();
+    await proposedSkill.save();
+
+    // Update all candidate profiles that have this skill with null domain
+    const updateResult = await Candidate.updateMany(
+      {
+        "skills.name": proposedSkill.label,
+        "skills.domain": null,
+      },
+      {
+        $set: {
+          "skills.$[elem].domain": domain?.trim() || null,
+          "skills.$[elem].skillId": officialSkill._id,
+          "skills.$[elem].isProposed": false,
+        },
+      },
+      {
+        arrayFilters: [
+          { "elem.name": proposedSkill.label, "elem.domain": null },
+        ],
+      },
+    );
+
+    res.json({
+      msg: "Compétence approuvée et ajoutée à la liste officielle",
+      skill: officialSkill,
+      candidatesUpdated: updateResult.modifiedCount,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+/**
+ * Reject proposed skill (admin only)
+ * POST /api/admin/skills/proposed/:id/reject
+ */
+export const rejectProposedSkill = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    const proposedSkill = await ProposedSkill.findById(id);
+    if (!proposedSkill) {
+      return res.status(404).json({ msg: "Compétence proposée introuvable" });
+    }
+
+    proposedSkill.status = "rejected";
+    proposedSkill.reviewedBy = req.user.id;
+    proposedSkill.reviewedAt = new Date();
+    proposedSkill.reviewNote = reason;
+    await proposedSkill.save();
+
+    res.json({ msg: "Compétence proposée rejetée", proposedSkill });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+/**
+ * Get proposed skills stats (admin only)
+ * GET /api/admin/skills/proposed/stats
+ */
+export const getProposedSkillsStats = async (req, res) => {
+  try {
+    const stats = await ProposedSkill.aggregate([
+      {
+        $group: {
+          _id: "$status",
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const statsMap = {
+      pending: 0,
+      approved: 0,
+      rejected: 0,
+      merged: 0,
+    };
+
+    stats.forEach((s) => {
+      statsMap[s._id] = s.count;
+    });
+
+    const mostProposed = await ProposedSkill.find({ status: "pending" })
+      .sort({ proposalCount: -1 })
+      .limit(5)
+      .select("label proposalCount");
+
+    res.json({
+      byStatus: statsMap,
+      total: Object.values(statsMap).reduce((a, b) => a + b, 0),
+      mostProposed,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export default {
+  getSkills,
+  getSkillProposalStatus,
+  createSkill,
+  deleteSkill,
+  getProposedSkills,
+  approveProposedSkill,
+  rejectProposedSkill,
+  getProposedSkillsStats,
+};
+
+
+=== middleware/auth.js ===
+import jwt from "jsonwebtoken";
+
+export default function auth(req, res, next) {
+  const token = req.header("Authorization");
+  if (!token) return res.status(401).json({ msg: "Pas de token fourni" });
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch {
+    res.status(401).json({ msg: "Token invalide" });
+  }
+}
+
+
+=== middleware/optionalAuth.js ===
+import jwt from "jsonwebtoken";
+
+export const optionalAuth = (req, res, next) => {
+  const token = req.header("Authorization");
+
+  if (!token) {
+    req.user = null;
+    return next();
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+  } catch (err) {
+    req.user = null;
+  }
+  next();
+};
+
+
+=== middleware/requireEmailVerification.js ===
+import User from "../models/User.js";
+
+export const requireEmailVerification = async (req, res, next) => {
+  if (!req.user) {
+    return res.status(401).json({ msg: "Utilisateur non authentifié." });
+  }
+
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ msg: "Utilisateur introuvable." });
+    }
+
+    if (!user.emailVerified) {
+      return res.status(403).json({
+        msg: "Veuillez confirmer votre adresse e-mail pour effectuer cette action.",
+        code: "EMAIL_NOT_VERIFIED",
+      });
+    }
+    next();
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+=== middleware/security.js ===
+import helmet from "helmet";
+import mongoSanitize from "express-mongo-sanitize";
+
+// Simple in-memory rate limiter (production: use redis)
+const rateLimitStore = new Map();
+
+const createRateLimiter = (options = {}) => {
+  const {
+    windowMs = 15 * 60 * 1000, // 15 minutes
+    max = 100,
+    message = "Trop de requêtes, veuillez réessayer plus tard.",
+    keyGenerator = (req) => req.ip,
+  } = options;
+
+  // Cleanup old entries periodically
+  setInterval(() => {
+    const now = Date.now();
+    for (const [key, data] of rateLimitStore.entries()) {
+      if (now - data.startTime > windowMs) {
+        rateLimitStore.delete(key);
+      }
+    }
+  }, windowMs);
+
+  return (req, res, next) => {
+    const key = keyGenerator(req);
+    const now = Date.now();
+
+    let record = rateLimitStore.get(key);
+
+    if (!record || now - record.startTime > windowMs) {
+      record = { count: 1, startTime: now };
+      rateLimitStore.set(key, record);
+    } else {
+      record.count++;
+    }
+
+    res.setHeader("X-RateLimit-Limit", max);
+    res.setHeader("X-RateLimit-Remaining", Math.max(0, max - record.count));
+    res.setHeader(
+      "X-RateLimit-Reset",
+      new Date(record.startTime + windowMs).toISOString(),
+    );
+
+    if (record.count > max) {
+      return res
+        .status(429)
+        .json({
+          msg: message,
+          retryAfter: Math.ceil((record.startTime + windowMs - now) / 1000),
+        });
+    }
+
+    next();
+  };
+};
+
+// Specific rate limiters
+export const authRateLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: "Trop de tentatives de connexion. Réessayez dans 15 minutes.",
+  keyGenerator: (req) => `auth:${req.ip}`,
+});
+
+export const emailVerificationLimiter = createRateLimiter({
+  windowMs: 60 * 1000, // 1 minute
+  max: 3,
+  message: "Trop de demandes de vérification. Réessayez dans 1 minute.",
+  keyGenerator: (req) => `email:${req.user?.id || req.ip}`,
+});
+
+export const uploadRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  max: 10,
+  message: "Trop de téléchargements. Réessayez dans 1 minute.",
+  keyGenerator: (req) => `upload:${req.user?.id || req.ip}`,
+});
+
+export const generalRateLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 200,
+});
+
+// Security middleware setup
+export const setupSecurity = (app) => {
+  // Helmet for security headers
+  app.use(
+    helmet({
+      contentSecurityPolicy: false, // Adjust based on frontend needs
+      crossOriginEmbedderPolicy: false,
+    }),
+  );
+
+  // Sanitize MongoDB queries
+  app.use(mongoSanitize());
+
+  // General rate limiting
+  app.use(generalRateLimiter);
+};
+
+export default {
+  setupSecurity,
+  authRateLimiter,
+  emailVerificationLimiter,
+  uploadRateLimiter,
+};
+
+
+=== middleware/validate.js ===
+import { validationResult, body, param, query } from "express-validator";
+
+// Validation error handler
+export const handleValidationErrors = (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({
+      msg: "Données invalides",
+      errors: errors.array().map((e) => ({ field: e.path, message: e.msg })),
+    });
+  }
+  next();
+};
+
+// Common validators
+export const validators = {
+  // Auth validators
+  register: [
+    body("nom")
+      .trim()
+      .notEmpty()
+      .withMessage("Le nom est requis")
+      .isLength({ max: 100 }),
+    body("email")
+      .trim()
+      .isEmail()
+      .withMessage("Email invalide")
+      .normalizeEmail(),
+    body("motDePasse")
+      .isLength({ min: 8 })
+      .withMessage("Le mot de passe doit contenir au moins 8 caractères")
+      .matches(/[a-z]/)
+      .withMessage("Le mot de passe doit contenir une minuscule")
+      .matches(/[A-Z]/)
+      .withMessage("Le mot de passe doit contenir une majuscule")
+      .matches(/\d/)
+      .withMessage("Le mot de passe doit contenir un chiffre"),
+    body("role").isIn(["candidat", "recruteur"]).withMessage("Rôle invalide"),
+    handleValidationErrors,
+  ],
+
+  login: [
+    body("email")
+      .trim()
+      .isEmail()
+      .withMessage("Email invalide")
+      .normalizeEmail(),
+    body("motDePasse").notEmpty().withMessage("Mot de passe requis"),
+    handleValidationErrors,
+  ],
+
+  verifyEmail: [
+    body("code")
+      .trim()
+      .notEmpty()
+      .withMessage("Code requis")
+      .isLength({ min: 6, max: 6 }),
+    handleValidationErrors,
+  ],
+
+  changeEmail: [
+    body("newEmail")
+      .trim()
+      .isEmail()
+      .withMessage("Email invalide")
+      .normalizeEmail(),
+    handleValidationErrors,
+  ],
+
+  // Candidate validators
+  updateProfile: [
+    body("telephone")
+      .optional()
+      .trim()
+      .matches(/^[0-9+\s-]{8,20}$/)
+      .withMessage("Téléphone invalide"),
+    body("bio")
+      .optional()
+      .trim()
+      .isLength({ max: 1000 })
+      .withMessage("Bio trop longue (max 1000)"),
+    body("dateOfBirth").optional().isISO8601().withMessage("Date invalide"),
+    body("gender")
+      .optional()
+      .isIn(["homme", "femme"])
+      .withMessage("Genre invalide"),
+    handleValidationErrors,
+  ],
+
+  applyToOffer: [
+    body("offreId").isMongoId().withMessage("ID offre invalide"),
+    body("cvUrl").notEmpty().withMessage("CV requis"),
+    body("coverLetter")
+      .optional()
+      .trim()
+      .isLength({ max: 5000 })
+      .withMessage("Lettre trop longue"),
+    handleValidationErrors,
+  ],
+
+  addSkill: [
+    body("name")
+      .trim()
+      .notEmpty()
+      .withMessage("Nom requis")
+      .isLength({ max: 100 }),
+    body("level").optional().isIn(["beginner", "intermediate", "expert"]),
+    handleValidationErrors,
+  ],
+
+  addExperience: [
+    body("jobTitle")
+      .trim()
+      .notEmpty()
+      .withMessage("Titre requis")
+      .isLength({ max: 200 }),
+    body("company")
+      .trim()
+      .notEmpty()
+      .withMessage("Entreprise requise")
+      .isLength({ max: 200 }),
+    body("startDate").optional().isISO8601().withMessage("Date invalide"),
+    body("endDate").optional().isISO8601().withMessage("Date invalide"),
+    handleValidationErrors,
+  ],
+
+  addEducation: [
+    body("institut")
+      .trim()
+      .notEmpty()
+      .withMessage("Institut requis")
+      .isLength({ max: 200 }),
+    body("degree")
+      .trim()
+      .notEmpty()
+      .withMessage("Diplôme requis")
+      .isLength({ max: 200 }),
+    body("startDate").optional().isISO8601().withMessage("Date invalide"),
+    handleValidationErrors,
+  ],
+
+  // Support validators
+  createTicket: [
+    body("subject")
+      .trim()
+      .notEmpty()
+      .withMessage("Sujet requis")
+      .isLength({ max: 200 }),
+    body("description")
+      .trim()
+      .notEmpty()
+      .withMessage("Description requise")
+      .isLength({ max: 5000 }),
+    body("category")
+      .isIn([
+        "support_understanding",
+        "technical_issue",
+        "account_profile",
+        "company_recruitment",
+        "documents_verification",
+        "special_request",
+        "feedback_suggestion",
+      ])
+      .withMessage("Catégorie invalide"),
+    handleValidationErrors,
+  ],
+
+  replyToTicket: [
+    body("content")
+      .trim()
+      .notEmpty()
+      .withMessage("Contenu requis")
+      .isLength({ max: 5000 }),
+    handleValidationErrors,
+  ],
+
+  // Param validators
+  mongoId: (paramName = "id") => [
+    param(paramName).isMongoId().withMessage("ID invalide"),
+    handleValidationErrors,
+  ],
+
+  // Query validators
+  pagination: [
+    query("page").optional().isInt({ min: 1 }).toInt(),
+    query("limit").optional().isInt({ min: 1, max: 100 }).toInt(),
+    handleValidationErrors,
+  ],
+};
+
+export default validators;
+
+
+=== models/Company.js ===
+import mongoose from "mongoose";
+
+const companySchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true, unique: true },
+    logo: { type: String },
+    website: { type: String },
+    description: { type: String },
+    industry: { type: String },
+    location: { type: String },
+    size: { type: String },
+
+    status: {
+      type: String,
+      enum: ["pending", "active", "rejected"],
+      default: "pending",
+    },
+  },
+  { timestamps: true }
+);
+companySchema.index({ status: 1 });
+companySchema.index({ name: "text" });
+export default mongoose.model("Company", companySchema);
+
+
+=== models/Offer.js ===
+import mongoose from "mongoose";
+
+const offerSchema = new mongoose.Schema(
+  {
+    recruteurId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Recruiter",
+      required: true,
+    },
+    companyId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Company",
+      required: true,
+    },
+
+    titre: { type: String, required: true },
+    description: { type: String, required: true },
+    requirements: { type: String, required: true },
+
+    domaine: { type: String },
+    type: {
+      type: String,
+      enum: [
+        "full-time",
+        "part-time",
+        "remote",
+        "internship",
+        "freelance",
+        "CDI",
+        "CDD",
+      ],
+      default: "full-time",
+    },
+    salaryMin: { type: Number },
+    salaryMax: { type: Number },
+    experienceLevel: { type: String, enum: ["junior", "mid", "senior"] },
+    skills: [{ type: String, index: true }],
+    wilaya: { type: String },
+
+    // --- ANEM UPDATE ---
+    isAnem: { type: Boolean, default: false },
+    // -------------------
+
+    allowRepostulation: { type: Boolean, default: true },
+
+    validationStatus: {
+      type: String,
+      enum: ["draft", "pending", "approved", "rejected", "changes_requested"],
+      default: "pending",
+    },
+    validationHistory: [
+      {
+        status: String,
+        message: String,
+        adminId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+        date: { type: Date, default: Date.now },
+      },
+    ],
+    rejectionReason: String,
+
+    visibility: {
+      isPublic: { type: Boolean, default: true },
+      acceptsDirectApplications: { type: Boolean, default: true },
+    },
+
+    candidateSearchMode: {
+      type: String,
+      enum: ["disabled", "manual", "automatic"],
+      default: "disabled",
+    },
+
+    actif: { type: Boolean, default: false },
+    datePublication: { type: Date },
+    nombreCandidatures: { type: Number, default: 0 },
+  },
+  { timestamps: true },
+);
+
+offerSchema.methods.isVisible = function () {
+  return this.validationStatus === "approved" && this.actif;
+};
+
+offerSchema.index({ titre: "text", description: "text", skills: "text" });
+
+export default mongoose.model("Offer", offerSchema);
+
+
+=== models/Skills.js ===
+import mongoose from "mongoose";
+
+const skillSchema = new mongoose.Schema(
+  {
+    name: {
+      type: String,
+      required: true,
+      unique: true,
+      trim: true,
+      lowercase: true,
+      index: true,
+    },
+    category: {
+      type: String,
+      trim: true,
+      index: true,
+    },
+    // Track if this was originally a proposed skill
+    wasProposed: {
+      type: Boolean,
+      default: false,
+    },
+    proposedSkillId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "ProposedSkill",
+    },
+  },
+  { timestamps: true },
+);
+
+skillSchema.index({ name: "text", category: "text" });
+
+export default mongoose.model("Skill", skillSchema);
+
+
+=== models/SystemSettings.js ===
+import mongoose from "mongoose";
+
+const systemSettingsSchema = new mongoose.Schema(
+  {
+    key: {
+      type: String,
+      required: true,
+      unique: true,
+      index: true,
+    },
+    value: {
+      type: mongoose.Schema.Types.Mixed,
+      required: true,
+    },
+    description: {
+      type: String,
+    },
+    updatedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+    updatedAt: {
+      type: Date,
+      default: Date.now,
+    },
+  },
+  { timestamps: true },
+);
+
+// Get a setting with default value
+systemSettingsSchema.statics.getSetting = async function (
+  key,
+  defaultValue = null,
+) {
+  const setting = await this.findOne({ key });
+  return setting ? setting.value : defaultValue;
+};
+
+// Set a setting
+systemSettingsSchema.statics.setSetting = async function (
+  key,
+  value,
+  description = null,
+  updatedBy = null,
+) {
+  const update = { value, updatedAt: new Date() };
+  if (description) update.description = description;
+  if (updatedBy) update.updatedBy = updatedBy;
+
+  return this.findOneAndUpdate(
+    { key },
+    { $set: update, $setOnInsert: { key } },
+    { upsert: true, new: true },
+  );
+};
+
+// Initialize default settings
+systemSettingsSchema.statics.initializeDefaults = async function () {
+  const defaults = [
+    {
+      key: "email_verification_mode",
+      value: process.env.NODE_ENV === "production" ? "smtp" : "development",
+      description:
+        "Mode de vérification email: 'smtp' pour production, 'development' pour code statique 123456",
+    },
+    {
+      key: "skill_proposal_enabled",
+      value: true,
+      description: "Permet aux candidats de proposer de nouvelles compétences",
+    },
+    {
+      key: "max_cv_per_candidate",
+      value: 3,
+      description: "Nombre maximum de CV par candidat",
+    },
+    {
+      key: "verification_code_expiry_minutes",
+      value: 15,
+      description: "Durée de validité du code de vérification en minutes",
+    },
+  ];
+
+  for (const setting of defaults) {
+    const exists = await this.findOne({ key: setting.key });
+    if (!exists) {
+      await this.create(setting);
+    }
+  }
+};
+
+export default mongoose.model("SystemSettings", systemSettingsSchema);
+
+
+=== models/User.js ===
+import mongoose from "mongoose";
+
+const userSchema = new mongoose.Schema(
+  {
+    nom: { type: String },
+    email: { type: String, required: true, unique: true },
+    motDePasse: { type: String, required: true },
+    role: {
+      type: String,
+      enum: ["candidat", "recruteur", "admin"],
+      required: true,
+    },
+
+    emailVerified: {
+      type: Boolean,
+      default: false,
+    },
+
+    accountStatus: {
+      type: String,
+      enum: ["active", "suspended", "banned"],
+      default: "active",
+    },
+    suspensionReason: String,
+    suspendedUntil: Date,
+
+    derniereConnexion: Date,
+  },
+  { timestamps: true }
+);
+
+userSchema.index({ email: 1 });
+userSchema.index({ role: 1 });
+userSchema.index({ createdAt: -1 });
+userSchema.index({ accountStatus: 1 });
+
+userSchema.methods.canLogin = function () {
+  if (this.accountStatus === "banned") return false;
+  if (this.accountStatus === "suspended") {
+    if (this.suspendedUntil && new Date() > this.suspendedUntil) {
+      return true;
+    }
+    return false;
+  }
+  return true;
+};
+
+export default mongoose.model("User", userSchema);
+
+
+=== models/VerificationToken.js ===
+import mongoose from "mongoose";
+import crypto from "crypto";
+
+const verificationTokenSchema = new mongoose.Schema({
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    required: true,
+    index: true,
+  },
+  token: {
+    type: String,
+    required: true,
+  },
+  code: {
+    type: String,
+    required: true,
+  },
+  type: {
+    type: String,
+    enum: ["email_verification", "password_reset"],
+    default: "email_verification",
+  },
+  expiresAt: {
+    type: Date,
+    required: true,
+    index: { expireAfterSeconds: 0 }, // TTL index - auto-delete expired tokens
+  },
+  attempts: {
+    type: Number,
+    default: 0,
+  },
+  maxAttempts: {
+    type: Number,
+    default: 5,
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now,
+  },
+});
+
+// Generate a secure 6-digit code
+verificationTokenSchema.statics.generateCode = function () {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+};
+
+// Generate a secure token
+verificationTokenSchema.statics.generateToken = function () {
+  return crypto.randomBytes(32).toString("hex");
+};
+
+// Create a new verification token
+verificationTokenSchema.statics.createVerificationToken = async function (
+  userId,
+  type = "email_verification",
+  expiresInMinutes = 15,
+) {
+  // Delete any existing tokens for this user and type
+  await this.deleteMany({ userId, type });
+
+  const code = this.generateCode();
+  const token = this.generateToken();
+
+  const verificationToken = await this.create({
+    userId,
+    token,
+    code,
+    type,
+    expiresAt: new Date(Date.now() + expiresInMinutes * 60 * 1000),
+  });
+
+  return { code, token, expiresAt: verificationToken.expiresAt };
+};
+
+// Verify code
+verificationTokenSchema.statics.verifyCode = async function (
+  userId,
+  code,
+  type = "email_verification",
+) {
+  const verificationToken = await this.findOne({
+    userId,
+    type,
+    expiresAt: { $gt: new Date() },
+  });
+
+  if (!verificationToken) {
+    return {
+      valid: false,
+      error: "Code expiré ou invalide. Demandez un nouveau code.",
+    };
+  }
+
+  if (verificationToken.attempts >= verificationToken.maxAttempts) {
+    await verificationToken.deleteOne();
+    return {
+      valid: false,
+      error: "Trop de tentatives. Demandez un nouveau code.",
+    };
+  }
+
+  if (verificationToken.code !== code) {
+    verificationToken.attempts += 1;
+    await verificationToken.save();
+    const remaining =
+      verificationToken.maxAttempts - verificationToken.attempts;
+    return {
+      valid: false,
+      error: `Code incorrect. ${remaining} tentative(s) restante(s).`,
+      attemptsRemaining: remaining,
+    };
+  }
+
+  // Valid - delete the token
+  await verificationToken.deleteOne();
+  return { valid: true };
+};
+
+export default mongoose.model("VerificationToken", verificationTokenSchema);
+
+
+=== package.json ===
+{
+  "name": "refresh_project",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "bcryptjs": "2.4.3",
+    "cloudinary": "^2.9.0",
+    "cors": "2.8.5",
+    "dotenv": "16.4.5",
+    "express": "4.21.2",
+    "express-mongo-sanitize": "^2.2.0",
+    "express-rate-limit": "^8.2.1",
+    "express-validator": "^7.3.1",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "9.0.2",
+    "mongoose": "8.9.5",
+    "morgan": "1.10.1",
+    "multer": "1.4.5-lts.1",
+    "nodemailer": "^7.0.13",
+    "validator": "^13.15.26"
+  }
+}
+
+
+=== routes/authRoutes.js ===
+import express from "express";
+import auth from "../middleware/auth.js";
+import {
+  authRateLimiter,
+  emailVerificationLimiter,
+} from "../middleware/security.js";
+import { validators } from "../middleware/validate.js";
+import {
+  register,
+  login,
+  verifyEmail,
+  resendConfirmationCode,
+  changeEmail,
+  getCompanies,
+} from "../controllers/authController.js";
+
+const router = express.Router();
+
+// Public routes with rate limiting
+router.post("/register", authRateLimiter, validators.register, register);
+router.post("/login", authRateLimiter, validators.login, login);
+
+// Protected routes
+router.post(
+  "/verify-email",
+  auth,
+  emailVerificationLimiter,
+  validators.verifyEmail,
+  verifyEmail,
+);
+router.post(
+  "/resend-code",
+  auth,
+  emailVerificationLimiter,
+  resendConfirmationCode,
+);
+router.put("/change-email", auth, validators.changeEmail, changeEmail);
+
+// Public route for companies list
+router.get("/companies", getCompanies);
+
+export default router;
+
+
+=== routes/offerRoutes.js ===
+import express from "express";
+import {
+  getAllActiveOffers,
+  getOfferDetails,
+} from "../controllers/offerController.js";
+
+const router = express.Router();
+
+router.get("/", getAllActiveOffers);
+
+router.get("/:id", getOfferDetails);
+
+export default router;
+
+
+=== routes/skillRoutes.js ===
+import express from "express";
+import {
+  getSkills,
+  getSkillProposalStatus,
+} from "../controllers/skillController.js";
+import auth from "../middleware/auth.js";
+
+const router = express.Router();
+
+router.get("/", auth, getSkills);
+router.get("/proposal-status", auth, getSkillProposalStatus);
+
+export default router;
+
+
+=== server.js ===
+import express from "express";
+import dotenv from "dotenv";
+import cors from "cors";
+import morgan from "morgan";
+import connectDB from "./config/db.js";
+import setupFolders from "./startup/setupFolders.js";
+import { seedAdmin } from "./startup/seedAdmin.js"; // RESTORED from your code
+import { setupSecurity } from "./middleware/security.js"; // AI Feature
+import SystemSettings from "./models/SystemSettings.js"; // AI Feature
+
+// Routes
+import authRoutes from "./routes/authRoutes.js";
+import candidateRoutes from "./routes/candidateRoutes.js";
+import offerRoutes from "./routes/offerRoutes.js";
+import notificationRoutes from "./routes/notificationRoutes.js";
+import skillRoutes from "./routes/skillRoutes.js";
+import supportRoutes from "./routes/supportRoutes.js";
+import announcementRoutes from "./routes/announcementRoutes.js";
+// RESTORED these missing routes from your code:
+import recruiterRoutes from "./routes/recruiterRoutes.js";
+import adminRoutes from "./routes/adminRoutes.js";
+import anemRoutes from "./routes/anemRoutes.js";
+
+dotenv.config();
+const app = express();
+
+// Security setup (AI Feature)
+// Ensure you have created this file or comment this line out if not
+try {
+  setupSecurity(app);
+} catch (err) {
+  console.warn("⚠️ setupSecurity not found or failed, skipping...");
+}
+
+// CORS (AI Version - Better for Production)
+app.use(
+  cors({
+    origin:
+      process.env.NODE_ENV === "production"
+        ? process.env.FRONTEND_URL?.split(",")
+        : "*",
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "ngrok-skip-browser-warning",
+    ],
+    credentials: true,
+  }),
+);
+
+// Body parsing (AI Version - Higher limit for CV uploads)
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+
+// Logging
+if (process.env.NODE_ENV !== "test") {
+  app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
+}
+
+// Legacy static files
+app.use("/uploads", express.static("uploads"));
+
+// Global error handler for JSON parsing (AI Feature)
+app.use((err, req, res, next) => {
+  if (err instanceof SyntaxError && err.status === 400 && "body" in err) {
+    return res.status(400).json({ msg: "JSON invalide" });
+  }
+  next(err);
+});
+
+async function startServer() {
+  try {
+    await connectDB();
+    setupFolders();
+
+    // RESTORED: Admin Seeding
+    await seedAdmin();
+
+    // AI Feature: Initialize default system settings
+    await SystemSettings.initializeDefaults();
+    console.log("⚙️ Paramètres système initialisés");
+
+    // === ROUTES ===
+    app.use("/api/auth", authRoutes);
+    app.use("/api/skills", skillRoutes);
+    app.use("/api/offers", offerRoutes);
+    app.use("/api/candidates", candidateRoutes);
+    app.use("/api/notifications", notificationRoutes);
+    app.use("/api/support", supportRoutes);
+    app.use("/api/announcements", announcementRoutes);
+
+    // RESTORED: Critical business routes
+    app.use("/api/recruiters", recruiterRoutes);
+    app.use("/api/admin", adminRoutes);
+    app.use("/api/anem", anemRoutes);
+
+    // Health check
+    app.get("/", (req, res) =>
+      res.json({
+        status: "ok",
+        message: "✅ API Recrutement opérationnelle !",
+        timestamp: new Date().toISOString(),
+      }),
+    );
+
+    app.get("/health", (req, res) =>
+      res.json({
+        status: "healthy",
+        uptime: process.uptime(),
+        timestamp: new Date().toISOString(),
+      }),
+    );
+
+    // 404 handler (AI Feature)
+    app.use((req, res) => {
+      res.status(404).json({ msg: "Route non trouvée" });
+    });
+
+    // Global error handler (AI Feature - Better Debugging)
+    app.use((err, req, res, next) => {
+      console.error("❌ Erreur serveur:", err);
+
+      const message =
+        process.env.NODE_ENV === "production"
+          ? "Erreur interne du serveur"
+          : err.message;
+
+      res.status(err.status || 500).json({
+        msg: message,
+        ...(process.env.NODE_ENV !== "production" && { stack: err.stack }),
+      });
+    });
+
+    const PORT = process.env.PORT || 5000;
+    app.listen(PORT, () => {
+      console.log(`🚀 Serveur lancé sur le port ${PORT}`);
+      console.log(`📊 Environnement: ${process.env.NODE_ENV || "development"}`);
+    });
+  } catch (error) {
+    console.error("❌ Erreur lors du démarrage du serveur :", error);
+    process.exit(1);
+  }
+}
+
+startServer();
+
+// Handle uncaught exceptions (AI Feature - Prevents silent crashes)
+process.on("uncaughtException", (err) => {
+  console.error("❌ Uncaught Exception:", err);
+  process.exit(1);
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("❌ Unhandled Rejection at:", promise, "reason:", reason);
+});
+
+export default app;
+
+
+=== services/emailService.js ===
+import nodemailer from "nodemailer";
+import SystemSettings from "../models/SystemSettings.js";
+
+// Create SMTP transporter
+const createTransporter = () => {
+  return nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: parseInt(process.env.SMTP_PORT) || 587,
+    secure: process.env.SMTP_PORT === "465",
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS,
+    },
+  });
+};
+
+// Email templates
+const templates = {
+  verificationCode: (code, userName) => ({
+    subject: "Confirmez votre adresse email",
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <style>
+          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: #4F46E5; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
+          .content { background: #f9fafb; padding: 30px; border-radius: 0 0 8px 8px; }
+          .code { font-size: 32px; font-weight: bold; color: #4F46E5; text-align: center; letter-spacing: 8px; padding: 20px; background: white; border-radius: 8px; margin: 20px 0; }
+          .footer { text-align: center; margin-top: 20px; color: #666; font-size: 12px; }
+          .warning { color: #dc2626; font-size: 14px; margin-top: 15px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1>Vérification de votre email</h1>
+          </div>
+          <div class="content">
+            <p>Bonjour${userName ? ` ${userName}` : ""},</p>
+            <p>Merci de vous être inscrit ! Voici votre code de vérification :</p>
+            <div class="code">${code}</div>
+            <p>Ce code expire dans <strong>15 minutes</strong>.</p>
+            <p class="warning">Si vous n'avez pas demandé ce code, ignorez cet email.</p>
+          </div>
+          <div class="footer">
+            <p>© ${new Date().getFullYear()} Plateforme de Recrutement</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `,
+    text: `Bonjour${userName ? ` ${userName}` : ""},\n\nVotre code de vérification est : ${code}\n\nCe code expire dans 15 minutes.\n\nSi vous n'avez pas demandé ce code, ignorez cet email.`,
+  }),
+
+  welcomeEmail: (userName) => ({
+    subject: "Bienvenue sur notre plateforme !",
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <style>
+          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: #10b981; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
+          .content { background: #f9fafb; padding: 30px; border-radius: 0 0 8px 8px; }
+          .button { display: inline-block; background: #4F46E5; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; margin-top: 15px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1>🎉 Email vérifié avec succès !</h1>
+          </div>
+          <div class="content">
+            <p>Bonjour ${userName || ""},</p>
+            <p>Votre adresse email a été vérifiée avec succès. Votre compte est maintenant pleinement actif !</p>
+            <p>Vous pouvez maintenant :</p>
+            <ul>
+              <li>Compléter votre profil</li>
+              <li>Télécharger votre CV</li>
+              <li>Postuler aux offres d'emploi</li>
+            </ul>
+            <p>Bonne recherche d'emploi !</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `,
+    text: `Bonjour ${userName || ""},\n\nVotre adresse email a été vérifiée avec succès. Votre compte est maintenant pleinement actif !\n\nBonne recherche d'emploi !`,
+  }),
+};
+
+/**
+ * Send email using appropriate method based on settings
+ */
+export const sendEmail = async (to, templateName, templateData = {}) => {
+  const mode = await SystemSettings.getSetting(
+    "email_verification_mode",
+    "development",
+  );
+
+  if (mode === "development") {
+    // In development mode, just log the email
+    const template = templates[templateName]?.(
+      templateData.code,
+      templateData.userName,
+    );
+    console.log(`\n📧 [DEV MODE] Email à ${to}:`);
+    console.log(`   Sujet: ${template?.subject}`);
+    if (templateData.code) {
+      console.log(`   Code: ${templateData.code}`);
+    }
+    console.log("");
+    return { success: true, mode: "development" };
+  }
+
+  try {
+    const transporter = createTransporter();
+    const template = templates[templateName]?.(
+      templateData.code,
+      templateData.userName,
+    );
+
+    if (!template) {
+      throw new Error(`Template "${templateName}" not found`);
+    }
+
+    const result = await transporter.sendMail({
+      from: `"Plateforme Recrutement" <${process.env.SMTP_USER}>`,
+      to,
+      subject: template.subject,
+      html: template.html,
+      text: template.text,
+    });
+
+    console.log(`📧 Email envoyé à ${to}: ${result.messageId}`);
+    return { success: true, messageId: result.messageId, mode: "smtp" };
+  } catch (error) {
+    console.error(`❌ Erreur envoi email à ${to}:`, error.message);
+    throw error;
+  }
+};
+
+/**
+ * Send verification code email
+ */
+export const sendVerificationEmail = async (email, code, userName = null) => {
+  return sendEmail(email, "verificationCode", { code, userName });
+};
+
+/**
+ * Send welcome email after verification
+ */
+export const sendWelcomeEmail = async (email, userName = null) => {
+  return sendEmail(email, "welcomeEmail", { userName });
+};
+
+/**
+ * Verify SMTP connection
+ */
+export const verifySmtpConnection = async () => {
+  try {
+    const transporter = createTransporter();
+    await transporter.verify();
+    console.log("✅ SMTP connection verified");
+    return true;
+  } catch (error) {
+    console.error("❌ SMTP connection failed:", error.message);
+    return false;
+  }
+};
+
+export default {
+  sendEmail,
+  sendVerificationEmail,
+  sendWelcomeEmail,
+  verifySmtpConnection,
+};
+
+
+=== startup/setupFolders.js ===
+import fs from "fs";
+
+export default function setupFolders() {
+  const folders = [
+    "uploads",
+    "uploads/cv",
+    "uploads/images",
+    "uploads/attachments",
+    "uploads/documents",
+  ];
+
+  folders.forEach((dir) => {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+      console.log(`📁 Dossier créé : ${dir}`);
+    }
+  });
+}

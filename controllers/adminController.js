@@ -9,6 +9,7 @@ import Company from "../models/Company.js";
 import bcrypt from "bcryptjs";
 import SupportTicket from "../models/SupportTicket.js";
 import AdminLog, { logAdminAction } from "../models/AdminLog.js";
+import AnemRegistration from "../models/AnemRegistration.js";
 
 export const getRecruiters = async (req, res) => {
   try {
@@ -88,6 +89,12 @@ export const getRecruiters = async (req, res) => {
         isAdmin: r.isAdmin,
         rejectionReason: r.rejectionReason,
 
+        anem: {
+          status: r.anem?.status || "not_started",
+          anemId: r.anem?.anemId,
+          isRegistered: r.anem?.status === "registered",
+        },
+
         validationRequests: r.validationRequests,
 
         lastRequestDate:
@@ -122,7 +129,7 @@ export const cancelValidationRequest = async (req, res) => {
     recruiter.status = "pending_validation";
 
     recruiter.validationRequests = recruiter.validationRequests.filter(
-      (req) => req.status !== "pending"
+      (req) => req.status !== "pending",
     );
 
     await recruiter.save();
@@ -132,7 +139,7 @@ export const cancelValidationRequest = async (req, res) => {
       "recruiter_request_canceled",
       { type: "recruiter", id: recruiter._id },
       {},
-      req
+      req,
     );
 
     res.json({ msg: "Demande annulée, recruteur replacé en attente ✅" });
@@ -216,7 +223,7 @@ export const validateRecruiter = async (req, res) => {
       "recruiter_validated",
       { type: "recruiter", id: recruiter._id },
       { isFirstAdmin: recruiter.isAdmin },
-      req
+      req,
     );
 
     res.json({
@@ -259,7 +266,7 @@ export const rejectRecruiter = async (req, res) => {
       "recruiter_rejected",
       { type: "recruiter", id: recruiter._id },
       { reason: message },
-      req
+      req,
     );
 
     res.json({ msg: "Recruteur rejeté ❌" });
@@ -312,7 +319,7 @@ export const suspendAdmin = async (req, res) => {
       "admin_suspended",
       { type: "admin", id: targetAdmin._id },
       { reason, until },
-      req
+      req,
     );
 
     res.json({ msg: "Administrateur suspendu ⛔" });
@@ -338,7 +345,7 @@ export const validateCompany = async (req, res) => {
     const company = await Company.findByIdAndUpdate(
       id,
       { status: "active" },
-      { new: true }
+      { new: true },
     );
 
     if (!company)
@@ -356,7 +363,7 @@ export const rejectCompany = async (req, res) => {
     const company = await Company.findByIdAndUpdate(
       id,
       { status: "rejected" },
-      { new: true }
+      { new: true },
     );
 
     if (!company)
@@ -445,7 +452,7 @@ export const banUser = async (req, res) => {
       "user_banned",
       { type: "user", id: user._id },
       { reason: raison },
-      req
+      req,
     );
 
     res.json({ msg: `Utilisateur ${user.nom} a été banni ⛔` });
@@ -486,7 +493,7 @@ export const unBanUser = async (req, res) => {
       "user_unbanned",
       { type: "user", id: user._id },
       {},
-      req
+      req,
     );
 
     res.json({ msg: `L'utilisateur ${user.nom} a été débanni et réactivé ✅` });
@@ -537,7 +544,7 @@ export const getAllUsers = async (req, res) => {
     const [candidates, recruiters] = await Promise.all([
       Candidate.find({ userId: { $in: userIds } })
         .select(
-          "userId telephone residence autoriserProposition desiredPosition"
+          "userId telephone residence autoriserProposition desiredPosition",
         )
         .lean(),
       Recruiter.find({ userId: { $in: userIds } })
@@ -547,10 +554,10 @@ export const getAllUsers = async (req, res) => {
     ]);
 
     const candidateMap = new Map(
-      candidates.map((c) => [c.userId.toString(), c])
+      candidates.map((c) => [c.userId.toString(), c]),
     );
     const recruiterMap = new Map(
-      recruiters.map((r) => [r.userId.toString(), r])
+      recruiters.map((r) => [r.userId.toString(), r]),
     );
 
     const recruiterIds = recruiters.map((r) => r._id);
@@ -560,7 +567,7 @@ export const getAllUsers = async (req, res) => {
     ]);
 
     const offerCountMap = new Map(
-      offerCounts.map((o) => [o._id.toString(), o.count])
+      offerCounts.map((o) => [o._id.toString(), o.count]),
     );
 
     let enriched = users.map((u) => {
@@ -601,13 +608,13 @@ export const getAllUsers = async (req, res) => {
       enriched = enriched.filter(
         (u) =>
           u.details?.wilaya &&
-          u.details.wilaya.toLowerCase() === wilaya.toLowerCase()
+          u.details.wilaya.toLowerCase() === wilaya.toLowerCase(),
       );
     }
 
     if (proposable === "true") {
       enriched = enriched.filter(
-        (u) => u.details?.autoriserProposition === true
+        (u) => u.details?.autoriserProposition === true,
       );
     }
 
@@ -661,10 +668,6 @@ export const deleteOfferAdmin = async (req, res) => {
     }
 
     await Offer.findByIdAndDelete(id);
-    await Recruiter.updateOne(
-      { _id: offer.recruteurId._id },
-      { $pull: { offres: id } }
-    );
 
     res.json({ msg: "Offre supprimée et recruteur notifié 🗑️" });
   } catch (err) {
@@ -691,6 +694,7 @@ export const getGlobalStats = async (req, res) => {
       pendingRecruiters,
       pendingCompanies,
       openTickets,
+      pendingAnem,
       recentAdminActions,
     ] = await Promise.all([
       User.countDocuments({ derniereConnexion: { $gt: fifteenMinutesAgo } }),
@@ -711,6 +715,9 @@ export const getGlobalStats = async (req, res) => {
       Company.countDocuments({ status: "pending" }),
       SupportTicket.countDocuments({
         status: { $in: ["open", "in_progress"] },
+      }),
+      AnemRegistration.countDocuments({
+        status: { $in: ["pending", "pending_verification"] },
       }),
       AdminLog.find()
         .populate("adminId", "nom")
@@ -839,7 +846,7 @@ export const getTrends = async (req, res) => {
     });
 
     const chartData = Array.from(statsMap.values()).sort(
-      (a, b) => new Date(a.date) - new Date(b.date)
+      (a, b) => new Date(a.date) - new Date(b.date),
     );
 
     res.json({
@@ -932,7 +939,7 @@ export const getManualSelectionOffers = async (req, res) => {
           as: "company",
         },
       },
-      { $unwind: "$company" }
+      { $unwind: "$company" },
     );
 
     let sortStage = {};
@@ -957,50 +964,77 @@ export const proposeCandidateToOffer = async (req, res) => {
     const { candidatId, offreId } = req.body;
 
     const offer = await Offer.findById(offreId).populate("recruteurId");
-    if (!offer) return res.status(404).json({ msg: "Offre introuvable" });
+    if (!offer) {
+      return res.status(404).json({ msg: "Offre introuvable" });
+    }
 
     let candidate = await Candidate.findById(candidatId).populate("userId");
-    if (!candidate)
-      candidate = await Candidate.findOne({ userId: candidatId }).populate(
-        "userId"
-      );
-    if (!candidate)
-      return res.status(404).json({ msg: "Candidat introuvable" });
 
-    if (!candidate.userId.emailVerified)
+    if (!candidate) {
+      candidate = await Candidate.findOne({ userId: candidatId }).populate(
+        "userId",
+      );
+    }
+
+    if (!candidate) {
+      return res.status(404).json({ msg: "Candidat introuvable" });
+    }
+
+    if (!candidate.userId?.emailVerified) {
       return res.status(400).json({ msg: "Email candidat non vérifié." });
-    if (!candidate.autoriserProposition)
+    }
+
+    if (!candidate.autoriserProposition) {
       return res
         .status(403)
         .json({ msg: "Ce candidat refuse les propositions." });
+    }
+
+    if (!candidate.cvs || candidate.cvs.length === 0) {
+      return res.status(400).json({
+        msg: "Impossible de proposer ce candidat : il n'a pas de CV.",
+      });
+    }
 
     const existingApp = await Application.findOne({
       offerId: offreId,
       candidateId: candidate._id,
     });
-    if (existingApp) return res.status(400).json({ msg: "Déjà positionné." });
 
-    const lastCv =
-      candidate.cvs.length > 0
-        ? candidate.cvs[candidate.cvs.length - 1].url
-        : "No CV";
+    if (existingApp) {
+      return res.status(400).json({ msg: "Candidat déjà positionné." });
+    }
+    const lastCv = candidate.cvs[candidate.cvs.length - 1].url;
 
     await Application.create({
       offerId: offreId,
       candidateId: candidate._id,
       cvUrl: lastCv,
-      status: "proposé",
-      recommandeParAdmin: true,
-      coverLetter: "Recommandation Admin",
+
+      candidateStatus: "envoyee",
+      recruiterStatus: "nouvelle",
+
+      source: "admin_proposal",
+      proposedBy: req.user.id,
+      proposedAt: new Date(),
+
+      coverLetter:
+        "Recommandation Admin : Ce profil correspond parfaitement aux critères de l’offre.",
+
+      offerSnapshot: {
+        titre: offer.titre,
+        companyId: offer.companyId,
+        type: offer.type,
+      },
     });
 
     offer.nombreCandidatures += 1;
     await offer.save();
 
-    if (offer.recruteurId && offer.recruteurId.userId) {
+    if (offer.recruteurId?.userId) {
       await Notification.create({
         userId: offer.recruteurId.userId,
-        message: `L'administrateur vous propose un candidat idéal (${candidate.userId.nom}) pour votre offre "${offer.titre}".`,
+        message: `Un administrateur vous a proposé un candidat recommandé (${candidate.userId.nom}) pour votre offre "${offer.titre}".`,
         type: "validation",
       });
     }
@@ -1011,12 +1045,13 @@ export const proposeCandidateToOffer = async (req, res) => {
       type: "info",
     });
 
-    res.json({ msg: "Candidat proposé avec succès ✅" });
+    return res.json({ msg: "Candidat proposé avec succès ✅" });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ msg: err.message });
+    return res.status(500).json({ msg: err.message });
   }
 };
+
 export const getAdminLogs = async (req, res) => {
   try {
     const {
@@ -1119,7 +1154,7 @@ export const approveOffer = async (req, res) => {
       "offer_approved",
       { type: "offer", id: offer._id },
       {},
-      req
+      req,
     );
 
     res.json({ msg: "Offre approuvée ✅", offer });
@@ -1162,7 +1197,7 @@ export const rejectOffer = async (req, res) => {
       requestChanges ? "offer_changes_requested" : "offer_rejected",
       { type: "offer", id: offer._id },
       { reason },
-      req
+      req,
     );
 
     res.json({
@@ -1205,7 +1240,7 @@ export const requestRecruiterDocuments = async (req, res) => {
       "recruiter_documents_requested",
       { type: "recruiter", id: recruiter._id },
       { requestType: type, message },
-      req
+      req,
     );
 
     res.json({ msg: "Demande envoyée au recruteur ✅" });
@@ -1238,7 +1273,7 @@ export const updateAdminPermissions = async (req, res) => {
       "admin_permissions_updated",
       { type: "admin", id: targetAdmin._id },
       { newPermissions: permissions },
-      req
+      req,
     );
 
     res.json({ msg: "Permissions mises à jour ✅", admin: targetAdmin });
@@ -1280,7 +1315,7 @@ export const updateAdminLabel = async (req, res) => {
       "admin_label_changed",
       { type: "admin", id: targetAdmin._id },
       { oldLabel, newLabel: label },
-      req
+      req,
     );
 
     res.json({ msg: "Label mis à jour ✅", admin: targetAdmin });
@@ -1326,7 +1361,7 @@ export const createCompanyByAdmin = async (req, res) => {
       "company_created_by_admin",
       { type: "company", id: company._id },
       { name },
-      req
+      req,
     );
 
     res.status(201).json({
@@ -1406,7 +1441,7 @@ export const assignCompanyAdmin = async (req, res) => {
       "company_admin_assigned",
       { type: "recruiter", id: recruiter._id },
       { companyId, companyName: company.name },
-      req
+      req,
     );
 
     res.json({
@@ -1455,7 +1490,7 @@ export const removeCompanyAdmin = async (req, res) => {
         companyId: recruiter.companyId._id,
         companyName: recruiter.companyId.name,
       },
-      req
+      req,
     );
 
     res.json({
@@ -1476,7 +1511,7 @@ export const updateCompanyByAdmin = async (req, res) => {
     const company = await Company.findByIdAndUpdate(
       id,
       { name, website, description, industry, location, size, logo },
-      { new: true }
+      { new: true },
     );
 
     if (!company) {
@@ -1488,7 +1523,7 @@ export const updateCompanyByAdmin = async (req, res) => {
       "company_updated_by_admin",
       { type: "company", id: company._id },
       { updates: req.body },
-      req
+      req,
     );
 
     res.json({ msg: "Entreprise mise à jour ✅", company });
@@ -1543,7 +1578,7 @@ export const requestMultipleValidationItems = async (req, res) => {
       "recruiter_multiple_requests",
       { type: "recruiter", id: recruiter._id },
       { requestCount: requests.length, newStatus: recruiter.status },
-      req
+      req,
     );
 
     res.json({
@@ -1589,7 +1624,7 @@ export const getAllCompanies = async (req, res) => {
           ...company.toObject(),
           recruitersCount,
         };
-      })
+      }),
     );
 
     res.json({
@@ -1631,7 +1666,7 @@ export const updateOfferByAdmin = async (req, res) => {
     const offer = await Offer.findByIdAndUpdate(
       id,
       { $set: req.body },
-      { new: true }
+      { new: true },
     );
 
     if (!offer) return res.status(404).json({ msg: "Offre introuvable" });
@@ -1641,7 +1676,7 @@ export const updateOfferByAdmin = async (req, res) => {
       "offer_updated_by_admin",
       { type: "offer", id: offer._id },
       { updates: req.body },
-      req
+      req,
     );
 
     res.json({ msg: "Offre modifiée par l'admin ✅", offer });
@@ -1657,7 +1692,7 @@ export const toggleOfferVisibility = async (req, res) => {
     const offer = await Offer.findByIdAndUpdate(
       id,
       { actif: actif },
-      { new: true }
+      { new: true },
     );
 
     if (!offer) return res.status(404).json({ msg: "Offre introuvable" });
@@ -1667,7 +1702,7 @@ export const toggleOfferVisibility = async (req, res) => {
       actif ? "offer_activated_admin" : "offer_deactivated_admin",
       { type: "offer", id: offer._id },
       {},
-      req
+      req,
     );
 
     res.json({

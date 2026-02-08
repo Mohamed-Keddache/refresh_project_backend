@@ -1,0 +1,6932 @@
+
+
+=== package.json ===
+{
+  "name": "refresh_project",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "bcryptjs": "2.4.3",
+    "cloudinary": "^2.9.0",
+    "cors": "2.8.5",
+    "dotenv": "16.4.5",
+    "express": "4.21.2",
+    "express-mongo-sanitize": "^2.2.0",
+    "express-rate-limit": "^8.2.1",
+    "express-validator": "^7.3.1",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "9.0.2",
+    "mongoose": "8.9.5",
+    "morgan": "1.10.1",
+    "multer": "1.4.5-lts.1",
+    "nodemailer": "^7.0.13",
+    "validator": "^13.15.26"
+  }
+}
+
+
+=== server.js ===
+import dotenv from "dotenv";
+dotenv.config();
+import express from "express";
+import cors from "cors";
+import morgan from "morgan";
+import connectDB from "./config/db.js";
+import setupFolders from "./startup/setupFolders.js";
+import { seedAdmin } from "./startup/seedAdmin.js";
+import { setupSecurity } from "./middleware/security.js";
+import SystemSettings from "./models/SystemSettings.js";
+import { verifySmtpConnection } from "./services/emailService.js";
+
+import authRoutes from "./routes/authRoutes.js";
+import candidateRoutes from "./routes/candidateRoutes.js";
+import offerRoutes from "./routes/offerRoutes.js";
+import notificationRoutes from "./routes/notificationRoutes.js";
+import skillRoutes from "./routes/skillRoutes.js";
+import supportRoutes from "./routes/supportRoutes.js";
+import announcementRoutes from "./routes/announcementRoutes.js";
+
+import recruiterRoutes from "./routes/recruiterRoutes.js";
+import adminRoutes from "./routes/adminRoutes.js";
+import anemRoutes from "./routes/anemRoutes.js";
+
+const app = express();
+
+try {
+  setupSecurity(app);
+} catch (err) {
+  console.warn("⚠️ setupSecurity not found or failed, skipping...");
+}
+
+app.use(
+  cors({
+    origin:
+      process.env.NODE_ENV === "production"
+        ? process.env.FRONTEND_URL?.split(",")
+        : "*",
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "ngrok-skip-browser-warning",
+    ],
+    credentials: true,
+  }),
+);
+
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+
+if (process.env.NODE_ENV !== "test") {
+  app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
+}
+
+app.use("/uploads", express.static("uploads"));
+
+app.use((err, req, res, next) => {
+  if (err instanceof SyntaxError && err.status === 400 && "body" in err) {
+    return res.status(400).json({ msg: "JSON invalide" });
+  }
+  next(err);
+});
+
+async function startServer() {
+  try {
+    
+    console.log("🔧 Environment check:");
+    console.log("   NODE_ENV:", process.env.NODE_ENV || "development");
+    console.log("   SMTP_HOST:", process.env.SMTP_HOST || "NOT SET");
+    console.log("   SMTP_PORT:", process.env.SMTP_PORT || "NOT SET");
+    console.log("   SMTP_USER:", process.env.SMTP_USER || "NOT SET");
+    console.log("   SMTP_PASS:", process.env.SMTP_PASS ? "SET" : "NOT SET");
+
+    await connectDB();
+    setupFolders();
+
+    await seedAdmin();
+
+    await SystemSettings.initializeDefaults();
+    console.log("⚙️ Paramètres système initialisés");
+
+    
+    const emailMode = await SystemSettings.getSetting(
+      "email_verification_mode",
+      "development",
+    );
+    console.log(`📧 Email verification mode: ${emailMode}`);
+
+    if (emailMode === "smtp") {
+      console.log("📧 Verifying SMTP connection...");
+      const smtpOk = await verifySmtpConnection();
+      if (smtpOk) {
+        console.log("✅ SMTP ready for sending emails");
+      } else {
+        console.warn("⚠️ SMTP connection failed - emails may not be sent");
+        console.warn("   Falling back to development mode for safety");
+        
+        
+      }
+    } else {
+      console.log("📧 Development mode: Use code 123456 for verification");
+    }
+
+    
+    app.use("/api/auth", authRoutes);
+    app.use("/api/skills", skillRoutes);
+    app.use("/api/offers", offerRoutes);
+    app.use("/api/candidates", candidateRoutes);
+    app.use("/api/notifications", notificationRoutes);
+    app.use("/api/support", supportRoutes);
+    app.use("/api/announcements", announcementRoutes);
+
+    app.use("/api/recruiters", recruiterRoutes);
+    app.use("/api/admin", adminRoutes);
+    app.use("/api/anem", anemRoutes);
+
+    
+    app.get("/", (req, res) =>
+      res.json({
+        status: "ok",
+        message: "✅ API Recrutement opérationnelle !",
+        timestamp: new Date().toISOString(),
+      }),
+    );
+
+    app.get("/health", (req, res) =>
+      res.json({
+        status: "healthy",
+        uptime: process.uptime(),
+        timestamp: new Date().toISOString(),
+      }),
+    );
+
+    
+    if (process.env.NODE_ENV !== "production") {
+      app.get("/debug/smtp", async (req, res) => {
+        try {
+          const smtpOk = await verifySmtpConnection();
+          const emailMode = await SystemSettings.getSetting(
+            "email_verification_mode",
+            "development",
+          );
+          res.json({
+            smtpConnection: smtpOk,
+            emailMode,
+            config: {
+              host: process.env.SMTP_HOST,
+              port: process.env.SMTP_PORT,
+              user: process.env.SMTP_USER,
+              passSet: !!process.env.SMTP_PASS,
+            },
+          });
+        } catch (err) {
+          res.status(500).json({ error: err.message });
+        }
+      });
+    }
+
+    
+    app.use((req, res) => {
+      res.status(404).json({ msg: "Route non trouvée" });
+    });
+
+    
+    app.use((err, req, res, next) => {
+      console.error("❌ Erreur serveur:", err);
+
+      const message =
+        process.env.NODE_ENV === "production"
+          ? "Erreur interne du serveur"
+          : err.message;
+
+      res.status(err.status || 500).json({
+        msg: message,
+        ...(process.env.NODE_ENV !== "production" && { stack: err.stack }),
+      });
+    });
+
+    const PORT = process.env.PORT || 5000;
+    app.listen(PORT, () => {
+      console.log(`🚀 Serveur lancé sur le port ${PORT}`);
+      console.log(`📊 Environnement: ${process.env.NODE_ENV || "development"}`);
+    });
+  } catch (error) {
+    console.error("❌ Erreur lors du démarrage du serveur :", error);
+    process.exit(1);
+  }
+}
+
+startServer();
+
+process.on("uncaughtException", (err) => {
+  console.error("❌ Uncaught Exception:", err);
+  process.exit(1);
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("❌ Unhandled Rejection at:", promise, "reason:", reason);
+});
+
+export default app;
+
+
+=== config\cloudinary.js ===
+import { v2 as cloudinary } from "cloudinary";
+import { Readable } from "stream";
+
+
+import "dotenv/config";
+
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+
+export const uploadToCloudinary = (buffer, options = {}) => {
+  return new Promise((resolve, reject) => {
+    const uploadOptions = {
+      resource_type: "auto",
+      ...options,
+    };
+
+    const uploadStream = cloudinary.uploader.upload_stream(
+      uploadOptions,
+      (error, result) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve(result);
+        }
+      },
+    );
+
+    const readableStream = new Readable();
+    readableStream.push(buffer);
+    readableStream.push(null);
+    readableStream.pipe(uploadStream);
+  });
+};
+
+
+export const deleteFromCloudinary = async (
+  publicId,
+  resourceType = "image",
+) => {
+  try {
+    const result = await cloudinary.uploader.destroy(publicId, {
+      resource_type: resourceType,
+    });
+    return result;
+  } catch (error) {
+    console.error(`Failed to delete from Cloudinary: ${publicId}`, error);
+    
+    return { result: "error", error: error.message };
+  }
+};
+
+
+export const getPublicIdFromUrl = (url) => {
+  if (!url || !url.includes("cloudinary.com")) {
+    return null;
+  }
+
+  try {
+    
+    
+    
+    const regex =
+      /\/(?:image|raw|video)\/upload\/(?:v\d+\/)?(.+?)(?:\.[^.]+)?$/;
+    const match = url.match(regex);
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+};
+
+
+export const uploadCV = async (buffer, filename, userId) => {
+  const extension = filename.split(".").pop().toLowerCase();
+
+  return uploadToCloudinary(buffer, {
+    folder: `recruitment/cvs/${userId}`,
+    resource_type: "raw",
+    public_id: `cv_${Date.now()}`,
+    format: extension,
+    tags: ["cv", userId],
+  });
+};
+
+
+export const uploadProfileImage = async (buffer, userId) => {
+  return uploadToCloudinary(buffer, {
+    folder: `recruitment/profiles/${userId}`,
+    resource_type: "image",
+    public_id: `profile_${Date.now()}`,
+    transformation: [
+      { width: 400, height: 400, crop: "fill", gravity: "face" },
+      { quality: "auto:good" },
+      { fetch_format: "auto" },
+    ],
+    tags: ["profile", userId],
+  });
+};
+
+
+export const uploadAttachment = async (
+  buffer,
+  filename,
+  folder = "attachments",
+) => {
+  const extension = filename.split(".").pop().toLowerCase();
+  const isImage = ["jpg", "jpeg", "png", "webp", "gif"].includes(extension);
+
+  return uploadToCloudinary(buffer, {
+    folder: `recruitment/${folder}`,
+    resource_type: isImage ? "image" : "raw",
+    public_id: `attachment_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+    format: isImage ? undefined : extension,
+    tags: ["attachment"],
+  });
+};
+
+
+export const deleteMultipleFromCloudinary = async (urls) => {
+  const deletePromises = urls.map(async (url) => {
+    const publicId = getPublicIdFromUrl(url);
+    if (publicId) {
+      
+      const resourceType = url.includes("/raw/") ? "raw" : "image";
+      return deleteFromCloudinary(publicId, resourceType);
+    }
+  });
+
+  await Promise.allSettled(deletePromises);
+};
+
+export default {
+  uploadToCloudinary,
+  deleteFromCloudinary,
+  getPublicIdFromUrl,
+  uploadCV,
+  uploadProfileImage,
+  uploadAttachment,
+  deleteMultipleFromCloudinary,
+};
+
+
+=== config\db.js ===
+import mongoose from "mongoose";
+
+const connectDB = async () => {
+  try {
+    await mongoose.connect(process.env.MONGO_URI);
+    console.log("🟢 Connecté à MongoDB");
+  } catch (err) {
+    console.error("❌ Erreur MongoDB :", err.message);
+    process.exit(1);
+  }
+};
+
+export default connectDB;
+
+
+=== config\email.js ===
+import nodemailer from "nodemailer";
+
+export const transporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
+});
+
+
+=== config\multer.js ===
+import multer from "multer";
+import path from "path";
+
+
+const memoryStorage = multer.memoryStorage();
+
+
+const fileFilterCV = (req, file, cb) => {
+  const allowed = [".pdf", ".doc", ".docx"];
+  const ext = path.extname(file.originalname).toLowerCase();
+
+  if (!allowed.includes(ext)) {
+    return cb(new Error("Seulement PDF, DOC ou DOCX autorisés"));
+  }
+  cb(null, true);
+};
+
+
+const fileFilterImage = (req, file, cb) => {
+  const allowed = [".jpg", ".jpeg", ".png", ".webp"];
+  const ext = path.extname(file.originalname).toLowerCase();
+
+  if (!allowed.includes(ext)) {
+    return cb(new Error("Seulement JPG, JPEG, PNG ou WEBP autorisés"));
+  }
+  cb(null, true);
+};
+
+
+const fileFilterAttachments = (req, file, cb) => {
+  const allowed = [".pdf", ".doc", ".docx", ".jpg", ".jpeg", ".png", ".webp"];
+  const ext = path.extname(file.originalname).toLowerCase();
+
+  if (!allowed.includes(ext)) {
+    return cb(new Error("Type de fichier non autorisé"));
+  }
+  cb(null, true);
+};
+
+
+export const uploadCV = multer({
+  storage: memoryStorage,
+  fileFilter: fileFilterCV,
+  limits: { fileSize: 5 * 1024 * 1024 }, 
+});
+
+
+export const uploadImage = multer({
+  storage: memoryStorage,
+  fileFilter: fileFilterImage,
+  limits: { fileSize: 5 * 1024 * 1024 }, 
+});
+
+
+export const uploadAttachments = multer({
+  storage: memoryStorage,
+  fileFilter: fileFilterAttachments,
+  limits: { fileSize: 10 * 1024 * 1024 }, 
+});
+
+
+export const handleMulterError = (err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    if (err.code === "LIMIT_FILE_SIZE") {
+      return res.status(400).json({ msg: "Fichier trop volumineux" });
+    }
+    if (err.code === "LIMIT_FILE_COUNT") {
+      return res.status(400).json({ msg: "Trop de fichiers" });
+    }
+    return res.status(400).json({ msg: err.message });
+  }
+  if (err) {
+    return res.status(400).json({ msg: err.message });
+  }
+  next();
+};
+
+export default { uploadCV, uploadImage, uploadAttachments, handleMulterError };
+
+
+=== controllers\adminSettingsController.js ===
+import SystemSettings from "../models/SystemSettings.js";
+import { verifySmtpConnection } from "../services/emailService.js";
+
+
+export const toggleEmailVerificationMode = async (req, res) => {
+  try {
+    const { mode } = req.body;
+
+    if (!["smtp", "development"].includes(mode)) {
+      return res.status(400).json({
+        msg: "Mode invalide. Utilisez 'smtp' ou 'development'.",
+      });
+    }
+
+    
+    if (mode === "smtp") {
+      const isConnected = await verifySmtpConnection();
+      if (!isConnected) {
+        return res.status(400).json({
+          msg: "Impossible d'activer le mode SMTP : connexion SMTP échouée. Vérifiez les variables d'environnement SMTP.",
+        });
+      }
+    }
+
+    await SystemSettings.setSetting(
+      "email_verification_mode",
+      mode,
+      "Mode de vérification email",
+      req.user.id,
+    );
+
+    res.json({
+      msg: `Mode de vérification email changé en : ${mode}`,
+      mode,
+      description:
+        mode === "smtp"
+          ? "Les emails de vérification seront envoyés via SMTP"
+          : "Mode développement actif : le code 123456 sera accepté pour tous les utilisateurs",
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const getEmailVerificationMode = async (req, res) => {
+  try {
+    const mode = await SystemSettings.getSetting(
+      "email_verification_mode",
+      "development",
+    );
+
+    res.json({
+      mode,
+      description:
+        mode === "smtp"
+          ? "Les emails de vérification sont envoyés via SMTP"
+          : "Mode développement : le code 123456 est accepté",
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const toggleSkillProposal = async (req, res) => {
+  try {
+    const { enabled } = req.body;
+
+    if (typeof enabled !== "boolean") {
+      return res
+        .status(400)
+        .json({ msg: "Valeur 'enabled' requise (boolean)" });
+    }
+
+    await SystemSettings.setSetting(
+      "skill_proposal_enabled",
+      enabled,
+      "Permet aux candidats de proposer de nouvelles compétences",
+      req.user.id,
+    );
+
+    res.json({
+      msg: enabled
+        ? "Proposition de compétences activée"
+        : "Proposition de compétences désactivée",
+      enabled,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const getAllSettings = async (req, res) => {
+  try {
+    const settings = await SystemSettings.find({})
+      .select("-__v")
+      .populate("updatedBy", "nom email");
+
+    res.json(settings);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+=== controllers\anemController.js ===
+import AnemRegistration from "../models/AnemRegistration.js";
+import AnemOffer from "../models/AnemOffer.js";
+import Recruiter from "../models/Recruiter.js";
+import Offer from "../models/Offer.js";
+import User from "../models/User.js";
+import Admin from "../models/Admin.js";
+import Notification from "../models/Notification.js";
+import AdminLog, { logAdminAction } from "../models/AdminLog.js";
+
+
+
+
+
+const getRecruiterWithAnem = async (userId) => {
+  const recruiter = await Recruiter.findOne({ userId })
+    .populate("companyId")
+    .populate("anem.registrationId");
+
+  if (!recruiter) {
+    throw new Error("Profil recruteur introuvable");
+  }
+
+  return recruiter;
+};
+
+const syncRecruiterAnemStatus = async (recruiterId, registration) => {
+  const updateData = {
+    "anem.status": registration.status,
+    "anem.lastStatusUpdate": new Date(),
+    "anem.registrationId": registration._id,
+  };
+
+  if (registration.status === "registered" && registration.verifiedAnemId) {
+    updateData["anem.anemId"] = registration.verifiedAnemId;
+    updateData["anem.registeredAt"] = registration.verifiedAt || new Date();
+  }
+
+  await Recruiter.findByIdAndUpdate(recruiterId, updateData);
+};
+
+const notifyAdminsNewDemande = async (registration, recruiterName, type) => {
+  const admins = await Admin.find({
+    status: "active",
+    $or: [{ label: "super_admin" }, { "permissions.validateRecruiters": true }],
+  }).populate("userId", "_id");
+
+  const message =
+    type === "self_declared"
+      ? `Nouvel ID ANEM à vérifier de ${recruiterName}`
+      : `Nouvelle demande d'inscription ANEM de ${recruiterName}`;
+
+  const notifPromises = admins.map((admin) =>
+    Notification.create({
+      userId: admin.userId._id,
+      message,
+      type: "info",
+    }),
+  );
+
+  await Promise.all(notifPromises);
+};
+
+
+
+
+
+
+export const getAnemStatus = async (req, res) => {
+  try {
+    const recruiter = await getRecruiterWithAnem(req.user.id);
+
+    const offerCount = await Offer.countDocuments({
+      recruteurId: recruiter._id,
+    });
+
+    
+    const [anemOfferCount, totalActiveOffers] = await Promise.all([
+      AnemOffer.countDocuments({
+        recruiterId: recruiter._id,
+        anemEnabled: true,
+      }),
+      Offer.countDocuments({
+        recruteurId: recruiter._id,
+        actif: true,
+        validationStatus: "approved",
+      }),
+    ]);
+
+    let registration = null;
+    let latestPublicNote = null;
+
+    if (recruiter.anem.registrationId) {
+      registration = await AnemRegistration.findById(
+        recruiter.anem.registrationId,
+      )
+        .select("-auditLog")
+        .populate("adminNotes.createdBy", "nom")
+        .lean();
+
+      if (registration) {
+        
+        const publicNotes = registration.adminNotes
+          ?.filter((n) => n.isPublic)
+          .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+        latestPublicNote = publicNotes?.[0] || null;
+      }
+    }
+
+    
+    let sidebarView = "not_started";
+    let actionRequired = false;
+    let statusMessage = "";
+
+    switch (recruiter.anem.status) {
+      case "not_started":
+        sidebarView = "intro";
+        statusMessage = "Vous n'êtes pas encore inscrit à l'ANEM";
+        break;
+      case "draft":
+        sidebarView = "continue_form";
+        actionRequired = true;
+        statusMessage = "Inscription en cours - Continuez votre formulaire";
+        break;
+      case "pending":
+        sidebarView = "pending";
+        statusMessage = "Votre demande est en attente de traitement";
+        break;
+      case "pending_verification":
+        sidebarView = "pending_verification";
+        statusMessage = "Votre ID ANEM est en cours de vérification";
+        break;
+      case "in_progress":
+        sidebarView = "in_progress";
+        statusMessage =
+          "Votre inscription est en cours de traitement par notre équipe";
+        break;
+      case "registered":
+        sidebarView = "registered";
+        statusMessage = `Vous êtes inscrit à l'ANEM (ID: ${recruiter.anem.anemId})`;
+        break;
+      case "failed":
+        sidebarView = "failed";
+        actionRequired = true;
+        statusMessage = "Votre inscription a échoué - Vous pouvez réessayer";
+        break;
+      case "rejected":
+        sidebarView = "rejected";
+        actionRequired = true;
+        statusMessage =
+          "Votre ID ANEM a été rejeté - Vous pouvez soumettre un nouvel ID";
+        break;
+    }
+
+    res.json({
+      
+      status: recruiter.anem.status,
+      anemId: recruiter.anem.anemId,
+      registeredAt: recruiter.anem.registeredAt,
+
+      
+      hasSeenAnemModal: recruiter.anem.hasSeenAnemModal,
+      declinedAnem: recruiter.anem.declinedAnem,
+
+      
+      isFirstOffer: offerCount === 0,
+      canCreateAnemOffer: recruiter.canCreateAnemOffer(),
+
+      
+      sidebarView,
+      actionRequired,
+      statusMessage,
+      latestPublicNote: latestPublicNote
+        ? {
+            content: latestPublicNote.content,
+            createdAt: latestPublicNote.createdAt,
+            adminName: latestPublicNote.createdBy?.nom,
+          }
+        : null,
+
+      
+      registration: registration
+        ? {
+            _id: registration._id,
+            registrationType: registration.registrationType,
+            status: registration.status,
+            currentStep: registration.currentStep,
+            formCompleted: registration.formCompleted,
+            formSubmittedAt: registration.formSubmittedAt,
+            failureReason: registration.failureReason,
+            rejectionReason: registration.rejectionReason,
+            declaredAnemId: registration.declaredAnemId,
+            verifiedAnemId: registration.verifiedAnemId,
+            createdAt: registration.createdAt,
+            updatedAt: registration.updatedAt,
+            
+            lastRejectedId:
+              registration.anemIdHistory?.find((h) => h.status === "rejected")
+                ?.anemId || null,
+          }
+        : null,
+
+      
+      stats: {
+        totalOffers: offerCount,
+        activeOffers: totalActiveOffers,
+        anemOffers: anemOfferCount,
+        offersWithoutAnem: totalActiveOffers - anemOfferCount,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const checkAnemModalRequired = async (req, res) => {
+  try {
+    const recruiter = await Recruiter.findOne({ userId: req.user.id });
+
+    if (!recruiter) {
+      return res.status(404).json({ msg: "Profil recruteur introuvable" });
+    }
+
+    const offerCount = await Offer.countDocuments({
+      recruteurId: recruiter._id,
+    });
+
+    const isFirstOffer = offerCount === 0;
+    const hasSeenModal = recruiter.anem.hasSeenAnemModal;
+    const declinedAnem = recruiter.anem.declinedAnem;
+    const isRegistered = recruiter.canCreateAnemOffer();
+
+    
+    let showModal = false;
+    let modalReason = null;
+
+    if (isFirstOffer && !hasSeenModal) {
+      showModal = true;
+      modalReason = "first_offer";
+    }
+
+    res.json({
+      showModal,
+      modalReason,
+      isFirstOffer,
+      hasSeenModal,
+      declinedAnem,
+      isRegistered,
+      anemStatus: recruiter.anem.status,
+      anemId: recruiter.anem.anemId,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const markAnemModalSeen = async (req, res) => {
+  try {
+    const recruiter = await Recruiter.findOneAndUpdate(
+      { userId: req.user.id },
+      {
+        "anem.hasSeenAnemModal": true,
+        "anem.modalSeenAt": new Date(),
+      },
+      { new: true },
+    );
+
+    if (!recruiter) {
+      return res.status(404).json({ msg: "Profil recruteur introuvable" });
+    }
+
+    res.json({
+      msg: "Modal marqué comme vu",
+      hasSeenAnemModal: true,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const declineAnem = async (req, res) => {
+  try {
+    const recruiter = await Recruiter.findOneAndUpdate(
+      { userId: req.user.id },
+      {
+        "anem.hasSeenAnemModal": true,
+        "anem.modalSeenAt": new Date(),
+        "anem.declinedAnem": true,
+        "anem.declinedAt": new Date(),
+      },
+      { new: true },
+    );
+
+    if (!recruiter) {
+      return res.status(404).json({ msg: "Profil recruteur introuvable" });
+    }
+
+    res.json({
+      msg: "Vous avez choisi de ne pas utiliser ANEM pour le moment",
+      declinedAnem: true,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const resetAnemDecline = async (req, res) => {
+  try {
+    const recruiter = await Recruiter.findOneAndUpdate(
+      { userId: req.user.id },
+      {
+        "anem.declinedAnem": false,
+        "anem.declinedAt": null,
+      },
+      { new: true },
+    );
+
+    if (!recruiter) {
+      return res.status(404).json({ msg: "Profil recruteur introuvable" });
+    }
+
+    res.json({
+      msg: "Vous pouvez maintenant vous inscrire à l'ANEM",
+      declinedAnem: false,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const submitAnemId = async (req, res) => {
+  try {
+    const { anemId } = req.body;
+
+    if (!anemId || anemId.trim().length < 3) {
+      return res.status(400).json({ msg: "ID ANEM invalide" });
+    }
+
+    const recruiter = await getRecruiterWithAnem(req.user.id);
+    const user = await User.findById(req.user.id);
+
+    
+    if (recruiter.status !== "validated") {
+      return res.status(403).json({
+        msg: "Votre compte recruteur doit être validé avant de soumettre un ID ANEM",
+        code: "RECRUITER_NOT_VALIDATED",
+        recruiterStatus: recruiter.status,
+      });
+    }
+
+    
+    if (recruiter.anem.status === "registered") {
+      return res.status(400).json({
+        msg: "Vous êtes déjà enregistré ANEM",
+        anemId: recruiter.anem.anemId,
+      });
+    }
+
+    
+    let registration = await AnemRegistration.findOne({
+      recruiterId: recruiter._id,
+    });
+
+    const trimmedId = anemId.trim().toUpperCase();
+
+    if (!registration) {
+      
+      registration = new AnemRegistration({
+        recruiterId: recruiter._id,
+        companyId: recruiter.companyId._id,
+        userId: req.user.id,
+        registrationType: "self_declared",
+        declaredAnemId: trimmedId,
+        declaredAt: new Date(),
+        status: "pending_verification",
+        anemIdHistory: [
+          {
+            anemId: trimmedId,
+            submittedAt: new Date(),
+            status: "pending",
+          },
+        ],
+      });
+
+      registration.addAuditEntry(
+        "created",
+        req.user.id,
+        { newValue: { registrationType: "self_declared", anemId: trimmedId } },
+        req,
+      );
+    } else {
+      
+      const previousId = registration.declaredAnemId;
+
+      
+      const lastHistory =
+        registration.anemIdHistory[registration.anemIdHistory.length - 1];
+      if (!lastHistory || lastHistory.anemId !== trimmedId) {
+        registration.anemIdHistory.push({
+          anemId: trimmedId,
+          submittedAt: new Date(),
+          status: "pending",
+        });
+      } else if (lastHistory.status === "rejected") {
+        
+        registration.anemIdHistory.push({
+          anemId: trimmedId,
+          submittedAt: new Date(),
+          status: "pending",
+        });
+      }
+
+      registration.registrationType = "self_declared";
+      registration.declaredAnemId = trimmedId;
+      registration.declaredAt = new Date();
+      registration.status = "pending_verification";
+      registration.rejectionReason = undefined;
+
+      registration.addAuditEntry(
+        "anem_id_updated",
+        req.user.id,
+        { previousValue: previousId, newValue: trimmedId },
+        req,
+      );
+    }
+
+    await registration.save();
+    await syncRecruiterAnemStatus(recruiter._id, registration);
+
+    
+    await Recruiter.findByIdAndUpdate(recruiter._id, {
+      "anem.hasSeenAnemModal": true,
+      "anem.modalSeenAt": new Date(),
+    });
+
+    
+    await notifyAdminsNewDemande(registration, user.nom, "self_declared");
+
+    res.status(201).json({
+      msg: "ID ANEM soumis pour vérification. Vous serez notifié du résultat.",
+      status: "pending_verification",
+      registrationId: registration._id,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const startRegistration = async (req, res) => {
+  try {
+    const recruiter = await getRecruiterWithAnem(req.user.id);
+    const user = await User.findById(req.user.id);
+
+    
+    if (recruiter.status !== "validated") {
+      return res.status(403).json({
+        msg: "Votre compte recruteur doit être validé avant de soumettre un ID ANEM",
+        code: "RECRUITER_NOT_VALIDATED",
+        recruiterStatus: recruiter.status,
+      });
+    }
+
+    
+    if (recruiter.anem.status === "registered") {
+      return res.status(400).json({
+        msg: "Vous êtes déjà enregistré ANEM",
+        anemId: recruiter.anem.anemId,
+      });
+    }
+
+    
+    let registration = await AnemRegistration.findOne({
+      recruiterId: recruiter._id,
+    });
+
+    if (registration) {
+      
+      if (["failed", "rejected"].includes(registration.status)) {
+        registration.registrationType = "site_registration";
+        registration.status = "draft";
+        registration.currentStep = 1;
+        registration.formCompleted = false;
+        registration.failureReason = undefined;
+        registration.rejectionReason = undefined;
+
+        registration.addAuditEntry(
+          "created",
+          req.user.id,
+          { newValue: { action: "restart_after_failure" } },
+          req,
+        );
+
+        await registration.save();
+      } else if (registration.registrationType === "self_declared") {
+        
+        registration.registrationType = "site_registration";
+        registration.status = "draft";
+        registration.currentStep = 1;
+        registration.formCompleted = false;
+
+        registration.addAuditEntry(
+          "created",
+          req.user.id,
+          { newValue: { action: "convert_to_site_registration" } },
+          req,
+        );
+
+        await registration.save();
+      }
+      
+    } else {
+      
+      registration = new AnemRegistration({
+        recruiterId: recruiter._id,
+        companyId: recruiter.companyId._id,
+        userId: req.user.id,
+        registrationType: "site_registration",
+        status: "draft",
+        currentStep: 1,
+        
+        step4: {
+          email: user.email,
+        },
+      });
+
+      registration.addAuditEntry(
+        "created",
+        req.user.id,
+        { newValue: { registrationType: "site_registration" } },
+        req,
+      );
+
+      await registration.save();
+    }
+
+    await syncRecruiterAnemStatus(recruiter._id, registration);
+
+    
+    await Recruiter.findByIdAndUpdate(recruiter._id, {
+      "anem.hasSeenAnemModal": true,
+      "anem.modalSeenAt": new Date(),
+    });
+
+    res.json({
+      msg: "Inscription démarrée",
+      registration: {
+        _id: registration._id,
+        currentStep: registration.currentStep,
+        formCompleted: registration.formCompleted,
+        step1: registration.step1 || {},
+        step2: registration.step2 || {},
+        step3: registration.step3 || {},
+        step4: {
+          email: registration.step4?.email || user.email,
+          consentementRgpd: registration.step4?.consentementRgpd || false,
+        },
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const saveRegistrationStep = async (req, res) => {
+  try {
+    const { step, data } = req.body;
+
+    if (!step || step < 1 || step > 4) {
+      return res.status(400).json({ msg: "Étape invalide (1-4)" });
+    }
+
+    const recruiter = await Recruiter.findOne({ userId: req.user.id });
+    if (!recruiter) {
+      return res.status(404).json({ msg: "Profil recruteur introuvable" });
+    }
+
+    const registration = await AnemRegistration.findOne({
+      recruiterId: recruiter._id,
+      registrationType: "site_registration",
+      status: "draft",
+    });
+
+    if (!registration) {
+      return res.status(404).json({
+        msg: "Aucune inscription en cours. Veuillez recommencer.",
+        code: "NO_DRAFT_REGISTRATION",
+      });
+    }
+
+    
+    const stepKey = `step${step}`;
+    registration[stepKey] = { ...registration[stepKey], ...data };
+
+    
+    if (
+      step === 4 &&
+      data.consentementRgpd &&
+      !registration.step4?.consentementAt
+    ) {
+      registration.step4.consentementAt = new Date();
+    }
+
+    
+    if (step >= registration.currentStep) {
+      registration.currentStep = step;
+    }
+
+    registration.addAuditEntry(
+      "step_saved",
+      req.user.id,
+      { newValue: { step } },
+      req,
+    );
+
+    await registration.save();
+
+    res.json({
+      msg: `Étape ${step} enregistrée`,
+      currentStep: registration.currentStep,
+      savedData: registration[stepKey],
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const submitRegistration = async (req, res) => {
+  try {
+    const recruiter = await getRecruiterWithAnem(req.user.id);
+    const user = await User.findById(req.user.id);
+
+    const registration = await AnemRegistration.findOne({
+      recruiterId: recruiter._id,
+      registrationType: "site_registration",
+      status: "draft",
+    });
+
+    if (!registration) {
+      return res.status(404).json({
+        msg: "Aucune inscription en cours trouvée",
+        code: "NO_DRAFT_REGISTRATION",
+      });
+    }
+
+    
+    const validation = {
+      step1: {
+        valid: true,
+        missing: [],
+      },
+      step2: {
+        valid: true,
+        missing: [],
+      },
+      step3: {
+        valid: true,
+        missing: [],
+      },
+      step4: {
+        valid: true,
+        missing: [],
+      },
+    };
+
+    
+    const step1Required = [
+      "numeroCnas",
+      "raisonSociale",
+      "denominationCommerciale",
+      "nif",
+    ];
+    step1Required.forEach((field) => {
+      if (
+        !registration.step1?.[field] ||
+        registration.step1[field].toString().trim() === ""
+      ) {
+        validation.step1.valid = false;
+        validation.step1.missing.push(field);
+      }
+    });
+
+    
+    const step2Required = [
+      "secteurActivite",
+      "brancheActivite",
+      "secteurJuridique",
+      "statutJuridique",
+      "adresse",
+      "wilaya",
+      "commune",
+    ];
+    step2Required.forEach((field) => {
+      if (
+        !registration.step2?.[field] ||
+        registration.step2[field].toString().trim() === ""
+      ) {
+        validation.step2.valid = false;
+        validation.step2.missing.push(field);
+      }
+    });
+
+    
+    if (
+      registration.step3?.effectifDeclare === undefined ||
+      registration.step3?.effectifDeclare === null
+    ) {
+      validation.step3.valid = false;
+      validation.step3.missing.push("effectifDeclare");
+    }
+    if (
+      registration.step3?.dontInseresCta === undefined ||
+      registration.step3?.dontInseresCta === null
+    ) {
+      validation.step3.valid = false;
+      validation.step3.missing.push("dontInseresCta");
+    }
+    if (
+      registration.step3?.nombreInseresDaip === undefined ||
+      registration.step3?.nombreInseresDaip === null
+    ) {
+      validation.step3.valid = false;
+      validation.step3.missing.push("nombreInseresDaip");
+    }
+
+    
+    if (!registration.step4?.email || registration.step4.email.trim() === "") {
+      validation.step4.valid = false;
+      validation.step4.missing.push("email");
+    }
+    if (!registration.step4?.consentementRgpd) {
+      validation.step4.valid = false;
+      validation.step4.missing.push("consentementRgpd");
+    }
+
+    const allValid = Object.values(validation).every((v) => v.valid);
+
+    if (!allValid) {
+      return res.status(400).json({
+        msg: "Veuillez compléter tous les champs obligatoires",
+        validation,
+      });
+    }
+
+    
+    registration.formCompleted = true;
+    registration.formCompletedAt = new Date();
+    registration.formSubmittedAt = new Date();
+    registration.status = "pending";
+    registration.currentStep = 4;
+
+    registration.addAuditEntry(
+      "form_submitted",
+      req.user.id,
+      { newValue: { status: "pending" } },
+      req,
+    );
+
+    await registration.save();
+    await syncRecruiterAnemStatus(recruiter._id, registration);
+
+    
+    await notifyAdminsNewDemande(registration, user.nom, "site_registration");
+
+    res.json({
+      msg: "Votre demande d'inscription ANEM a été soumise avec succès. Vous serez notifié du résultat.",
+      status: "pending",
+      registrationId: registration._id,
+      submittedAt: registration.formSubmittedAt,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const getRegistrationForm = async (req, res) => {
+  try {
+    const recruiter = await Recruiter.findOne({ userId: req.user.id });
+    if (!recruiter) {
+      return res.status(404).json({ msg: "Profil recruteur introuvable" });
+    }
+
+    const registration = await AnemRegistration.findOne({
+      recruiterId: recruiter._id,
+    })
+      .select("-auditLog")
+      .populate("adminNotes.createdBy", "nom");
+
+    if (!registration) {
+      return res.status(404).json({
+        msg: "Aucune inscription trouvée",
+        code: "NO_REGISTRATION",
+      });
+    }
+
+    const user = await User.findById(req.user.id);
+
+    res.json({
+      registration: {
+        _id: registration._id,
+        registrationType: registration.registrationType,
+        status: registration.status,
+        currentStep: registration.currentStep,
+        formCompleted: registration.formCompleted,
+        formSubmittedAt: registration.formSubmittedAt,
+
+        
+        step1: registration.step1 || {},
+        step2: registration.step2 || {},
+        step3: registration.step3 || {},
+        step4: {
+          email: registration.step4?.email || user.email,
+          consentementRgpd: registration.step4?.consentementRgpd || false,
+          consentementAt: registration.step4?.consentementAt,
+        },
+
+        
+        declaredAnemId: registration.declaredAnemId,
+        verifiedAnemId: registration.verifiedAnemId,
+
+        
+        failureReason: registration.failureReason,
+        rejectionReason: registration.rejectionReason,
+
+        
+        publicNotes: registration.adminNotes
+          ?.filter((n) => n.isPublic)
+          .map((n) => ({
+            content: n.content,
+            createdAt: n.createdAt,
+            adminName: n.createdBy?.nom,
+          }))
+          .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)),
+
+        
+        anemIdHistory: registration.anemIdHistory?.map((h) => ({
+          anemId: h.anemId,
+          submittedAt: h.submittedAt,
+          status: h.status,
+          rejectionReason: h.rejectionReason,
+        })),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+
+
+
+
+export const getAnemDemandes = async (req, res) => {
+  try {
+    const {
+      status,
+      registrationType,
+      wilaya,
+      search,
+      assignedTo,
+      unassigned,
+      dateFrom,
+      dateTo,
+      sortBy = "createdAt",
+      sortOrder = "desc",
+      page = 1,
+      limit = 20,
+    } = req.query;
+
+    let query = {
+      status: { $ne: "draft" }, 
+    };
+
+    
+    if (status) {
+      if (status === "new") {
+        query.status = { $in: ["pending", "pending_verification"] };
+      } else if (status === "active") {
+        query.status = {
+          $in: ["pending", "pending_verification", "in_progress"],
+        };
+      } else {
+        query.status = status;
+      }
+    }
+
+    
+    if (registrationType) {
+      query.registrationType = registrationType;
+    }
+
+    
+    if (wilaya) {
+      query["step2.wilaya"] = { $regex: new RegExp(wilaya, "i") };
+    }
+
+    
+    if (assignedTo) {
+      query.assignedTo = assignedTo;
+    }
+    if (unassigned === "true") {
+      query.assignedTo = { $exists: false };
+    }
+
+    
+    if (dateFrom || dateTo) {
+      query.createdAt = {};
+      if (dateFrom) query.createdAt.$gte = new Date(dateFrom);
+      if (dateTo) {
+        const endDate = new Date(dateTo);
+        endDate.setHours(23, 59, 59, 999);
+        query.createdAt.$lte = endDate;
+      }
+    }
+
+    
+    if (search) {
+      const searchRegex = { $regex: search, $options: "i" };
+
+      
+      const matchingUsers = await User.find({
+        $or: [{ nom: searchRegex }, { email: searchRegex }],
+      }).select("_id");
+      const userIds = matchingUsers.map((u) => u._id);
+
+      query.$or = [
+        { userId: { $in: userIds } },
+        { "step1.raisonSociale": searchRegex },
+        { "step1.numeroCnas": searchRegex },
+        { "step1.nif": searchRegex },
+        { declaredAnemId: searchRegex },
+        { verifiedAnemId: searchRegex },
+      ];
+    }
+
+    const skip = (page - 1) * limit;
+    const sort = { [sortBy]: sortOrder === "desc" ? -1 : 1 };
+
+    const [demandes, total, statusCounts] = await Promise.all([
+      AnemRegistration.find(query)
+        .sort(sort)
+        .skip(skip)
+        .limit(parseInt(limit))
+        .populate("userId", "nom email")
+        .populate("companyId", "name logo")
+        .populate("recruiterId", "position telephone")
+        .populate("assignedTo", "userId label")
+        .lean(),
+      AnemRegistration.countDocuments(query),
+      AnemRegistration.aggregate([
+        { $match: { status: { $ne: "draft" } } },
+        { $group: { _id: "$status", count: { $sum: 1 } } },
+      ]),
+    ]);
+
+    
+    const enrichedDemandes = await Promise.all(
+      demandes.map(async (d) => {
+        let assignedAdminName = null;
+        if (d.assignedTo?.userId) {
+          const adminUser = await User.findById(d.assignedTo.userId).select(
+            "nom",
+          );
+          assignedAdminName = adminUser?.nom;
+        }
+
+        return {
+          _id: d._id,
+          registrationType: d.registrationType,
+          status: d.status,
+          currentStep: d.currentStep,
+          formCompleted: d.formCompleted,
+          formSubmittedAt: d.formSubmittedAt,
+
+          
+          declaredAnemId: d.declaredAnemId,
+          verifiedAnemId: d.verifiedAnemId,
+
+          
+          recruiter: {
+            _id: d.recruiterId?._id,
+            nom: d.userId?.nom,
+            email: d.userId?.email,
+            telephone: d.recruiterId?.telephone,
+          },
+          company: {
+            _id: d.companyId?._id,
+            name: d.companyId?.name,
+            logo: d.companyId?.logo,
+          },
+
+          
+          wilaya: d.step2?.wilaya,
+          raisonSociale: d.step1?.raisonSociale,
+
+          
+          assignedTo: d.assignedTo
+            ? {
+                _id: d.assignedTo._id,
+                name: assignedAdminName,
+                label: d.assignedTo.label,
+              }
+            : null,
+          assignedAt: d.assignedAt,
+
+          
+          pdfDownloadCount: d.pdfDownloads?.length || 0,
+          lastPdfDownload: d.pdfDownloads?.slice(-1)[0]?.downloadedAt,
+
+          
+          failureReason: d.failureReason,
+          rejectionReason: d.rejectionReason,
+
+          
+          createdAt: d.createdAt,
+          updatedAt: d.updatedAt,
+        };
+      }),
+    );
+
+    
+    const countsMap = {};
+    statusCounts.forEach((s) => {
+      countsMap[s._id] = s.count;
+    });
+
+    res.json({
+      data: enrichedDemandes,
+      meta: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / limit),
+      },
+      statusCounts: countsMap,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const getDemandeDetails = async (req, res) => {
+  try {
+    const { demandeId } = req.params;
+
+    const demande = await AnemRegistration.findById(demandeId)
+      .populate("userId", "nom email createdAt")
+      .populate("companyId", "name logo website location status")
+      .populate("recruiterId", "position telephone status")
+      .populate("assignedTo", "userId label")
+      .populate("verifiedBy", "nom")
+      .populate("assignedBy", "nom")
+      .populate("adminNotes.createdBy", "nom")
+      .populate("auditLog.performedBy", "nom")
+      .populate("anemIdHistory.reviewedBy", "nom")
+      .populate("pdfDownloads.downloadedBy", "nom");
+
+    if (!demande) {
+      return res.status(404).json({ msg: "Demande introuvable" });
+    }
+
+    
+    let assignedAdminName = null;
+    if (demande.assignedTo?.userId) {
+      const adminUser = await User.findById(demande.assignedTo.userId).select(
+        "nom",
+      );
+      assignedAdminName = adminUser?.nom;
+    }
+
+    
+    await logAdminAction(
+      req.user.id,
+      "anem_demande_viewed",
+      { type: "anem_registration", id: demande._id },
+      {},
+      req,
+    );
+
+    res.json({
+      ...demande.toObject(),
+      assignedAdminName,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const getPendingAnemIds = async (req, res) => {
+  try {
+    const {
+      page = 1,
+      limit = 20,
+      sortBy = "declaredAt",
+      sortOrder = "desc",
+    } = req.query;
+    const skip = (page - 1) * limit;
+    const sort = { [sortBy]: sortOrder === "desc" ? -1 : 1 };
+
+    const [demandes, total] = await Promise.all([
+      AnemRegistration.find({
+        registrationType: "self_declared",
+        status: "pending_verification",
+      })
+        .sort(sort)
+        .skip(skip)
+        .limit(parseInt(limit))
+        .populate("userId", "nom email")
+        .populate("companyId", "name logo")
+        .populate("recruiterId", "position")
+        .lean(),
+      AnemRegistration.countDocuments({
+        registrationType: "self_declared",
+        status: "pending_verification",
+      }),
+    ]);
+
+    const enriched = demandes.map((d) => ({
+      _id: d._id,
+      declaredAnemId: d.declaredAnemId,
+      declaredAt: d.declaredAt,
+      recruiter: {
+        _id: d.recruiterId?._id,
+        nom: d.userId?.nom,
+        email: d.userId?.email,
+      },
+      company: {
+        _id: d.companyId?._id,
+        name: d.companyId?.name,
+        logo: d.companyId?.logo,
+      },
+      
+      previousSubmissions: d.anemIdHistory
+        ?.filter((h) => h.status === "rejected")
+        .map((h) => ({
+          anemId: h.anemId,
+          submittedAt: h.submittedAt,
+          rejectionReason: h.rejectionReason,
+        })),
+      createdAt: d.createdAt,
+    }));
+
+    res.json({
+      data: enriched,
+      meta: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / limit),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const assignDemande = async (req, res) => {
+  try {
+    const { demandeId } = req.params;
+    const { adminId } = req.body;
+
+    const demande = await AnemRegistration.findById(demandeId);
+    if (!demande) {
+      return res.status(404).json({ msg: "Demande introuvable" });
+    }
+
+    let targetAdminId = adminId;
+
+    
+    if (!adminId) {
+      const selfAdmin = await Admin.findOne({ userId: req.user.id });
+      if (!selfAdmin) {
+        return res.status(400).json({ msg: "Admin ID requis" });
+      }
+      targetAdminId = selfAdmin._id;
+    }
+
+    const targetAdmin = await Admin.findById(targetAdminId).populate(
+      "userId",
+      "nom",
+    );
+    if (!targetAdmin) {
+      return res.status(404).json({ msg: "Admin cible introuvable" });
+    }
+
+    const previousAssigned = demande.assignedTo;
+
+    demande.assignedTo = targetAdminId;
+    demande.assignedAt = new Date();
+    demande.assignedBy = req.user.id;
+
+    demande.addAuditEntry(
+      "assigned",
+      req.user.id,
+      { previousValue: previousAssigned, newValue: targetAdminId },
+      req,
+    );
+
+    await demande.save();
+
+    await logAdminAction(
+      req.user.id,
+      "anem_demande_assigned",
+      { type: "anem_registration", id: demande._id },
+      { assignedTo: targetAdminId, adminName: targetAdmin.userId.nom },
+      req,
+    );
+
+    res.json({
+      msg: `Demande assignée à ${targetAdmin.userId.nom}`,
+      assignedTo: {
+        _id: targetAdmin._id,
+        name: targetAdmin.userId.nom,
+        label: targetAdmin.label,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const markInProgress = async (req, res) => {
+  try {
+    const { demandeId } = req.params;
+
+    const demande = await AnemRegistration.findById(demandeId);
+    if (!demande) {
+      return res.status(404).json({ msg: "Demande introuvable" });
+    }
+
+    if (!["pending", "pending_verification"].includes(demande.status)) {
+      return res.status(400).json({
+        msg: "Seules les demandes en attente peuvent être marquées en cours",
+        currentStatus: demande.status,
+      });
+    }
+
+    const previousStatus = demande.status;
+    demande.status = "in_progress";
+
+    
+    if (!demande.assignedTo) {
+      const selfAdmin = await Admin.findOne({ userId: req.user.id });
+      if (selfAdmin) {
+        demande.assignedTo = selfAdmin._id;
+        demande.assignedAt = new Date();
+        demande.assignedBy = req.user.id;
+      }
+    }
+
+    demande.addAuditEntry(
+      "status_changed",
+      req.user.id,
+      { previousValue: previousStatus, newValue: "in_progress" },
+      req,
+    );
+
+    await demande.save();
+    await syncRecruiterAnemStatus(demande.recruiterId, demande);
+
+    
+    await Notification.create({
+      userId: demande.userId,
+      message:
+        "Votre demande d'inscription ANEM est en cours de traitement par notre équipe.",
+      type: "info",
+    });
+
+    await logAdminAction(
+      req.user.id,
+      "anem_demande_in_progress",
+      { type: "anem_registration", id: demande._id },
+      { previousStatus },
+      req,
+    );
+
+    res.json({
+      msg: "Demande marquée en cours de traitement",
+      status: "in_progress",
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const getPdfData = async (req, res) => {
+  try {
+    const { demandeId } = req.params;
+
+    const demande = await AnemRegistration.findById(demandeId);
+    if (!demande) {
+      return res.status(404).json({ msg: "Demande introuvable" });
+    }
+
+    
+    demande.pdfDownloads.push({
+      downloadedBy: req.user.id,
+      downloadedAt: new Date(),
+      ip: req.ip || req.connection?.remoteAddress,
+    });
+
+    demande.addAuditEntry("pdf_downloaded", req.user.id, {}, req);
+
+    await demande.save();
+
+    
+    const pdfData = await demande.generatePdfData();
+
+    await logAdminAction(
+      req.user.id,
+      "anem_pdf_downloaded",
+      { type: "anem_registration", id: demande._id },
+      {},
+      req,
+    );
+
+    res.json(pdfData);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const approveAnemId = async (req, res) => {
+  try {
+    const { demandeId } = req.params;
+    const { comment } = req.body;
+
+    const demande = await AnemRegistration.findById(demandeId);
+    if (!demande) {
+      return res.status(404).json({ msg: "Demande introuvable" });
+    }
+
+    if (demande.status !== "pending_verification") {
+      return res.status(400).json({
+        msg: "Seuls les IDs en attente de vérification peuvent être approuvés",
+        currentStatus: demande.status,
+      });
+    }
+
+    const previousStatus = demande.status;
+    demande.status = "registered";
+    demande.verifiedAnemId = demande.declaredAnemId;
+    demande.verifiedAt = new Date();
+    demande.verifiedBy = req.user.id;
+
+    
+    const lastHistory = demande.anemIdHistory[demande.anemIdHistory.length - 1];
+    if (lastHistory && lastHistory.status === "pending") {
+      lastHistory.status = "approved";
+      lastHistory.reviewedBy = req.user.id;
+      lastHistory.reviewedAt = new Date();
+      lastHistory.adminComment = comment;
+    }
+
+    
+    if (comment) {
+      demande.adminNotes.push({
+        content: comment,
+        createdBy: req.user.id,
+        isPublic: true,
+      });
+    }
+
+    demande.addAuditEntry(
+      "status_changed",
+      req.user.id,
+      { previousValue: previousStatus, newValue: "registered" },
+      req,
+    );
+
+    await demande.save();
+    await syncRecruiterAnemStatus(demande.recruiterId, demande);
+
+    
+    await Notification.create({
+      userId: demande.userId,
+      message: `Félicitations ! Votre ID ANEM (${demande.verifiedAnemId}) a été vérifié avec succès. Vous pouvez maintenant publier des offres via ANEM.`,
+      type: "validation",
+    });
+
+    await logAdminAction(
+      req.user.id,
+      "anem_id_approved",
+      { type: "anem_registration", id: demande._id },
+      { anemId: demande.verifiedAnemId },
+      req,
+    );
+
+    res.json({
+      msg: "ID ANEM approuvé avec succès",
+      status: "registered",
+      anemId: demande.verifiedAnemId,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const rejectAnemId = async (req, res) => {
+  try {
+    const { demandeId } = req.params;
+    const { reason, publicMessage } = req.body;
+
+    if (!reason || reason.trim().length === 0) {
+      return res.status(400).json({ msg: "Raison de rejet requise" });
+    }
+
+    const demande = await AnemRegistration.findById(demandeId);
+    if (!demande) {
+      return res.status(404).json({ msg: "Demande introuvable" });
+    }
+
+    if (demande.status !== "pending_verification") {
+      return res.status(400).json({
+        msg: "Seuls les IDs en attente de vérification peuvent être rejetés",
+        currentStatus: demande.status,
+      });
+    }
+
+    const previousStatus = demande.status;
+    demande.status = "rejected";
+    demande.rejectionReason = reason;
+
+    
+    const lastHistory = demande.anemIdHistory[demande.anemIdHistory.length - 1];
+    if (lastHistory && lastHistory.status === "pending") {
+      lastHistory.status = "rejected";
+      lastHistory.reviewedBy = req.user.id;
+      lastHistory.reviewedAt = new Date();
+      lastHistory.rejectionReason = reason;
+    }
+
+    
+    demande.adminNotes.push({
+      content: publicMessage || `ID ANEM rejeté: ${reason}`,
+      createdBy: req.user.id,
+      isPublic: true,
+    });
+
+    demande.addAuditEntry(
+      "status_changed",
+      req.user.id,
+      { previousValue: previousStatus, newValue: "rejected" },
+      req,
+    );
+
+    await demande.save();
+    await syncRecruiterAnemStatus(demande.recruiterId, demande);
+
+    
+    await Notification.create({
+      userId: demande.userId,
+      message: `Votre ID ANEM n'a pas pu être vérifié. Raison: ${reason}. Vous pouvez soumettre un nouvel ID ou vous inscrire via notre site.`,
+      type: "alerte",
+    });
+
+    await logAdminAction(
+      req.user.id,
+      "anem_id_rejected",
+      { type: "anem_registration", id: demande._id },
+      { reason, rejectedId: demande.declaredAnemId },
+      req,
+    );
+
+    res.json({
+      msg: "ID ANEM rejeté",
+      status: "rejected",
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const markRegistered = async (req, res) => {
+  try {
+    const { demandeId } = req.params;
+    const { anemId, message } = req.body;
+
+    if (!anemId || anemId.trim().length < 3) {
+      return res.status(400).json({ msg: "ID ANEM valide requis" });
+    }
+
+    const demande = await AnemRegistration.findById(demandeId);
+    if (!demande) {
+      return res.status(404).json({ msg: "Demande introuvable" });
+    }
+
+    if (!["pending", "in_progress"].includes(demande.status)) {
+      return res.status(400).json({
+        msg: "Seules les demandes en attente ou en cours peuvent être marquées comme enregistrées",
+        currentStatus: demande.status,
+      });
+    }
+
+    const previousStatus = demande.status;
+    const trimmedId = anemId.trim().toUpperCase();
+
+    demande.status = "registered";
+    demande.verifiedAnemId = trimmedId;
+    demande.verifiedAt = new Date();
+    demande.verifiedBy = req.user.id;
+
+    
+    const publicMsg =
+      message || `Inscription ANEM réussie. Votre ID ANEM: ${trimmedId}`;
+    demande.adminNotes.push({
+      content: publicMsg,
+      createdBy: req.user.id,
+      isPublic: true,
+    });
+
+    demande.addAuditEntry(
+      "status_changed",
+      req.user.id,
+      {
+        previousValue: previousStatus,
+        newValue: "registered",
+        anemId: trimmedId,
+      },
+      req,
+    );
+
+    await demande.save();
+    await syncRecruiterAnemStatus(demande.recruiterId, demande);
+
+    
+    await Notification.create({
+      userId: demande.userId,
+      message: `Félicitations ! Vous êtes maintenant enregistré auprès de l'ANEM. Votre ID ANEM: ${trimmedId}`,
+      type: "validation",
+    });
+
+    await logAdminAction(
+      req.user.id,
+      "anem_registration_success",
+      { type: "anem_registration", id: demande._id },
+      { anemId: trimmedId },
+      req,
+    );
+
+    res.json({
+      msg: "Inscription ANEM enregistrée avec succès",
+      status: "registered",
+      anemId: trimmedId,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const markFailed = async (req, res) => {
+  try {
+    const { demandeId } = req.params;
+    const { reason, publicMessage } = req.body;
+
+    if (!reason || reason.trim().length === 0) {
+      return res.status(400).json({ msg: "Raison de l'échec requise" });
+    }
+
+    const demande = await AnemRegistration.findById(demandeId);
+    if (!demande) {
+      return res.status(404).json({ msg: "Demande introuvable" });
+    }
+
+    if (!["pending", "in_progress"].includes(demande.status)) {
+      return res.status(400).json({
+        msg: "Seules les demandes en attente ou en cours peuvent être marquées comme échouées",
+        currentStatus: demande.status,
+      });
+    }
+
+    const previousStatus = demande.status;
+    demande.status = "failed";
+    demande.failureReason = reason;
+
+    
+    demande.adminNotes.push({
+      content: publicMessage || `Inscription échouée: ${reason}`,
+      createdBy: req.user.id,
+      isPublic: true,
+    });
+
+    demande.addAuditEntry(
+      "status_changed",
+      req.user.id,
+      { previousValue: previousStatus, newValue: "failed" },
+      req,
+    );
+
+    await demande.save();
+    await syncRecruiterAnemStatus(demande.recruiterId, demande);
+
+    
+    await Notification.create({
+      userId: demande.userId,
+      message: `Nous n'avons pas pu finaliser votre inscription ANEM. Raison: ${reason}. Vous pouvez réessayer en soumettant une nouvelle demande.`,
+      type: "alerte",
+    });
+
+    await logAdminAction(
+      req.user.id,
+      "anem_registration_failed",
+      { type: "anem_registration", id: demande._id },
+      { reason },
+      req,
+    );
+
+    res.json({
+      msg: "Inscription marquée comme échouée",
+      status: "failed",
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const addAdminNote = async (req, res) => {
+  try {
+    const { demandeId } = req.params;
+    const { note, isPublic = false } = req.body;
+
+    if (!note || note.trim().length === 0) {
+      return res.status(400).json({ msg: "Note requise" });
+    }
+
+    const demande = await AnemRegistration.findById(demandeId);
+    if (!demande) {
+      return res.status(404).json({ msg: "Demande introuvable" });
+    }
+
+    demande.adminNotes.push({
+      content: note.trim(),
+      createdBy: req.user.id,
+      isPublic: isPublic,
+    });
+
+    demande.addAuditEntry(
+      "note_added",
+      req.user.id,
+      { newValue: { note, isPublic } },
+      req,
+    );
+
+    await demande.save();
+
+    
+    if (isPublic) {
+      await Notification.create({
+        userId: demande.userId,
+        message: `Mise à jour concernant votre demande ANEM: ${note.substring(0, 100)}${note.length > 100 ? "..." : ""}`,
+        type: "info",
+      });
+    }
+
+    await logAdminAction(
+      req.user.id,
+      "anem_note_added",
+      { type: "anem_registration", id: demande._id },
+      { isPublic },
+      req,
+    );
+
+    const user = await User.findById(req.user.id).select("nom");
+
+    res.json({
+      msg: "Note ajoutée",
+      note: {
+        content: note.trim(),
+        createdAt: new Date(),
+        createdBy: { nom: user.nom },
+        isPublic,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const bulkUpdateStatus = async (req, res) => {
+  try {
+    const { demandeIds, status, reason, anemId, message } = req.body;
+
+    if (!demandeIds || !Array.isArray(demandeIds) || demandeIds.length === 0) {
+      return res.status(400).json({ msg: "IDs de demandes requis" });
+    }
+
+    if (!["in_progress", "registered", "failed"].includes(status)) {
+      return res.status(400).json({
+        msg: "Statut invalide. Utilisez: in_progress, registered, failed",
+      });
+    }
+
+    if (status === "registered" && (!anemId || anemId.trim().length < 3)) {
+      return res.status(400).json({
+        msg: "ID ANEM valide requis pour marquer comme enregistré",
+      });
+    }
+
+    if (status === "failed" && (!reason || reason.trim().length === 0)) {
+      return res.status(400).json({
+        msg: "Raison requise pour marquer comme échoué",
+      });
+    }
+
+    const results = {
+      success: [],
+      failed: [],
+    };
+
+    for (const demandeId of demandeIds) {
+      try {
+        const demande = await AnemRegistration.findById(demandeId);
+
+        if (!demande) {
+          results.failed.push({ id: demandeId, reason: "Demande introuvable" });
+          continue;
+        }
+
+        
+        if (status === "registered" || status === "failed") {
+          if (!["pending", "in_progress"].includes(demande.status)) {
+            results.failed.push({
+              id: demandeId,
+              reason: `Transition invalide de ${demande.status} vers ${status}`,
+            });
+            continue;
+          }
+        } else if (status === "in_progress") {
+          if (!["pending", "pending_verification"].includes(demande.status)) {
+            results.failed.push({
+              id: demandeId,
+              reason: `Transition invalide de ${demande.status} vers ${status}`,
+            });
+            continue;
+          }
+        }
+
+        const previousStatus = demande.status;
+        demande.status = status;
+
+        if (status === "registered") {
+          const trimmedId = anemId.trim().toUpperCase();
+          demande.verifiedAnemId = trimmedId;
+          demande.verifiedAt = new Date();
+          demande.verifiedBy = req.user.id;
+
+          demande.adminNotes.push({
+            content: message || `Inscription ANEM réussie. ID: ${trimmedId}`,
+            createdBy: req.user.id,
+            isPublic: true,
+          });
+
+          await Notification.create({
+            userId: demande.userId,
+            message: `Félicitations ! Vous êtes enregistré ANEM. ID: ${trimmedId}`,
+            type: "validation",
+          });
+        } else if (status === "failed") {
+          demande.failureReason = reason;
+
+          demande.adminNotes.push({
+            content: message || `Inscription échouée: ${reason}`,
+            createdBy: req.user.id,
+            isPublic: true,
+          });
+
+          await Notification.create({
+            userId: demande.userId,
+            message: `Votre inscription ANEM a échoué. Raison: ${reason}`,
+            type: "alerte",
+          });
+        } else if (status === "in_progress") {
+          
+          if (!demande.assignedTo) {
+            const selfAdmin = await Admin.findOne({ userId: req.user.id });
+            if (selfAdmin) {
+              demande.assignedTo = selfAdmin._id;
+              demande.assignedAt = new Date();
+              demande.assignedBy = req.user.id;
+            }
+          }
+
+          await Notification.create({
+            userId: demande.userId,
+            message: "Votre demande ANEM est en cours de traitement.",
+            type: "info",
+          });
+        }
+
+        demande.addAuditEntry(
+          "status_changed",
+          req.user.id,
+          { previousValue: previousStatus, newValue: status },
+          req,
+        );
+
+        await demande.save();
+        await syncRecruiterAnemStatus(demande.recruiterId, demande);
+
+        results.success.push(demandeId);
+      } catch (err) {
+        results.failed.push({ id: demandeId, reason: err.message });
+      }
+    }
+
+    await logAdminAction(
+      req.user.id,
+      "anem_bulk_status_update",
+      { type: "anem_registration", id: demandeIds.join(",") },
+      {
+        status,
+        successCount: results.success.length,
+        failedCount: results.failed.length,
+      },
+      req,
+    );
+
+    res.json({
+      msg: `${results.success.length} demande(s) mise(s) à jour avec succès`,
+      results,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const getAnemStats = async (req, res) => {
+  try {
+    const now = new Date();
+    const thirtyDaysAgo = new Date(now - 30 * 24 * 60 * 60 * 1000);
+    const sevenDaysAgo = new Date(now - 7 * 24 * 60 * 60 * 1000);
+
+    const [
+      statusCounts,
+      newDemandesThisWeek,
+      newDemandesThisMonth,
+      pendingOlderThan7Days,
+      registrationsByType,
+      processingTimes,
+      anemOffersStats,
+      dailyDemandes,
+      wilayaDistribution,
+    ] = await Promise.all([
+      
+      AnemRegistration.aggregate([
+        { $match: { status: { $ne: "draft" } } },
+        { $group: { _id: "$status", count: { $sum: 1 } } },
+      ]),
+
+      
+      AnemRegistration.countDocuments({
+        status: { $ne: "draft" },
+        createdAt: { $gte: sevenDaysAgo },
+      }),
+
+      
+      AnemRegistration.countDocuments({
+        status: { $ne: "draft" },
+        createdAt: { $gte: thirtyDaysAgo },
+      }),
+
+      
+      AnemRegistration.countDocuments({
+        status: { $in: ["pending", "pending_verification"] },
+        createdAt: { $lt: sevenDaysAgo },
+      }),
+
+      
+      AnemRegistration.aggregate([
+        { $match: { status: { $ne: "draft" } } },
+        { $group: { _id: "$registrationType", count: { $sum: 1 } } },
+      ]),
+
+      
+      AnemRegistration.aggregate([
+        {
+          $match: {
+            status: "registered",
+            verifiedAt: { $exists: true },
+            formSubmittedAt: { $exists: true },
+          },
+        },
+        {
+          $project: {
+            processingDays: {
+              $divide: [
+                { $subtract: ["$verifiedAt", "$formSubmittedAt"] },
+                1000 * 60 * 60 * 24,
+              ],
+            },
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            avgDays: { $avg: "$processingDays" },
+            minDays: { $min: "$processingDays" },
+            maxDays: { $max: "$processingDays" },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+
+      
+      Promise.all([
+        AnemOffer.countDocuments({ anemEnabled: true }),
+        Offer.countDocuments({ actif: true, validationStatus: "approved" }),
+      ]),
+
+      
+      AnemRegistration.aggregate([
+        {
+          $match: {
+            status: { $ne: "draft" },
+            createdAt: { $gte: thirtyDaysAgo },
+          },
+        },
+        {
+          $group: {
+            _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+            total: { $sum: 1 },
+            siteRegistrations: {
+              $sum: {
+                $cond: [
+                  { $eq: ["$registrationType", "site_registration"] },
+                  1,
+                  0,
+                ],
+              },
+            },
+            selfDeclared: {
+              $sum: {
+                $cond: [{ $eq: ["$registrationType", "self_declared"] }, 1, 0],
+              },
+            },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
+
+      
+      AnemRegistration.aggregate([
+        {
+          $match: {
+            status: { $ne: "draft" },
+            "step2.wilaya": { $exists: true },
+          },
+        },
+        { $group: { _id: "$step2.wilaya", count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+        { $limit: 10 },
+      ]),
+    ]);
+
+    
+    const countsMap = {};
+    statusCounts.forEach((s) => {
+      countsMap[s._id] = s.count;
+    });
+
+    
+    const typeMap = {};
+    registrationsByType.forEach((t) => {
+      typeMap[t._id] = t.count;
+    });
+
+    
+    const totalDemandes = Object.values(countsMap).reduce((a, b) => a + b, 0);
+    const successfulRegistrations = countsMap["registered"] || 0;
+    const successRate =
+      totalDemandes > 0
+        ? Math.round((successfulRegistrations / totalDemandes) * 100)
+        : 0;
+
+    
+    const [anemOffersCount, totalActiveOffers] = anemOffersStats;
+    const anemOfferPercentage =
+      totalActiveOffers > 0
+        ? Math.round((anemOffersCount / totalActiveOffers) * 100)
+        : 0;
+
+    res.json({
+      overview: {
+        total: totalDemandes,
+        pending:
+          (countsMap["pending"] || 0) +
+          (countsMap["pending_verification"] || 0),
+        inProgress: countsMap["in_progress"] || 0,
+        registered: countsMap["registered"] || 0,
+        failed: countsMap["failed"] || 0,
+        rejected: countsMap["rejected"] || 0,
+      },
+
+      trends: {
+        newThisWeek: newDemandesThisWeek,
+        newThisMonth: newDemandesThisMonth,
+        pendingOlderThan7Days,
+      },
+
+      byType: {
+        siteRegistration: typeMap["site_registration"] || 0,
+        selfDeclared: typeMap["self_declared"] || 0,
+      },
+
+      performance: {
+        successRate: `${successRate}%`,
+        avgProcessingDays: processingTimes[0]?.avgDays?.toFixed(1) || "N/A",
+        minProcessingDays: processingTimes[0]?.minDays?.toFixed(1) || "N/A",
+        maxProcessingDays: processingTimes[0]?.maxDays?.toFixed(1) || "N/A",
+        totalCompleted: processingTimes[0]?.count || 0,
+      },
+
+      offers: {
+        withAnem: anemOffersCount,
+        withoutAnem: totalActiveOffers - anemOffersCount,
+        total: totalActiveOffers,
+        anemPercentage: `${anemOfferPercentage}%`,
+      },
+
+      charts: {
+        dailyDemandes,
+        wilayaDistribution,
+      },
+
+      statusCounts: countsMap,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const getNewDemandesCount = async (req, res) => {
+  try {
+    const [pendingCount, unassignedCount] = await Promise.all([
+      AnemRegistration.countDocuments({
+        status: { $in: ["pending", "pending_verification"] },
+      }),
+      AnemRegistration.countDocuments({
+        status: { $in: ["pending", "pending_verification"] },
+        assignedTo: { $exists: false },
+      }),
+    ]);
+
+    res.json({
+      total: pendingCount,
+      unassigned: unassignedCount,
+      hasNew: pendingCount > 0,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const getAdminsForAssignment = async (req, res) => {
+  try {
+    const admins = await Admin.find({
+      status: "active",
+      $or: [
+        { label: "super_admin" },
+        { "permissions.validateRecruiters": true },
+      ],
+    })
+      .populate("userId", "nom email")
+      .select("userId label");
+
+    const adminList = admins.map((a) => ({
+      _id: a._id,
+      name: a.userId?.nom,
+      email: a.userId?.email,
+      label: a.label,
+    }));
+
+    res.json(adminList);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+=== controllers\anemOfferController.js ===
+import AnemOffer from "../models/AnemOffer.js";
+import AnemRegistration from "../models/AnemRegistration.js";
+import Offer from "../models/Offer.js";
+import Recruiter from "../models/Recruiter.js";
+
+
+export const checkAnemEligibility = async (req, res) => {
+  try {
+    const recruiter = await Recruiter.findOne({ userId: req.user.id });
+
+    if (!recruiter) {
+      return res.status(404).json({ msg: "Profil recruteur introuvable" });
+    }
+
+    const offerCount = await Offer.countDocuments({
+      recruteurId: recruiter._id,
+    });
+
+    const isFirstOffer = offerCount === 0;
+    const isAnemRegistered = recruiter.canCreateAnemOffer();
+    const hasSeenModal = recruiter.anem.hasSeenAnemModal;
+    const declinedAnem = recruiter.anem.declinedAnem;
+    const currentStatus = recruiter.anem.status;
+
+    
+    let showModal = false;
+    let modalType = null;
+
+    
+    if (isFirstOffer && !hasSeenModal) {
+      showModal = true;
+      modalType = "first_offer";
+    }
+
+    res.json({
+      
+      isFirstOffer,
+      offerCount,
+
+      
+      isAnemRegistered,
+      anemId: recruiter.anem.anemId,
+      anemStatus: currentStatus,
+
+      
+      hasSeenModal,
+      declinedAnem,
+      showModal,
+      modalType,
+
+      
+      canEnableAnem: isAnemRegistered,
+      canToggleAnem: isAnemRegistered, 
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const createAnemOffer = async (
+  offerId,
+  recruiterId,
+  anemRegistrationId,
+  anemId,
+) => {
+  try {
+    const anemOffer = new AnemOffer({
+      offerId,
+      recruiterId,
+      anemRegistrationId,
+      anemEnabled: true,
+      anemId,
+      enabledAt: new Date(),
+    });
+
+    await anemOffer.save();
+    return anemOffer;
+  } catch (err) {
+    console.error("Error creating ANEM offer:", err);
+    throw err;
+  }
+};
+
+
+export const enableAnemForOffer = async (req, res) => {
+  try {
+    const { offerId } = req.params;
+
+    const recruiter = await Recruiter.findOne({ userId: req.user.id });
+    if (!recruiter) {
+      return res.status(404).json({ msg: "Profil recruteur introuvable" });
+    }
+
+    if (!recruiter.canCreateAnemOffer()) {
+      return res.status(403).json({
+        msg: "Vous devez être enregistré ANEM pour activer cette fonctionnalité",
+        anemStatus: recruiter.anem.status,
+        needsRegistration: true,
+      });
+    }
+
+    const offer = await Offer.findOne({
+      _id: offerId,
+      recruteurId: recruiter._id,
+    });
+
+    if (!offer) {
+      return res.status(404).json({ msg: "Offre introuvable" });
+    }
+
+    
+    let anemOffer = await AnemOffer.findOne({ offerId });
+
+    if (anemOffer) {
+      if (anemOffer.anemEnabled) {
+        return res
+          .status(400)
+          .json({ msg: "ANEM déjà activé pour cette offre" });
+      }
+
+      anemOffer.anemEnabled = true;
+      anemOffer.anemId = recruiter.anem.anemId;
+      anemOffer.enabledAt = new Date();
+      anemOffer.disabledAt = undefined;
+    } else {
+      anemOffer = new AnemOffer({
+        offerId,
+        recruiterId: recruiter._id,
+        anemRegistrationId: recruiter.anem.registrationId,
+        anemEnabled: true,
+        anemId: recruiter.anem.anemId,
+        enabledAt: new Date(),
+      });
+    }
+
+    await anemOffer.save();
+
+    res.json({
+      msg: "ANEM activé pour cette offre",
+      anemEnabled: true,
+      anemId: anemOffer.anemId,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const disableAnemForOffer = async (req, res) => {
+  try {
+    const { offerId } = req.params;
+
+    const recruiter = await Recruiter.findOne({ userId: req.user.id });
+    if (!recruiter) {
+      return res.status(404).json({ msg: "Profil recruteur introuvable" });
+    }
+
+    const offer = await Offer.findOne({
+      _id: offerId,
+      recruteurId: recruiter._id,
+    });
+
+    if (!offer) {
+      return res.status(404).json({ msg: "Offre introuvable" });
+    }
+
+    const anemOffer = await AnemOffer.findOne({ offerId });
+
+    if (!anemOffer || !anemOffer.anemEnabled) {
+      return res
+        .status(400)
+        .json({ msg: "ANEM n'est pas activé pour cette offre" });
+    }
+
+    anemOffer.anemEnabled = false;
+    anemOffer.disabledAt = new Date();
+    await anemOffer.save();
+
+    res.json({
+      msg: "ANEM désactivé pour cette offre",
+      anemEnabled: false,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const getOfferAnemStatus = async (req, res) => {
+  try {
+    const { offerId } = req.params;
+
+    const recruiter = await Recruiter.findOne({ userId: req.user.id });
+    if (!recruiter) {
+      return res.status(404).json({ msg: "Profil recruteur introuvable" });
+    }
+
+    const offer = await Offer.findOne({
+      _id: offerId,
+      recruteurId: recruiter._id,
+    });
+
+    if (!offer) {
+      return res.status(404).json({ msg: "Offre introuvable" });
+    }
+
+    const anemOffer = await AnemOffer.findOne({ offerId }).lean();
+
+    res.json({
+      hasAnem: anemOffer?.anemEnabled || false,
+      anemEnabled: anemOffer?.anemEnabled || false,
+      anemId: anemOffer?.anemId,
+      enabledAt: anemOffer?.enabledAt,
+      
+      submittedToAnem: anemOffer?.submittedToAnem || false,
+      anemReference: anemOffer?.anemReference,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const getRecruiterAnemOffers = async (req, res) => {
+  try {
+    const recruiter = await Recruiter.findOne({ userId: req.user.id });
+    if (!recruiter) {
+      return res.status(404).json({ msg: "Profil recruteur introuvable" });
+    }
+
+    const offers = await Offer.find({ recruteurId: recruiter._id })
+      .select("_id titre actif validationStatus datePublication")
+      .lean();
+
+    const offerIds = offers.map((o) => o._id);
+    const anemOffers = await AnemOffer.find({
+      offerId: { $in: offerIds },
+    }).lean();
+    const anemMap = new Map(anemOffers.map((a) => [a.offerId.toString(), a]));
+
+    const enriched = offers.map((offer) => {
+      const anem = anemMap.get(offer._id.toString());
+      return {
+        ...offer,
+        anem: anem
+          ? {
+              enabled: anem.anemEnabled,
+              anemId: anem.anemId,
+              enabledAt: anem.enabledAt,
+            }
+          : null,
+      };
+    });
+
+    res.json(enriched);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+=== controllers\announcementController.js ===
+import Announcement from "../models/Announcement.js";
+import User from "../models/User.js";
+import Admin from "../models/Admin.js";
+import { logAdminAction } from "../models/AdminLog.js";
+
+export const createAnnouncement = async (req, res) => {
+  try {
+    const {
+      title,
+      content,
+      targetAudience,
+      status,
+      publishAt,
+      expiresAt,
+      priority,
+      displayType,
+    } = req.body;
+
+    let finalStatus = status || "draft";
+    if (
+      status === "published" &&
+      publishAt &&
+      new Date(publishAt) > new Date()
+    ) {
+      finalStatus = "scheduled";
+    }
+
+    const announcement = await Announcement.create({
+      title,
+      content,
+      targetAudience: targetAudience || "all",
+      status: finalStatus,
+      publishAt: publishAt ? new Date(publishAt) : null,
+      expiresAt: expiresAt ? new Date(expiresAt) : null,
+      priority: priority || "normal",
+      displayType: displayType || "inline",
+      createdBy: req.user.id,
+    });
+
+    await logAdminAction(
+      req.user.id,
+      "announcement_created",
+      { type: "announcement", id: announcement._id },
+      { title },
+      req
+    );
+
+    res.status(201).json({ msg: "Annonce créée ✅", announcement });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getAllAnnouncements = async (req, res) => {
+  try {
+    const { status, targetAudience, page = 1, limit = 20 } = req.query;
+
+    let query = {};
+    if (status) query.status = status;
+    if (targetAudience) query.targetAudience = targetAudience;
+
+    const announcements = await Announcement.find(query)
+      .populate("createdBy", "nom email")
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit));
+
+    const total = await Announcement.countDocuments(query);
+
+    res.json({
+      data: announcements,
+      meta: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / limit),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getActiveAnnouncements = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    const now = new Date();
+
+    let audienceFilter = ["all"];
+    if (user.role === "admin") audienceFilter.push("admins");
+    if (user.role === "recruteur") audienceFilter.push("recruiters");
+    if (user.role === "candidat") audienceFilter.push("candidates");
+
+    const announcements = await Announcement.find({
+      status: "published",
+      targetAudience: { $in: audienceFilter },
+      $or: [{ publishAt: null }, { publishAt: { $lte: now } }],
+      dismissedBy: { $ne: req.user.id },
+    })
+      .and([
+        {
+          $or: [{ expiresAt: null }, { expiresAt: { $gt: now } }],
+        },
+      ])
+      .sort({ priority: -1, createdAt: -1 });
+
+    res.json(announcements);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const updateAnnouncement = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updates = req.body;
+
+    const announcement = await Announcement.findByIdAndUpdate(
+      id,
+      {
+        ...updates,
+        updatedBy: req.user.id,
+      },
+      { new: true }
+    );
+
+    if (!announcement) {
+      return res.status(404).json({ msg: "Annonce introuvable" });
+    }
+
+    await logAdminAction(
+      req.user.id,
+      "announcement_updated",
+      { type: "announcement", id: announcement._id },
+      { updates },
+      req
+    );
+
+    res.json({ msg: "Annonce mise à jour ✅", announcement });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const deleteAnnouncement = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const announcement = await Announcement.findByIdAndDelete(id);
+    if (!announcement) {
+      return res.status(404).json({ msg: "Annonce introuvable" });
+    }
+
+    await logAdminAction(
+      req.user.id,
+      "announcement_deleted",
+      { type: "announcement", id },
+      { title: announcement.title },
+      req
+    );
+
+    res.json({ msg: "Annonce supprimée 🗑️" });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const dismissAnnouncement = async (req, res) => {
+  try {
+    const { announcementId } = req.params;
+
+    await Announcement.findByIdAndUpdate(announcementId, {
+      $addToSet: { dismissedBy: req.user.id },
+    });
+
+    res.json({ msg: "Annonce masquée." });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const publishScheduledAnnouncements = async () => {
+  const now = new Date();
+
+  const publishedResult = await Announcement.updateMany(
+    { status: "scheduled", publishAt: { $lte: now } },
+    { $set: { status: "published" } }
+  );
+
+  const expiredResult = await Announcement.updateMany(
+    { status: "published", expiresAt: { $lte: now } },
+    { $set: { status: "expired" } }
+  );
+
+  console.log(
+    `📢 Annonces publiées: ${publishedResult.modifiedCount}, expirées: ${expiredResult.modifiedCount}`
+  );
+};
+
+
+=== controllers\authController.js ===
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import User from "../models/User.js";
+import Candidate from "../models/Candidate.js";
+import Company from "../models/Company.js";
+import Recruiter from "../models/Recruiter.js";
+import VerificationToken from "../models/VerificationToken.js";
+import SystemSettings from "../models/SystemSettings.js";
+import {
+  sendVerificationEmail,
+  sendWelcomeEmail,
+} from "../services/emailService.js";
+
+const generateToken = (user) => {
+  return jwt.sign(
+    {
+      id: user._id,
+      role: user.role,
+      emailVerified: user.emailVerified,
+    },
+    process.env.JWT_SECRET,
+    { expiresIn: "1d" },
+  );
+};
+
+function getRecruiterStatusMessage(status) {
+  const messages = {
+    pending_validation:
+      "Votre compte est en attente de validation par un administrateur.",
+    pending_documents:
+      "Des documents vous ont été demandés. Veuillez les fournir.",
+    pending_info: "Des informations complémentaires vous ont été demandées.",
+    pending_info_and_documents:
+      "Des informations et des documents vous ont été demandés.",
+    pending_revalidation: "Vos réponses sont en cours d'examen.",
+  };
+  return messages[status] || "Statut en attente.";
+}
+
+export const register = async (req, res) => {
+  try {
+    const {
+      nom,
+      email,
+      motDePasse,
+      role,
+      companyId,
+      nouveauNomEntreprise,
+      nouveauSiteWeb,
+    } = req.body;
+
+    const exist = await User.findOne({ email: email.toLowerCase() });
+    if (exist) {
+      return res.status(400).json({ msg: "Email déjà utilisé" });
+    }
+
+    const hash = await bcrypt.hash(motDePasse, 12);
+
+    const user = await User.create({
+      nom,
+      email: email.toLowerCase(),
+      motDePasse: hash,
+      role,
+      emailVerified: false,
+      accountStatus: "active",
+    });
+
+    try {
+      if (role === "recruteur") {
+        let finalCompanyId;
+
+        if (companyId) {
+          const comp = await Company.findById(companyId);
+          if (!comp) {
+            await User.findByIdAndDelete(user._id);
+            return res.status(400).json({ msg: "Entreprise introuvable" });
+          }
+          finalCompanyId = comp._id;
+        } else if (nouveauNomEntreprise) {
+          const newComp = await Company.create({
+            name: nouveauNomEntreprise,
+            website: nouveauSiteWeb,
+            status: "pending",
+          });
+          finalCompanyId = newComp._id;
+        } else {
+          await User.findByIdAndDelete(user._id);
+          return res.status(400).json({
+            msg: "Vous devez sélectionner ou créer une entreprise.",
+          });
+        }
+
+        await Recruiter.create({
+          userId: user._id,
+          companyId: finalCompanyId,
+          position: "Recruteur",
+          status: "pending_validation",
+          isAdmin: !companyId,
+        });
+      } else if (role === "candidat") {
+        await Candidate.create({ userId: user._id });
+      }
+
+      
+      const verificationMode = await SystemSettings.getSetting(
+        "email_verification_mode",
+        "development",
+      );
+
+      console.log(
+        `📧 Registration - Email verification mode: ${verificationMode}`,
+      );
+
+      if (verificationMode === "smtp") {
+        try {
+          const { code } = await VerificationToken.createVerificationToken(
+            user._id,
+            "email_verification",
+            15,
+          );
+          
+          console.log(`📧 Sending verification email to ${user.email}`);
+          await sendVerificationEmail(user.email, code, user.nom);
+          console.log(`✅ Verification email sent successfully`);
+        } catch (emailError) {
+          console.error("❌ Failed to send verification email:", emailError);
+          
+          
+        }
+      } else {
+        console.log(
+          `📨 [DEV MODE] User Registered: ${user.email}. Use code: 123456`,
+        );
+      }
+
+      const token = generateToken(user);
+
+      res.status(201).json({
+        msg: "Inscription réussie. Vérifiez votre email.",
+        token,
+        user: {
+          id: user._id,
+          email: user.email,
+          role: user.role,
+          emailVerified: false,
+        },
+        needsEmailVerification: true,
+      });
+    } catch (err) {
+      await User.findByIdAndDelete(user._id);
+      throw err;
+    }
+  } catch (err) {
+    console.error("Registration error:", err);
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const login = async (req, res) => {
+  try {
+    const { email, motDePasse } = req.body;
+
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) {
+      return res.status(404).json({ msg: "Utilisateur non trouvé" });
+    }
+
+    const ok = await bcrypt.compare(motDePasse, user.motDePasse);
+    if (!ok) {
+      return res.status(401).json({ msg: "Mot de passe incorrect" });
+    }
+
+    if (!user.canLogin()) {
+      if (user.accountStatus === "banned") {
+        return res.status(403).json({
+          msg: "Votre compte a été banni. Veuillez contacter l'administrateur.",
+          code: "ACCOUNT_BANNED",
+        });
+      }
+      if (user.accountStatus === "suspended") {
+        return res.status(403).json({
+          msg: `Votre compte est suspendu${
+            user.suspendedUntil
+              ? ` jusqu'au ${user.suspendedUntil.toLocaleDateString("fr-FR")}`
+              : ""
+          }.`,
+          code: "ACCOUNT_SUSPENDED",
+          reason: user.suspensionReason,
+        });
+      }
+    }
+
+    if (user.role === "recruteur") {
+      if (!user.emailVerified) {
+        return res.status(403).json({
+          msg: "Veuillez confirmer votre email avant de vous connecter.",
+          code: "EMAIL_NOT_VERIFIED",
+          needEmailVerification: true,
+        });
+      }
+
+      const recruiter = await Recruiter.findOne({ userId: user._id });
+      if (recruiter) {
+        if (recruiter.status === "rejected") {
+          return res.status(403).json({
+            msg: "Votre compte recruteur a été refusé.",
+            code: "RECRUITER_REJECTED",
+            reason: recruiter.rejectionReason,
+          });
+        }
+
+        if (recruiter.status !== "validated") {
+          const token = generateToken(user);
+          user.derniereConnexion = new Date();
+          await user.save();
+
+          return res.json({
+            msg: "Connexion réussie (accès limité)",
+            token,
+            user: {
+              id: user._id,
+              nom: user.nom,
+              email: user.email,
+              role: user.role,
+              emailVerified: user.emailVerified,
+            },
+            recruiterStatus: recruiter.status,
+            limitedAccess: true,
+            statusMessage: getRecruiterStatusMessage(recruiter.status),
+          });
+        }
+      }
+    }
+
+    const token = generateToken(user);
+    user.derniereConnexion = new Date();
+    await user.save();
+
+    res.json({
+      msg: "Connexion réussie ✅",
+      token,
+      user: {
+        id: user._id,
+        nom: user.nom,
+        email: user.email,
+        role: user.role,
+        emailVerified: user.emailVerified,
+      },
+      needsEmailVerification: !user.emailVerified,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const resendConfirmationCode = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ msg: "Utilisateur introuvable" });
+    }
+
+    if (user.emailVerified) {
+      return res.status(400).json({ msg: "Email déjà vérifié" });
+    }
+
+    const verificationMode = await SystemSettings.getSetting(
+      "email_verification_mode",
+      "development",
+    );
+
+    console.log(
+      `📧 Resend code - Email verification mode: ${verificationMode}`,
+    );
+
+    if (verificationMode === "smtp") {
+      try {
+        const { code, expiresAt } =
+          await VerificationToken.createVerificationToken(
+            user._id,
+            "email_verification",
+            15,
+          );
+
+        console.log(
+          `📧 Sending new verification code to ${user.email}: ${code}`,
+        );
+        await sendVerificationEmail(user.email, code, user.nom);
+
+        res.json({
+          msg: "Code de confirmation envoyé 📨",
+          expiresAt,
+        });
+      } catch (emailError) {
+        console.error("❌ Failed to send verification email:", emailError);
+        res.status(500).json({
+          msg: "Erreur lors de l'envoi de l'email. Veuillez réessayer.",
+          error:
+            process.env.NODE_ENV !== "production"
+              ? emailError.message
+              : undefined,
+        });
+      }
+    } else {
+      console.log(
+        `📨 [DEV MODE] Code de confirmation pour ${user.email}: 123456`,
+      );
+      res.json({
+        msg: "Code de confirmation envoyé (Mode développement: utilisez 123456) 📨",
+      });
+    }
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const verifyEmail = async (req, res) => {
+  try {
+    const { code } = req.body;
+    const userId = req.user.id;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ msg: "Utilisateur introuvable" });
+    }
+
+    if (user.emailVerified) {
+      return res.status(400).json({ msg: "Email déjà vérifié" });
+    }
+
+    const verificationMode = await SystemSettings.getSetting(
+      "email_verification_mode",
+      "development",
+    );
+
+    console.log(
+      `📧 Verify email - Mode: ${verificationMode}, Code received: ${code}`,
+    );
+
+    let isValid = false;
+
+    if (verificationMode === "development") {
+      isValid = code === "123456";
+      if (!isValid) {
+        return res.status(400).json({
+          msg: "Code incorrect. Utilisez 123456 en mode développement.",
+        });
+      }
+    } else {
+      const result = await VerificationToken.verifyCode(
+        userId,
+        code,
+        "email_verification",
+      );
+
+      if (!result.valid) {
+        return res.status(400).json({
+          msg: result.error,
+          attemptsRemaining: result.attemptsRemaining,
+        });
+      }
+      isValid = true;
+    }
+
+    if (isValid) {
+      user.emailVerified = true;
+      await user.save();
+
+      
+      try {
+        await sendWelcomeEmail(user.email, user.nom);
+      } catch (emailErr) {
+        console.error("Failed to send welcome email:", emailErr);
+      }
+
+      const newToken = generateToken(user);
+
+      return res.json({
+        msg: "E-mail confirmé avec succès ! 🎉",
+        token: newToken,
+        user: {
+          id: user._id,
+          nom: user.nom,
+          email: user.email,
+          role: user.role,
+          emailVerified: true,
+        },
+      });
+    }
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const changeEmail = async (req, res) => {
+  try {
+    const { newEmail } = req.body;
+    const userId = req.user.id;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ msg: "Utilisateur introuvable" });
+    }
+
+    if (user.emailVerified) {
+      return res.status(400).json({
+        msg: "Impossible de changer l'email car il est déjà vérifié.",
+      });
+    }
+
+    const normalizedEmail = newEmail.toLowerCase();
+    const exist = await User.findOne({
+      email: normalizedEmail,
+      _id: { $ne: userId },
+    });
+    if (exist) {
+      return res.status(400).json({ msg: "Cet email est déjà utilisé." });
+    }
+
+    user.email = normalizedEmail;
+    await user.save();
+
+    await VerificationToken.deleteMany({ userId, type: "email_verification" });
+
+    res.json({
+      msg: `Email mis à jour vers ${normalizedEmail}. Veuillez confirmer ce nouvel email.`,
+      email: normalizedEmail,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getCompanies = async (req, res) => {
+  try {
+    const companies = await Company.find({ status: "active" })
+      .select("_id name")
+      .sort({ name: 1 })
+      .lean();
+
+    res.json(companies);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export default {
+  register,
+  login,
+  verifyEmail,
+  resendConfirmationCode,
+  changeEmail,
+  getCompanies,
+};
+
+
+=== middleware\adminPermissions.js ===
+import Admin from "../models/Admin.js";
+
+export const requireAdminPermission = (permission) => {
+  return async (req, res, next) => {
+    try {
+      const admin = await Admin.findOne({ userId: req.user.id });
+
+      if (!admin) {
+        return res.status(403).json({ msg: "Accès administrateur requis." });
+      }
+
+      if (admin.status !== "active") {
+        return res
+          .status(403)
+          .json({ msg: "Votre compte administrateur est suspendu." });
+      }
+
+      if (!admin.hasPermission(permission)) {
+        return res.status(403).json({
+          msg: `Permission "${permission}" requise.`,
+          code: "PERMISSION_DENIED",
+        });
+      }
+
+      req.admin = admin;
+      next();
+    } catch (err) {
+      res.status(500).json({ msg: err.message });
+    }
+  };
+};
+
+export const requireActiveAdmin = async (req, res, next) => {
+  try {
+    const admin = await Admin.findOne({ userId: req.user.id });
+
+    if (!admin || admin.status !== "active") {
+      return res
+        .status(403)
+        .json({ msg: "Accès administrateur actif requis." });
+    }
+
+    req.admin = admin;
+    next();
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+=== middleware\auth.js ===
+import jwt from "jsonwebtoken";
+
+export default function auth(req, res, next) {
+  const token = req.header("Authorization");
+  if (!token) return res.status(401).json({ msg: "Pas de token fourni" });
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch {
+    res.status(401).json({ msg: "Token invalide" });
+  }
+}
+
+
+=== middleware\optionalAuth.js ===
+import jwt from "jsonwebtoken";
+
+export const optionalAuth = (req, res, next) => {
+  const token = req.header("Authorization");
+
+  if (!token) {
+    req.user = null;
+    return next();
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+  } catch (err) {
+    req.user = null;
+  }
+  next();
+};
+
+
+=== middleware\requireEmailVerification.js ===
+import User from "../models/User.js";
+
+export const requireEmailVerification = async (req, res, next) => {
+  if (!req.user) {
+    return res.status(401).json({ msg: "Utilisateur non authentifié." });
+  }
+
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ msg: "Utilisateur introuvable." });
+    }
+
+    if (!user.emailVerified) {
+      return res.status(403).json({
+        msg: "Veuillez confirmer votre adresse e-mail pour effectuer cette action.",
+        code: "EMAIL_NOT_VERIFIED",
+      });
+    }
+    next();
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+=== middleware\roles.js ===
+export const authRole = (roles = []) => {
+  return (req, res, next) => {
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({ msg: "Accès refusé : rôle non autorisé" });
+    }
+    next();
+  };
+};
+
+
+=== middleware\security.js ===
+import helmet from "helmet";
+import mongoSanitize from "express-mongo-sanitize";
+
+
+const rateLimitStore = new Map();
+
+const createRateLimiter = (options = {}) => {
+  const {
+    windowMs = 15 * 60 * 1000, 
+    max = 100,
+    message = "Trop de requêtes, veuillez réessayer plus tard.",
+    keyGenerator = (req) => req.ip,
+  } = options;
+
+  
+  setInterval(() => {
+    const now = Date.now();
+    for (const [key, data] of rateLimitStore.entries()) {
+      if (now - data.startTime > windowMs) {
+        rateLimitStore.delete(key);
+      }
+    }
+  }, windowMs);
+
+  return (req, res, next) => {
+    const key = keyGenerator(req);
+    const now = Date.now();
+
+    let record = rateLimitStore.get(key);
+
+    if (!record || now - record.startTime > windowMs) {
+      record = { count: 1, startTime: now };
+      rateLimitStore.set(key, record);
+    } else {
+      record.count++;
+    }
+
+    res.setHeader("X-RateLimit-Limit", max);
+    res.setHeader("X-RateLimit-Remaining", Math.max(0, max - record.count));
+    res.setHeader(
+      "X-RateLimit-Reset",
+      new Date(record.startTime + windowMs).toISOString(),
+    );
+
+    if (record.count > max) {
+      return res.status(429).json({
+        msg: message,
+        retryAfter: Math.ceil((record.startTime + windowMs - now) / 1000),
+      });
+    }
+
+    next();
+  };
+};
+
+
+export const authRateLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: "Trop de tentatives de connexion. Réessayez dans 15 minutes.",
+  keyGenerator: (req) => `auth:${req.ip}`,
+});
+
+export const emailVerificationLimiter = createRateLimiter({
+  windowMs: 60 * 1000, 
+  max: 3,
+  message: "Trop de demandes de vérification. Réessayez dans 1 minute.",
+  keyGenerator: (req) => `email:${req.user?.id || req.ip}`,
+});
+
+export const uploadRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  max: 10,
+  message: "Trop de téléchargements. Réessayez dans 1 minute.",
+  keyGenerator: (req) => `upload:${req.user?.id || req.ip}`,
+});
+
+export const generalRateLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 200,
+});
+
+export const offerCreationLimiter = createRateLimiter({
+  windowMs: 60 * 60 * 1000, 
+  max: 10,
+  message: "Trop d'offres créées. Réessayez dans 1 heure.",
+  keyGenerator: (req) => `offer:${req.user?.id || req.ip}`,
+});
+
+export const applicationLimiter = createRateLimiter({
+  windowMs: 60 * 60 * 1000, 
+  max: 20,
+  message: "Trop de candidatures envoyées. Réessayez dans 1 heure.",
+  keyGenerator: (req) => `apply:${req.user?.id || req.ip}`,
+});
+
+export const messageLimiter = createRateLimiter({
+  windowMs: 60 * 1000, 
+  max: 30,
+  message: "Trop de messages envoyés. Réessayez dans 1 minute.",
+  keyGenerator: (req) => `msg:${req.user?.id || req.ip}`,
+});
+
+
+export const setupSecurity = (app) => {
+  
+  app.use(
+    helmet({
+      contentSecurityPolicy: false, 
+      crossOriginEmbedderPolicy: false,
+    }),
+  );
+
+  
+  app.use(mongoSanitize());
+
+  
+  app.use(generalRateLimiter);
+};
+
+export default {
+  setupSecurity,
+  authRateLimiter,
+  emailVerificationLimiter,
+  uploadRateLimiter,
+};
+
+
+=== middleware\validate.js ===
+import { validationResult, body, param, query } from "express-validator";
+
+
+export const handleValidationErrors = (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({
+      msg: "Données invalides",
+      errors: errors.array().map((e) => ({ field: e.path, message: e.msg })),
+    });
+  }
+  next();
+};
+
+
+export const validators = {
+  
+  register: [
+    body("nom")
+      .trim()
+      .notEmpty()
+      .withMessage("Le nom est requis")
+      .isLength({ max: 100 }),
+    body("email")
+      .trim()
+      .isEmail()
+      .withMessage("Email invalide")
+      .normalizeEmail(),
+    body("motDePasse")
+      .isLength({ min: 8 })
+      .withMessage("Le mot de passe doit contenir au moins 8 caractères")
+      .matches(/[a-z]/)
+      .withMessage("Le mot de passe doit contenir une minuscule")
+      .matches(/[A-Z]/)
+      .withMessage("Le mot de passe doit contenir une majuscule")
+      .matches(/\d/)
+      .withMessage("Le mot de passe doit contenir un chiffre"),
+    body("role").isIn(["candidat", "recruteur"]).withMessage("Rôle invalide"),
+    handleValidationErrors,
+  ],
+
+  login: [
+    body("email")
+      .trim()
+      .isEmail()
+      .withMessage("Email invalide")
+      .normalizeEmail(),
+    body("motDePasse").notEmpty().withMessage("Mot de passe requis"),
+    handleValidationErrors,
+  ],
+
+  verifyEmail: [
+    body("code")
+      .trim()
+      .notEmpty()
+      .withMessage("Code requis")
+      .isLength({ min: 6, max: 6 }),
+    handleValidationErrors,
+  ],
+
+  changeEmail: [
+    body("newEmail")
+      .trim()
+      .isEmail()
+      .withMessage("Email invalide")
+      .normalizeEmail(),
+    handleValidationErrors,
+  ],
+
+  
+  updateProfile: [
+    body("telephone")
+      .optional()
+      .trim()
+      .matches(/^[0-9+\s-]{8,20}$/)
+      .withMessage("Téléphone invalide"),
+    body("bio")
+      .optional()
+      .trim()
+      .isLength({ max: 1000 })
+      .withMessage("Bio trop longue (max 1000)"),
+    body("dateOfBirth").optional().isISO8601().withMessage("Date invalide"),
+    body("gender")
+      .optional()
+      .isIn(["homme", "femme"])
+      .withMessage("Genre invalide"),
+    handleValidationErrors,
+  ],
+
+  applyToOffer: [
+    body("offreId").isMongoId().withMessage("ID offre invalide"),
+    body("cvUrl").notEmpty().withMessage("CV requis"),
+    body("coverLetter")
+      .optional()
+      .trim()
+      .isLength({ max: 5000 })
+      .withMessage("Lettre trop longue"),
+    handleValidationErrors,
+  ],
+
+  addSkill: [
+    body("name")
+      .trim()
+      .notEmpty()
+      .withMessage("Nom requis")
+      .isLength({ max: 100 }),
+    body("level").optional().isIn(["beginner", "intermediate", "expert"]),
+    handleValidationErrors,
+  ],
+
+  addExperience: [
+    body("jobTitle")
+      .trim()
+      .notEmpty()
+      .withMessage("Titre requis")
+      .isLength({ max: 200 }),
+    body("company")
+      .trim()
+      .notEmpty()
+      .withMessage("Entreprise requise")
+      .isLength({ max: 200 }),
+    body("startDate").optional().isISO8601().withMessage("Date invalide"),
+    body("endDate").optional().isISO8601().withMessage("Date invalide"),
+    handleValidationErrors,
+  ],
+
+  addEducation: [
+    body("institut")
+      .trim()
+      .notEmpty()
+      .withMessage("Institut requis")
+      .isLength({ max: 200 }),
+    body("degree")
+      .trim()
+      .notEmpty()
+      .withMessage("Diplôme requis")
+      .isLength({ max: 200 }),
+    body("startDate").optional().isISO8601().withMessage("Date invalide"),
+    handleValidationErrors,
+  ],
+
+  
+  createTicket: [
+    body("subject")
+      .trim()
+      .notEmpty()
+      .withMessage("Sujet requis")
+      .isLength({ max: 200 }),
+    body("description")
+      .trim()
+      .notEmpty()
+      .withMessage("Description requise")
+      .isLength({ max: 5000 }),
+    body("category")
+      .isIn([
+        "support_understanding",
+        "technical_issue",
+        "account_profile",
+        "company_recruitment",
+        "documents_verification",
+        "special_request",
+        "feedback_suggestion",
+      ])
+      .withMessage("Catégorie invalide"),
+    handleValidationErrors,
+  ],
+
+  replyToTicket: [
+    body("content")
+      .trim()
+      .notEmpty()
+      .withMessage("Contenu requis")
+      .isLength({ max: 5000 }),
+    handleValidationErrors,
+  ],
+
+  
+  mongoId: (paramName = "id") => [
+    param(paramName).isMongoId().withMessage("ID invalide"),
+    handleValidationErrors,
+  ],
+
+  
+  pagination: [
+    query("page").optional().isInt({ min: 1 }).toInt(),
+    query("limit").optional().isInt({ min: 1, max: 100 }).toInt(),
+    handleValidationErrors,
+  ],
+};
+
+export default validators;
+
+
+=== models\Admin.js ===
+import mongoose from "mongoose";
+
+const adminSchema = new mongoose.Schema(
+  {
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      unique: true,
+    },
+
+    label: {
+      type: String,
+      enum: [
+        "super_admin",
+        "support",
+        "technical",
+        "operational",
+        "recruitment",
+        "moderation",
+        "product",
+      ],
+      default: "support",
+    },
+
+    permissions: {
+      createAdmin: { type: Boolean, default: false },
+      deleteAdmin: { type: Boolean, default: false },
+      editAdminPermissions: { type: Boolean, default: false },
+      assignAdminLabels: { type: Boolean, default: false },
+
+      validateOffers: { type: Boolean, default: false },
+      validateRecruiters: { type: Boolean, default: false },
+      validateCompanies: { type: Boolean, default: false },
+
+      banUsers: { type: Boolean, default: false },
+      suspendUsers: { type: Boolean, default: false },
+
+      proposeCandidates: { type: Boolean, default: false },
+
+      manageAnnouncements: { type: Boolean, default: false },
+      sendNotifications: { type: Boolean, default: false },
+
+      handleSupportTickets: { type: Boolean, default: false },
+
+      viewStats: { type: Boolean, default: true },
+      viewLogs: { type: Boolean, default: false },
+    },
+
+    status: {
+      type: String,
+      enum: ["active", "suspended", "revoked"],
+      default: "active",
+    },
+    suspensionReason: String,
+    suspendedUntil: Date,
+
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+  },
+  { timestamps: true }
+);
+
+adminSchema.methods.hasPermission = function (permission) {
+  if (this.label === "super_admin") return true;
+  return this.permissions[permission] === true;
+};
+
+export default mongoose.model("Admin", adminSchema);
+
+
+=== models\AnemOffer.js ===
+import mongoose from "mongoose";
+
+const anemOfferSchema = new mongoose.Schema(
+  {
+    offerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Offer",
+      required: true,
+      unique: true,
+    },
+    recruiterId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Recruiter",
+      required: true,
+    },
+    anemRegistrationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "AnemRegistration",
+      required: true,
+    },
+
+    
+    anemEnabled: { type: Boolean, default: true },
+    anemId: { type: String, required: true },
+
+    
+    enabledAt: { type: Date, default: Date.now },
+    disabledAt: { type: Date },
+
+    
+    submittedToAnem: { type: Boolean, default: false },
+    submittedAt: { type: Date },
+    anemReference: { type: String },
+    anemResponse: { type: mongoose.Schema.Types.Mixed },
+  },
+  { timestamps: true },
+);
+
+anemOfferSchema.index({ offerId: 1 });
+anemOfferSchema.index({ recruiterId: 1 });
+anemOfferSchema.index({ anemEnabled: 1 });
+anemOfferSchema.index({ recruiterId: 1, anemEnabled: 1 });
+
+export default mongoose.model("AnemOffer", anemOfferSchema);
+
+
+=== models\AnemRegistration.js ===
+import mongoose from "mongoose";
+
+const anemRegistrationSchema = new mongoose.Schema(
+  {
+    recruiterId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Recruiter",
+      required: true,
+    },
+    companyId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Company",
+      required: true,
+    },
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+
+    
+    registrationType: {
+      type: String,
+      enum: ["self_declared", "site_registration"],
+      required: true,
+    },
+
+    
+    declaredAnemId: { type: String },
+    declaredAt: { type: Date },
+
+    
+    step1: {
+      typeAffiliation: {
+        type: String,
+        enum: ["CNAS", "CASNOS"],
+      },
+      numeroCnas: { type: String },
+      rib: { type: String },
+      raisonSociale: { type: String },
+      denominationCommerciale: { type: String },
+      numeroRc: { type: String },
+      entrepriseEtrangere: { type: Boolean, default: false },
+      responsable: { type: String },
+      fonction: { type: String },
+      nif: { type: String },
+    },
+
+    
+    step2: {
+      secteurActivite: { type: String },
+      brancheActivite: { type: String },
+      secteurJuridique: { type: String },
+      statutJuridique: { type: String },
+      adresse: { type: String },
+      telephone: { type: String },
+      fax: { type: String },
+      mobile: { type: String },
+      paysOrigine: { type: String, default: "Algérie" },
+      wilaya: { type: String },
+      commune: { type: String },
+      codePostal: { type: String },
+    },
+
+    
+    step3: {
+      effectifDeclare: { type: Number },
+      dontInseresCta: { type: Number },
+      nombreInseresDaip: { type: Number },
+      autresIndications: { type: String },
+    },
+
+    
+    step4: {
+      email: { type: String },
+      
+      consentementRgpd: { type: Boolean, default: false },
+      consentementAt: { type: Date },
+    },
+
+    
+    currentStep: {
+      type: Number,
+      default: 1,
+      min: 1,
+      max: 4,
+    },
+
+    
+    formCompleted: { type: Boolean, default: false },
+    formCompletedAt: { type: Date },
+    formSubmittedAt: { type: Date },
+
+    
+    status: {
+      type: String,
+      enum: [
+        "draft",
+        "pending",
+        "pending_verification",
+        "in_progress",
+        "registered",
+        "failed",
+        "rejected",
+      ],
+      default: "draft",
+    },
+
+    
+    verifiedAnemId: { type: String },
+    verifiedAt: { type: Date },
+    verifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+
+    
+    failureReason: { type: String },
+    rejectionReason: { type: String },
+
+    
+    assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: "Admin" },
+    assignedAt: { type: Date },
+    assignedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+
+    
+    pdfDownloads: [
+      {
+        downloadedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+        downloadedAt: { type: Date, default: Date.now },
+        ip: { type: String },
+      },
+    ],
+
+    
+    adminNotes: [
+      {
+        content: { type: String, required: true },
+        createdBy: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "User",
+          required: true,
+        },
+        createdAt: { type: Date, default: Date.now },
+        isPublic: { type: Boolean, default: false }, 
+      },
+    ],
+
+    
+    auditLog: [
+      {
+        action: {
+          type: String,
+          enum: [
+            "created",
+            "step_saved",
+            "form_submitted",
+            "pdf_downloaded",
+            "assigned",
+            "status_changed",
+            "note_added",
+            "anem_id_submitted",
+            "anem_id_updated",
+          ],
+          required: true,
+        },
+        previousValue: { type: mongoose.Schema.Types.Mixed },
+        newValue: { type: mongoose.Schema.Types.Mixed },
+        performedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+        performedAt: { type: Date, default: Date.now },
+        ip: { type: String },
+        userAgent: { type: String },
+      },
+    ],
+
+    
+    anemIdHistory: [
+      {
+        anemId: { type: String, required: true },
+        submittedAt: { type: Date, default: Date.now },
+        status: {
+          type: String,
+          enum: ["pending", "approved", "rejected"],
+          default: "pending",
+        },
+        reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+        reviewedAt: { type: Date },
+        rejectionReason: { type: String },
+        adminComment: { type: String },
+      },
+    ],
+  },
+  { timestamps: true },
+);
+
+
+anemRegistrationSchema.index({ recruiterId: 1 }, { unique: true });
+anemRegistrationSchema.index({ userId: 1 });
+anemRegistrationSchema.index({ companyId: 1 });
+anemRegistrationSchema.index({ status: 1 });
+anemRegistrationSchema.index({ status: 1, createdAt: -1 });
+anemRegistrationSchema.index({ assignedTo: 1, status: 1 });
+anemRegistrationSchema.index({ "step2.wilaya": 1 });
+anemRegistrationSchema.index({ registrationType: 1, status: 1 });
+
+
+anemRegistrationSchema.methods.isRegistered = function () {
+  return this.status === "registered" && this.verifiedAnemId;
+};
+
+anemRegistrationSchema.methods.canCreateAnemOffer = function () {
+  return this.status === "registered" && this.verifiedAnemId;
+};
+
+anemRegistrationSchema.methods.addAuditEntry = function (
+  action,
+  performedBy,
+  details = {},
+  req = null,
+) {
+  this.auditLog.push({
+    action,
+    previousValue: details.previousValue,
+    newValue: details.newValue,
+    performedBy,
+    performedAt: new Date(),
+    ip: req?.ip || req?.connection?.remoteAddress,
+    userAgent: req?.get?.("User-Agent") || req?.headers?.["user-agent"],
+  });
+};
+
+anemRegistrationSchema.methods.getPublicNotes = function () {
+  return this.adminNotes
+    .filter((note) => note.isPublic)
+    .sort((a, b) => b.createdAt - a.createdAt);
+};
+
+anemRegistrationSchema.methods.getLatestPublicNote = function () {
+  const publicNotes = this.getPublicNotes();
+  return publicNotes.length > 0 ? publicNotes[0] : null;
+};
+
+
+anemRegistrationSchema.virtual("effectiveAnemId").get(function () {
+  return this.verifiedAnemId || null;
+});
+
+
+anemRegistrationSchema.methods.generatePdfData = async function () {
+  await this.populate([
+    { path: "recruiterId", select: "position telephone" },
+    { path: "userId", select: "nom email" },
+    { path: "companyId", select: "name website location" },
+  ]);
+
+  return {
+    
+    documentTitle: "Demande d'inscription ANEM",
+    generatedAt: new Date().toISOString(),
+    registrationId: this._id.toString(),
+    submittedAt: this.formSubmittedAt || this.formCompletedAt,
+
+    
+    recruiter: {
+      nom: this.userId?.nom,
+      email: this.userId?.email,
+      telephone: this.recruiterId?.telephone,
+      position: this.recruiterId?.position,
+    },
+
+    
+    company: {
+      name: this.companyId?.name,
+      website: this.companyId?.website,
+      location: this.companyId?.location,
+    },
+
+    
+    informationsGenerales: {
+      typeAffiliation: this.step1?.typeAffiliation,
+      numeroCnas: this.step1?.numeroCnas,
+      rib: this.step1?.rib,
+      raisonSociale: this.step1?.raisonSociale,
+      denominationCommerciale: this.step1?.denominationCommerciale,
+      numeroRc: this.step1?.numeroRc,
+      entrepriseEtrangere: this.step1?.entrepriseEtrangere ? "Oui" : "Non",
+      responsable: this.step1?.responsable,
+      fonction: this.step1?.fonction,
+      nif: this.step1?.nif,
+    },
+
+    
+    informationsEmployeur: {
+      secteurActivite: this.step2?.secteurActivite,
+      brancheActivite: this.step2?.brancheActivite,
+      secteurJuridique: this.step2?.secteurJuridique,
+      statutJuridique: this.step2?.statutJuridique,
+      adresse: this.step2?.adresse,
+      telephone: this.step2?.telephone,
+      fax: this.step2?.fax,
+      mobile: this.step2?.mobile,
+      paysOrigine: this.step2?.paysOrigine,
+      wilaya: this.step2?.wilaya,
+      commune: this.step2?.commune,
+      codePostal: this.step2?.codePostal,
+    },
+
+    
+    informationsCnas: {
+      effectifDeclare: this.step3?.effectifDeclare,
+      dontInseresCta: this.step3?.dontInseresCta,
+      nombreInseresDaip: this.step3?.nombreInseresDaip,
+      autresIndications: this.step3?.autresIndications,
+    },
+
+    
+    compteEnLigne: {
+      email: this.step4?.email,
+      consentementRgpd: this.step4?.consentementRgpd
+        ? "Accepté"
+        : "Non accepté",
+      consentementAt: this.step4?.consentementAt,
+    },
+
+    
+    legalReference:
+      "Loi 18-07 relative à la protection des données personnelles",
+  };
+};
+
+export default mongoose.model("AnemRegistration", anemRegistrationSchema);
+
+
+=== models\Announcement.js ===
+import mongoose from "mongoose";
+
+const announcementSchema = new mongoose.Schema(
+  {
+    title: { type: String, required: true },
+    content: { type: String, required: true },
+    targetAudience: {
+      type: String,
+      enum: ["all", "admins", "recruiters", "candidates"],
+      default: "all",
+    },
+    status: {
+      type: String,
+      enum: ["draft", "scheduled", "published", "expired", "archived"],
+      default: "draft",
+    },
+    publishAt: { type: Date },
+    expiresAt: { type: Date },
+    priority: {
+      type: String,
+      enum: ["low", "normal", "high", "critical"],
+      default: "normal",
+    },
+    displayType: {
+      type: String,
+      enum: ["banner", "modal", "inline"],
+      default: "inline",
+    },
+    viewCount: { type: Number, default: 0 },
+    dismissedBy: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+    updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+  },
+  { timestamps: true }
+);
+
+announcementSchema.index({ status: 1, publishAt: 1, expiresAt: 1 });
+
+export default mongoose.model("Announcement", announcementSchema);
+
+
+=== models\Application.js ===
+import mongoose from "mongoose";
+
+const applicationSchema = new mongoose.Schema(
+  {
+    offerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Offer",
+      required: true,
+    },
+    candidateId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Candidate",
+      required: true,
+    },
+
+    
+    source: {
+      type: String,
+      enum: ["direct", "admin_proposal"],
+      default: "direct",
+    },
+    proposedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User", 
+    },
+    proposedAt: Date,
+
+    
+    candidateStatus: {
+      type: String,
+      enum: [
+        "envoyee",
+        "en_cours",
+        "retenue",
+        "non_retenue", 
+        "retiree", 
+        "cancelled",
+      ],
+      default: "envoyee",
+    },
+
+    recruiterStatus: {
+      type: String,
+      enum: [
+        "nouvelle",
+        "consultee",
+        "preselection",
+        "en_discussion",
+        "entretien_planifie",
+        "entretien_termine",
+        "retenue", 
+        "refusee", 
+        "retiree_par_candidat",
+        "annulee_par_candidat",
+      ],
+      default: "nouvelle",
+    },
+
+    
+    cvUrl: { type: String, required: true },
+    coverLetter: { type: String },
+
+    isRepostulation: { type: Boolean, default: false },
+
+    
+    offerSnapshot: {
+      titre: String,
+      entrepriseNom: String,
+      companyId: { type: mongoose.Schema.Types.ObjectId, ref: "Company" },
+      location: String,
+      salaryMin: Number,
+      salaryMax: Number,
+      type: { type: String },
+      wilaya: String,
+      domaine: String,
+    },
+
+    
+    recruiterNotes: {
+      type: String,
+      maxLength: 2000,
+    },
+
+    
+    isStarred: { type: Boolean, default: false }, 
+    seenByRecruiter: { type: Boolean, default: false },
+    seenAt: Date,
+
+    
+    datePostulation: { type: Date, default: Date.now },
+    dateDecision: Date, 
+    withdrawnAt: Date, 
+    withdrawReason: String,
+
+    
+    statusHistory: [
+      {
+        candidateStatus: String,
+        recruiterStatus: String,
+        changedBy: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "User",
+        },
+        changedAt: { type: Date, default: Date.now },
+        note: String,
+      },
+    ],
+  },
+  { timestamps: true },
+);
+
+
+applicationSchema.index({ offerId: 1, candidateId: 1 }, { unique: true });
+
+
+applicationSchema.index({ offerId: 1, recruiterStatus: 1 });
+applicationSchema.index({ candidateId: 1, candidateStatus: 1 });
+applicationSchema.index({ offerId: 1, datePostulation: -1 });
+applicationSchema.index({ recruiterStatus: 1, isStarred: 1 });
+
+export default mongoose.model("Application", applicationSchema);
+
+
+=== models\Candidate.js ===
+import mongoose from "mongoose";
+
+const educationSchema = new mongoose.Schema({
+  institut: { type: String, required: true },
+  degree: { type: String, required: true },
+  fieldOfStudy: { type: String },
+  startDate: { type: Date },
+  endDate: { type: Date },
+  description: { type: String },
+});
+
+const experienceSchema = new mongoose.Schema({
+  jobTitle: { type: String, required: true },
+  company: { type: String, required: true },
+  startDate: { type: Date },
+  endDate: { type: Date },
+  description: { type: String },
+});
+
+const skillSchema = new mongoose.Schema({
+  name: { type: String, required: true, trim: true, lowercase: true },
+  level: {
+    type: String,
+    enum: ["beginner", "intermediate", "expert"],
+    default: "beginner",
+  },
+  
+  domain: { type: String, default: null, trim: true },
+  
+  skillId: { type: mongoose.Schema.Types.ObjectId, ref: "Skill" },
+  
+  isProposed: { type: Boolean, default: false },
+});
+
+const candidateSchema = new mongoose.Schema(
+  {
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      unique: true,
+    },
+
+    dateOfBirth: { type: Date },
+    bio: { type: String, maxLength: 1000 },
+    gender: {
+      type: String,
+      enum: ["homme", "femme"],
+    },
+
+    residence: {
+      wilaya: { type: String },
+      commune: { type: String },
+      address: { type: String },
+    },
+
+    searchPreferences: {
+      wilayas: [{ type: String }],
+      remoteOnly: { type: Boolean, default: false },
+      willingToRelocate: { type: Boolean, default: false },
+    },
+
+    desiredPosition: { type: String },
+
+    desiredJobTypes: [
+      {
+        type: String,
+        enum: [
+          "full-time",
+          "part-time",
+          "remote",
+          "internship",
+          "freelance",
+          "CDI",
+          "CDD",
+        ],
+      },
+    ],
+
+    profilePicture: { type: String },
+    telephone: { type: String },
+    links: {
+      website: { type: String },
+      linkedin: { type: String },
+      github: { type: String },
+      portfolio: { type: String },
+    },
+
+    autoriserProposition: { type: Boolean, default: true },
+
+    favoris: [
+      {
+        offerId: { type: mongoose.Schema.Types.ObjectId, ref: "Offer" },
+        savedAt: { type: Date, default: Date.now },
+      },
+    ],
+
+    cvs: [
+      {
+        url: { type: String, required: true },
+        dateDepot: { type: Date, default: Date.now },
+        score: { type: Number, default: 0 },
+      },
+    ],
+
+    skills: [skillSchema],
+    experiences: [experienceSchema],
+    education: [educationSchema],
+  },
+  { timestamps: true },
+);
+candidateSchema.index({ userId: 1 });
+candidateSchema.index({ "residence.wilaya": 1 });
+candidateSchema.index({ autoriserProposition: 1 });
+export default mongoose.model("Candidate", candidateSchema);
+
+
+=== models\Company.js ===
+import mongoose from "mongoose";
+
+const companySchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true, unique: true },
+    logo: { type: String },
+    website: { type: String },
+    description: { type: String },
+    industry: { type: String },
+    location: { type: String },
+    size: { type: String },
+
+    status: {
+      type: String,
+      enum: ["pending", "active", "rejected"],
+      default: "pending",
+    },
+  },
+  { timestamps: true }
+);
+companySchema.index({ status: 1 });
+companySchema.index({ name: "text" });
+export default mongoose.model("Company", companySchema);
+
+
+=== models\Conversation.js ===
+import mongoose from "mongoose";
+
+const messageSchema = new mongoose.Schema({
+  senderId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    required: true,
+  },
+  senderType: {
+    type: String,
+    enum: ["candidate", "recruiter"],
+    required: true,
+  },
+  content: { type: String, required: true, maxLength: 5000 },
+  attachments: [String],
+  readAt: Date,
+  createdAt: { type: Date, default: Date.now },
+});
+
+const conversationSchema = new mongoose.Schema(
+  {
+    applicationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Application",
+      required: true,
+      unique: true, 
+    },
+    offerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Offer",
+      required: true,
+    },
+    candidateId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Candidate",
+      required: true,
+    },
+    recruiterId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Recruiter",
+      required: true,
+    },
+
+    
+    candidateHasReplied: { type: Boolean, default: false },
+
+    
+    initiatedAt: { type: Date, default: Date.now },
+
+    
+    firstCandidateReplyAt: Date,
+
+    
+    openedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+    openedAt: { type: Date, default: Date.now },
+
+    messages: [messageSchema],
+
+    
+    unreadByCandidate: { type: Number, default: 0 },
+    unreadByRecruiter: { type: Number, default: 0 },
+
+    lastMessageAt: Date,
+
+    
+    status: {
+      type: String,
+      enum: ["active", "archived", "closed"],
+      default: "active",
+    },
+    
+    createdWith: {
+      type: String,
+      enum: ["custom_message", "standard_message"],
+      default: "custom_message",
+    },
+  },
+  { timestamps: true },
+);
+
+
+conversationSchema.index({ recruiterId: 1, candidateHasReplied: 1 });
+conversationSchema.index({ candidateId: 1, lastMessageAt: -1 });
+conversationSchema.index({ recruiterId: 1, lastMessageAt: -1 });
+conversationSchema.index({ applicationId: 1 });
+
+export default mongoose.model("Conversation", conversationSchema);
+
+
+=== models\Notification.js ===
+import mongoose from "mongoose";
+
+const notificationSchema = new mongoose.Schema(
+  {
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+    message: { type: String, required: true },
+    type: {
+      type: String,
+      enum: ["info", "alerte", "validation"],
+      default: "info",
+    },
+    lu: { type: Boolean, default: false },
+    date: { type: Date, default: Date.now },
+  },
+  { timestamps: true }
+);
+
+notificationSchema.index({ userId: 1, lu: 1 });
+notificationSchema.index({ userId: 1, date: -1 });
+
+export default mongoose.model("Notification", notificationSchema);
+
+
+=== models\Offer.js ===
+import mongoose from "mongoose";
+
+const offerSchema = new mongoose.Schema(
+  {
+    recruteurId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Recruiter",
+      required: true,
+    },
+    companyId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Company",
+      required: true,
+    },
+
+    titre: { type: String, required: true },
+    description: { type: String, required: true },
+    requirements: { type: String, required: true },
+
+    domaine: { type: String },
+    type: {
+      type: String,
+      enum: [
+        "full-time",
+        "part-time",
+        "remote",
+        "internship",
+        "freelance",
+        "CDI",
+        "CDD",
+      ],
+      default: "full-time",
+    },
+    salaryMin: { type: Number },
+    salaryMax: { type: Number },
+    experienceLevel: { type: String, enum: ["junior", "mid", "senior"] },
+    skills: [{ type: String, index: true }],
+    wilaya: { type: String },
+
+    
+    isAnem: { type: Boolean, default: false },
+    
+
+    allowRepostulation: { type: Boolean, default: true },
+
+    validationStatus: {
+      type: String,
+      enum: ["draft", "pending", "approved", "rejected", "changes_requested"],
+      default: "pending",
+    },
+    validationHistory: [
+      {
+        status: String,
+        message: String,
+        adminId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+        date: { type: Date, default: Date.now },
+      },
+    ],
+    rejectionReason: String,
+
+    visibility: {
+      isPublic: { type: Boolean, default: true },
+      acceptsDirectApplications: { type: Boolean, default: true },
+    },
+
+    candidateSearchMode: {
+      type: String,
+      enum: ["disabled", "manual", "automatic"],
+      default: "disabled",
+    },
+
+    actif: { type: Boolean, default: false },
+    datePublication: { type: Date },
+    nombreCandidatures: { type: Number, default: 0 },
+  },
+  { timestamps: true },
+);
+
+offerSchema.methods.isVisible = function () {
+  return this.validationStatus === "approved" && this.actif;
+};
+
+offerSchema.index({ titre: "text", description: "text", skills: "text" });
+
+export default mongoose.model("Offer", offerSchema);
+
+
+=== models\Recruiter.js ===
+import mongoose from "mongoose";
+
+const recruiterSchema = new mongoose.Schema(
+  {
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      unique: true,
+    },
+    companyId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Company",
+      required: true,
+    },
+
+    telephone: { type: String },
+    position: { type: String },
+
+    status: {
+      type: String,
+      enum: [
+        "pending_validation",
+        "pending_documents",
+        "pending_info",
+        "pending_info_and_documents",
+        "pending_revalidation",
+        "validated",
+        "rejected",
+      ],
+      default: "pending_validation",
+    },
+
+    rejectionReason: String,
+
+    validationRequests: [
+      {
+        type: {
+          type: String,
+          enum: ["document", "information", "clarification"],
+        },
+        message: String,
+        requiredFields: [String],
+        requiredDocuments: Number,
+        response: {
+          text: String,
+          documents: [String],
+          submittedAt: Date,
+        },
+        status: {
+          type: String,
+          enum: ["pending", "submitted", "approved", "rejected"],
+          default: "pending",
+        },
+        createdAt: { type: Date, default: Date.now },
+        reviewedAt: Date,
+        reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+      },
+    ],
+
+    permissions: {
+      postJobs: { type: Boolean, default: true },
+      reviewCandidates: { type: Boolean, default: true },
+      scheduleInterviews: { type: Boolean, default: true },
+      manageTeam: { type: Boolean, default: false },
+      editCompany: { type: Boolean, default: false },
+    },
+
+    isAdmin: { type: Boolean, default: false },
+
+    
+    
+    
+    anem: {
+      
+      registrationId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "AnemRegistration",
+      },
+
+      
+      status: {
+        type: String,
+        enum: [
+          "not_started",
+          "draft",
+          "pending",
+          "pending_verification",
+          "in_progress",
+          "registered",
+          "failed",
+          "rejected",
+        ],
+        default: "not_started",
+      },
+
+      
+      anemId: { type: String },
+
+      
+      registeredAt: { type: Date },
+
+      
+      hasSeenAnemModal: { type: Boolean, default: false },
+      modalSeenAt: { type: Date },
+
+      
+      declinedAnem: { type: Boolean, default: false },
+      declinedAt: { type: Date },
+
+      
+      lastStatusUpdate: { type: Date },
+    },
+
+    favoriteCandidates: [
+      {
+        candidateId: { type: mongoose.Schema.Types.ObjectId, ref: "Candidate" },
+        savedAt: { type: Date, default: Date.now },
+        notes: String,
+      },
+    ],
+
+    invitedBy: { type: mongoose.Schema.Types.ObjectId, ref: "Recruiter" },
+    invitedAt: Date,
+  },
+  { timestamps: true },
+);
+
+recruiterSchema.index({ userId: 1 });
+recruiterSchema.index({ companyId: 1 });
+recruiterSchema.index({ status: 1 });
+recruiterSchema.index({ "anem.status": 1 });
+recruiterSchema.index({ "anem.anemId": 1 });
+
+recruiterSchema.methods.canPerformActions = function () {
+  return this.status === "validated";
+};
+
+recruiterSchema.methods.hasPendingRequests = function () {
+  return this.validationRequests.some((r) => r.status === "pending");
+};
+
+recruiterSchema.methods.isAnemRegistered = function () {
+  return this.anem.status === "registered" && this.anem.anemId;
+};
+
+recruiterSchema.methods.canCreateAnemOffer = function () {
+  return this.anem.status === "registered" && this.anem.anemId;
+};
+
+recruiterSchema.methods.shouldShowAnemModal = function (offerCount) {
+  
+  
+  
+  if (offerCount === 0 && !this.anem.hasSeenAnemModal) {
+    return { show: true, reason: "first_offer" };
+  }
+  return { show: false, reason: null };
+};
+
+recruiterSchema.methods.updateAnemStatus = async function (
+  newStatus,
+  anemId = null,
+) {
+  this.anem.status = newStatus;
+  this.anem.lastStatusUpdate = new Date();
+
+  if (newStatus === "registered" && anemId) {
+    this.anem.anemId = anemId;
+    this.anem.registeredAt = new Date();
+  }
+
+  await this.save();
+};
+
+export default mongoose.model("Recruiter", recruiterSchema);
+
+
+=== models\SystemSettings.js ===
+import mongoose from "mongoose";
+
+const systemSettingsSchema = new mongoose.Schema(
+  {
+    key: {
+      type: String,
+      required: true,
+      unique: true,
+      index: true,
+    },
+    value: {
+      type: mongoose.Schema.Types.Mixed,
+      required: true,
+    },
+    description: {
+      type: String,
+    },
+    updatedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+    updatedAt: {
+      type: Date,
+      default: Date.now,
+    },
+  },
+  { timestamps: true },
+);
+
+
+systemSettingsSchema.statics.getSetting = async function (
+  key,
+  defaultValue = null,
+) {
+  const setting = await this.findOne({ key });
+  return setting ? setting.value : defaultValue;
+};
+
+
+systemSettingsSchema.statics.setSetting = async function (
+  key,
+  value,
+  description = null,
+  updatedBy = null,
+) {
+  const update = { value, updatedAt: new Date() };
+  if (description) update.description = description;
+  if (updatedBy) update.updatedBy = updatedBy;
+
+  return this.findOneAndUpdate(
+    { key },
+    { $set: update, $setOnInsert: { key } },
+    { upsert: true, new: true },
+  );
+};
+
+
+systemSettingsSchema.statics.initializeDefaults = async function () {
+  const defaults = [
+    {
+      key: "email_verification_mode",
+      value: process.env.NODE_ENV === "production" ? "smtp" : "development",
+      description:
+        "Mode de vérification email: 'smtp' pour production, 'development' pour code statique 123456",
+    },
+    {
+      key: "skill_proposal_enabled",
+      value: true,
+      description: "Permet aux candidats de proposer de nouvelles compétences",
+    },
+    {
+      key: "max_cv_per_candidate",
+      value: 3,
+      description: "Nombre maximum de CV par candidat",
+    },
+    {
+      key: "verification_code_expiry_minutes",
+      value: 15,
+      description: "Durée de validité du code de vérification en minutes",
+    },
+  ];
+
+  for (const setting of defaults) {
+    const exists = await this.findOne({ key: setting.key });
+    if (!exists) {
+      await this.create(setting);
+    }
+  }
+};
+
+export default mongoose.model("SystemSettings", systemSettingsSchema);
+
+
+=== models\User.js ===
+import mongoose from "mongoose";
+
+const userSchema = new mongoose.Schema(
+  {
+    nom: { type: String },
+    email: { type: String, required: true, unique: true },
+    motDePasse: { type: String, required: true },
+    role: {
+      type: String,
+      enum: ["candidat", "recruteur", "admin"],
+      required: true,
+    },
+
+    emailVerified: {
+      type: Boolean,
+      default: false,
+    },
+
+    accountStatus: {
+      type: String,
+      enum: ["active", "suspended", "banned"],
+      default: "active",
+    },
+    suspensionReason: String,
+    suspendedUntil: Date,
+
+    derniereConnexion: Date,
+  },
+  { timestamps: true }
+);
+
+userSchema.index({ email: 1 });
+userSchema.index({ role: 1 });
+userSchema.index({ createdAt: -1 });
+userSchema.index({ accountStatus: 1 });
+
+userSchema.methods.canLogin = function () {
+  if (this.accountStatus === "banned") return false;
+  if (this.accountStatus === "suspended") {
+    if (this.suspendedUntil && new Date() > this.suspendedUntil) {
+      return true;
+    }
+    return false;
+  }
+  return true;
+};
+
+export default mongoose.model("User", userSchema);
+
+
+=== models\VerificationToken.js ===
+import mongoose from "mongoose";
+import crypto from "crypto";
+
+const verificationTokenSchema = new mongoose.Schema({
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    required: true,
+    index: true,
+  },
+  token: {
+    type: String,
+    required: true,
+  },
+  code: {
+    type: String,
+    required: true,
+  },
+  type: {
+    type: String,
+    enum: ["email_verification", "password_reset"],
+    default: "email_verification",
+  },
+  expiresAt: {
+    type: Date,
+    required: true,
+    index: { expireAfterSeconds: 0 }, 
+  },
+  attempts: {
+    type: Number,
+    default: 0,
+  },
+  maxAttempts: {
+    type: Number,
+    default: 5,
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now,
+  },
+});
+
+
+verificationTokenSchema.statics.generateCode = function () {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+};
+
+
+verificationTokenSchema.statics.generateToken = function () {
+  return crypto.randomBytes(32).toString("hex");
+};
+
+
+verificationTokenSchema.statics.createVerificationToken = async function (
+  userId,
+  type = "email_verification",
+  expiresInMinutes = 15,
+) {
+  
+  await this.deleteMany({ userId, type });
+
+  const code = this.generateCode();
+  const token = this.generateToken();
+
+  const verificationToken = await this.create({
+    userId,
+    token,
+    code,
+    type,
+    expiresAt: new Date(Date.now() + expiresInMinutes * 60 * 1000),
+  });
+
+  return { code, token, expiresAt: verificationToken.expiresAt };
+};
+
+
+verificationTokenSchema.statics.verifyCode = async function (
+  userId,
+  code,
+  type = "email_verification",
+) {
+  const verificationToken = await this.findOne({
+    userId,
+    type,
+    expiresAt: { $gt: new Date() },
+  });
+
+  if (!verificationToken) {
+    return {
+      valid: false,
+      error: "Code expiré ou invalide. Demandez un nouveau code.",
+    };
+  }
+
+  if (verificationToken.attempts >= verificationToken.maxAttempts) {
+    await verificationToken.deleteOne();
+    return {
+      valid: false,
+      error: "Trop de tentatives. Demandez un nouveau code.",
+    };
+  }
+
+  if (verificationToken.code !== code) {
+    verificationToken.attempts += 1;
+    await verificationToken.save();
+    const remaining =
+      verificationToken.maxAttempts - verificationToken.attempts;
+    return {
+      valid: false,
+      error: `Code incorrect. ${remaining} tentative(s) restante(s).`,
+      attemptsRemaining: remaining,
+    };
+  }
+
+  
+  await verificationToken.deleteOne();
+  return { valid: true };
+};
+
+export default mongoose.model("VerificationToken", verificationTokenSchema);
+
+
+=== routes\adminRoutes.js ===
+import express from "express";
+import auth from "../middleware/auth.js";
+import { authRole } from "../middleware/roles.js";
+import Admin from "../models/Admin.js";
+import {
+  getRecruiters,
+  validateRecruiter,
+  rejectRecruiter,
+  requestRecruiterDocuments,
+  requestMultipleValidationItems,
+  cancelValidationRequest,
+  getAllUsers,
+  banUser,
+  unBanUser,
+  sendMessageToUser,
+  getCandidateDetailsAdmin,
+  createAdmin,
+  deleteAdmin,
+  getAllAdmins,
+  suspendAdmin,
+  updateAdminPermissions,
+  updateAdminLabel,
+  getPendingCompanies,
+  validateCompany,
+  rejectCompany,
+  getCompanyDetailsAdmin,
+  getAllCompanies,
+  getPendingOffers,
+  approveOffer,
+  rejectOffer,
+  deleteOfferAdmin,
+  getManualSelectionOffers,
+  proposeCandidateToOffer,
+  toggleOfferVisibility,
+  getGlobalStats,
+  getTrends,
+  getAdminLogs,
+  createCompanyByAdmin,
+  getCompanyRecruiters,
+  assignCompanyAdmin,
+  removeCompanyAdmin,
+  updateCompanyByAdmin,
+  getOfferDetailsAdmin,
+  updateOfferByAdmin,
+} from "../controllers/adminController.js";
+
+import {
+  getSkills,
+  createSkill,
+  deleteSkill,
+  getProposedSkills,
+  approveProposedSkill,
+  rejectProposedSkill,
+  getProposedSkillsStats,
+} from "../controllers/skillController.js";
+
+import {
+  createAnnouncement,
+  getAllAnnouncements,
+  updateAnnouncement,
+  deleteAnnouncement,
+} from "../controllers/announcementController.js";
+
+import {
+  getTicketsByLabel,
+  getTicketById,
+  respondToTicket,
+  reassignTicket,
+  closeTicket,
+} from "../controllers/adminSupportController.js";
+
+import {
+  toggleEmailVerificationMode,
+  getEmailVerificationMode,
+  toggleSkillProposal,
+  getAllSettings,
+} from "../controllers/adminSettingsController.js";
+
+import { uploadAttachments } from "../config/multer.js";
+
+const router = express.Router();
+
+router.use(auth, authRole(["admin"]));
+
+const requirePermission = (permission) => async (req, res, next) => {
+  try {
+    const admin = await Admin.findOne({ userId: req.user.id });
+
+    if (!admin) {
+      return res.status(403).json({ msg: "Admin introuvable" });
+    }
+
+    if (admin.status !== "active") {
+      return res.status(403).json({ msg: "Compte admin suspendu" });
+    }
+
+    if (!admin.hasPermission(permission)) {
+      return res.status(403).json({
+        msg: `Permission "${permission}" requise`,
+        code: "PERMISSION_DENIED",
+      });
+    }
+
+    req.admin = admin;
+    next();
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+router.get("/stats/global", requirePermission("viewStats"), getGlobalStats);
+router.get("/stats/trends", requirePermission("viewStats"), getTrends);
+
+router.get(
+  "/recruteurs",
+  requirePermission("validateRecruiters"),
+  getRecruiters,
+);
+router.put(
+  "/recruteurs/valider/:id",
+  requirePermission("validateRecruiters"),
+  validateRecruiter,
+);
+router.put(
+  "/recruteurs/rejeter/:id",
+  requirePermission("validateRecruiters"),
+  rejectRecruiter,
+);
+router.post(
+  "/recruteurs/:recruiterId/request-documents",
+  requirePermission("validateRecruiters"),
+  requestRecruiterDocuments,
+);
+router.post(
+  "/recruteurs/:recruiterId/request-multiple",
+  requirePermission("validateRecruiters"),
+  requestMultipleValidationItems,
+);
+
+router.put(
+  "/recruteurs/:id/cancel-request",
+  requirePermission("validateRecruiters"),
+  cancelValidationRequest,
+);
+
+router.get("/users", getAllUsers);
+router.put("/users/ban/:id", requirePermission("banUsers"), banUser);
+router.put("/users/unban/:id", requirePermission("banUsers"), unBanUser);
+router.post(
+  "/users/message/:id",
+  requirePermission("sendNotifications"),
+  sendMessageToUser,
+);
+
+router.get("/admins", requirePermission("viewStats"), getAllAdmins);
+router.post("/admins", requirePermission("createAdmin"), createAdmin);
+router.delete("/admins/:id", requirePermission("deleteAdmin"), deleteAdmin);
+router.put(
+  "/admins/:id/suspend",
+  requirePermission("deleteAdmin"),
+  suspendAdmin,
+);
+router.put(
+  "/admins/:id/permissions",
+  requirePermission("editAdminPermissions"),
+  updateAdminPermissions,
+);
+router.put(
+  "/admins/:id/label",
+  requirePermission("assignAdminLabels"),
+  updateAdminLabel,
+);
+
+router.get(
+  "/entreprises/all",
+  requirePermission("validateCompanies"),
+  getAllCompanies,
+);
+
+router.get(
+  "/entreprises/en-attente",
+  requirePermission("validateCompanies"),
+  getPendingCompanies,
+);
+router.put(
+  "/entreprises/valider/:id",
+  requirePermission("validateCompanies"),
+  validateCompany,
+);
+router.put(
+  "/entreprises/rejeter/:id",
+  requirePermission("validateCompanies"),
+  rejectCompany,
+);
+
+router.get(
+  "/entreprises/:companyId",
+  requirePermission("validateCompanies"),
+  getCompanyDetailsAdmin,
+);
+
+router.put(
+  "/entreprises/:id",
+  requirePermission("validateCompanies"),
+  updateCompanyByAdmin,
+);
+
+router.get(
+  "/offres/en-attente",
+  requirePermission("validateOffers"),
+  getPendingOffers,
+);
+router.put(
+  "/offres/:id/approve",
+  requirePermission("validateOffers"),
+  approveOffer,
+);
+router.put(
+  "/offres/:id/reject",
+  requirePermission("validateOffers"),
+  rejectOffer,
+);
+router.delete(
+  "/offres/:id",
+  requirePermission("validateOffers"),
+  deleteOfferAdmin,
+);
+router.get(
+  "/offres/manuelles",
+  requirePermission("proposeCandidates"),
+  getManualSelectionOffers,
+);
+router.post(
+  "/offres/proposer",
+  requirePermission("proposeCandidates"),
+  proposeCandidateToOffer,
+);
+
+router.get(
+  "/offres/:id/details",
+  requirePermission("validateOffers"),
+  getOfferDetailsAdmin,
+);
+router.put(
+  "/offres/:id/update",
+  requirePermission("validateOffers"),
+  updateOfferByAdmin,
+);
+router.put(
+  "/offres/:id/visibility",
+  requirePermission("validateOffers"),
+  toggleOfferVisibility,
+);
+
+router.get(
+  "/candidates/:id",
+  requirePermission("viewStats"),
+  getCandidateDetailsAdmin,
+);
+
+router.get(
+  "/announcements",
+  requirePermission("manageAnnouncements"),
+  getAllAnnouncements,
+);
+router.post(
+  "/announcements",
+  requirePermission("manageAnnouncements"),
+  createAnnouncement,
+);
+router.put(
+  "/announcements/:id",
+  requirePermission("manageAnnouncements"),
+  updateAnnouncement,
+);
+router.delete(
+  "/announcements/:id",
+  requirePermission("manageAnnouncements"),
+  deleteAnnouncement,
+);
+
+router.get(
+  "/tickets",
+  requirePermission("handleSupportTickets"),
+  getTicketsByLabel,
+);
+router.get(
+  "/tickets/:ticketId",
+  requirePermission("handleSupportTickets"),
+  getTicketById,
+);
+router.post(
+  "/tickets/:ticketId/respond",
+  requirePermission("handleSupportTickets"),
+  uploadAttachments.array("attachments", 3),
+  respondToTicket,
+);
+router.put(
+  "/tickets/:ticketId/reassign",
+  requirePermission("handleSupportTickets"),
+  reassignTicket,
+);
+router.put(
+  "/tickets/:ticketId/close",
+  requirePermission("handleSupportTickets"),
+  closeTicket,
+);
+
+router.get("/logs", requirePermission("viewLogs"), getAdminLogs);
+
+router.post(
+  "/entreprises/create",
+  requirePermission("validateCompanies"),
+  createCompanyByAdmin,
+);
+
+router.get(
+  "/entreprises/:companyId/recruiters",
+  requirePermission("validateCompanies"),
+  getCompanyRecruiters,
+);
+
+router.post(
+  "/entreprises/assign-admin",
+  requirePermission("validateCompanies"),
+  assignCompanyAdmin,
+);
+
+router.delete(
+  "/entreprises/remove-admin/:recruiterId",
+  requirePermission("validateCompanies"),
+  removeCompanyAdmin,
+);
+
+
+router.get("/settings", getAllSettings);
+router.get("/settings/email-verification-mode", getEmailVerificationMode);
+router.post("/settings/email-verification-mode", toggleEmailVerificationMode);
+router.post("/settings/skill-proposal", toggleSkillProposal);
+
+
+router.get("/skills", requirePermission("viewStats"), getSkills);
+router.post("/skills", requirePermission("validateOffers"), createSkill);
+router.delete("/skills/:id", requirePermission("validateOffers"), deleteSkill);
+
+
+router.get(
+  "/skills/proposed",
+  requirePermission("validateOffers"),
+  getProposedSkills,
+);
+router.get(
+  "/skills/proposed/stats",
+  requirePermission("viewStats"),
+  getProposedSkillsStats,
+);
+router.post(
+  "/skills/proposed/:id/approve",
+  requirePermission("validateOffers"),
+  approveProposedSkill,
+);
+router.post(
+  "/skills/proposed/:id/reject",
+  requirePermission("validateOffers"),
+  rejectProposedSkill,
+);
+
+export default router;
+
+
+=== routes\anemRoutes.js ===
+import express from "express";
+import auth from "../middleware/auth.js";
+import { authRole } from "../middleware/roles.js";
+import Admin from "../models/Admin.js";
+
+
+import {
+  getAnemStatus,
+  checkAnemModalRequired,
+  markAnemModalSeen,
+  declineAnem,
+  resetAnemDecline,
+  submitAnemId,
+  startRegistration,
+  saveRegistrationStep,
+  submitRegistration,
+  getRegistrationForm,
+} from "../controllers/anemController.js";
+
+
+import {
+  getAnemDemandes,
+  getDemandeDetails,
+  getPendingAnemIds,
+  assignDemande,
+  markInProgress,
+  getPdfData,
+  approveAnemId,
+  rejectAnemId,
+  markRegistered,
+  markFailed,
+  addAdminNote,
+  bulkUpdateStatus,
+  getAnemStats,
+  getNewDemandesCount,
+  getAdminsForAssignment,
+} from "../controllers/anemController.js";
+
+
+import {
+  checkAnemEligibility,
+  enableAnemForOffer,
+  disableAnemForOffer,
+  getOfferAnemStatus,
+  getRecruiterAnemOffers,
+} from "../controllers/anemOfferController.js";
+
+const router = express.Router();
+
+
+
+
+
+
+router.get("/status", auth, authRole(["recruteur"]), getAnemStatus);
+router.get(
+  "/check-modal",
+  auth,
+  authRole(["recruteur"]),
+  checkAnemModalRequired,
+);
+router.post("/modal-seen", auth, authRole(["recruteur"]), markAnemModalSeen);
+router.post("/decline", auth, authRole(["recruteur"]), declineAnem);
+router.post("/reset-decline", auth, authRole(["recruteur"]), resetAnemDecline);
+
+
+router.post("/submit-id", auth, authRole(["recruteur"]), submitAnemId);
+
+
+router.post(
+  "/start-registration",
+  auth,
+  authRole(["recruteur"]),
+  startRegistration,
+);
+router.post("/save-step", auth, authRole(["recruteur"]), saveRegistrationStep);
+router.post(
+  "/submit-registration",
+  auth,
+  authRole(["recruteur"]),
+  submitRegistration,
+);
+router.get(
+  "/registration-form",
+  auth,
+  authRole(["recruteur"]),
+  getRegistrationForm,
+);
+
+
+router.get(
+  "/offer-eligibility",
+  auth,
+  authRole(["recruteur"]),
+  checkAnemEligibility,
+);
+router.get("/offers", auth, authRole(["recruteur"]), getRecruiterAnemOffers);
+router.get(
+  "/offers/:offerId/status",
+  auth,
+  authRole(["recruteur"]),
+  getOfferAnemStatus,
+);
+router.post(
+  "/offers/:offerId/enable",
+  auth,
+  authRole(["recruteur"]),
+  enableAnemForOffer,
+);
+router.post(
+  "/offers/:offerId/disable",
+  auth,
+  authRole(["recruteur"]),
+  disableAnemForOffer,
+);
+
+
+
+
+
+const requireAnemPermission = async (req, res, next) => {
+  try {
+    const admin = await Admin.findOne({ userId: req.user.id });
+
+    if (!admin) {
+      return res.status(403).json({ msg: "Admin introuvable" });
+    }
+
+    if (admin.status !== "active") {
+      return res.status(403).json({ msg: "Compte admin suspendu" });
+    }
+
+    
+    const hasPermission =
+      admin.label === "super_admin" ||
+      admin.permissions.validateRecruiters ||
+      admin.permissions.validateCompanies;
+
+    if (!hasPermission) {
+      return res.status(403).json({
+        msg: "Permission requise pour gérer les demandes ANEM",
+        code: "PERMISSION_DENIED",
+      });
+    }
+
+    req.admin = admin;
+    next();
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+router.get(
+  "/admin/stats",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  getAnemStats,
+);
+
+router.get(
+  "/admin/demandes/count",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  getNewDemandesCount,
+);
+
+
+router.get(
+  "/admin/demandes",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  getAnemDemandes,
+);
+
+router.get(
+  "/admin/demandes/:demandeId",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  getDemandeDetails,
+);
+
+
+router.get(
+  "/admin/pending-ids",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  getPendingAnemIds,
+);
+
+
+router.get(
+  "/admin/admins-for-assignment",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  getAdminsForAssignment,
+);
+
+router.post(
+  "/admin/demandes/:demandeId/assign",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  assignDemande,
+);
+
+
+router.post(
+  "/admin/demandes/:demandeId/in-progress",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  markInProgress,
+);
+
+
+router.get(
+  "/admin/demandes/:demandeId/pdf-data",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  getPdfData,
+);
+
+
+router.post(
+  "/admin/demandes/:demandeId/approve-id",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  approveAnemId,
+);
+
+router.post(
+  "/admin/demandes/:demandeId/reject-id",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  rejectAnemId,
+);
+
+
+router.post(
+  "/admin/demandes/:demandeId/register",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  markRegistered,
+);
+
+router.post(
+  "/admin/demandes/:demandeId/fail",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  markFailed,
+);
+
+
+router.post(
+  "/admin/demandes/:demandeId/note",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  addAdminNote,
+);
+
+
+router.post(
+  "/admin/demandes/bulk-update",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  bulkUpdateStatus,
+);
+
+export default router;
+
+
+=== routes\authRoutes.js ===
+import express from "express";
+import auth from "../middleware/auth.js";
+import {
+  authRateLimiter,
+  emailVerificationLimiter,
+} from "../middleware/security.js";
+import { validators } from "../middleware/validate.js";
+import {
+  register,
+  login,
+  verifyEmail,
+  resendConfirmationCode,
+  changeEmail,
+  getCompanies,
+} from "../controllers/authController.js";
+
+const router = express.Router();
+
+
+router.post("/register", authRateLimiter, validators.register, register);
+router.post("/login", authRateLimiter, validators.login, login);
+
+
+router.post(
+  "/verify-email",
+  auth,
+  emailVerificationLimiter,
+  validators.verifyEmail,
+  verifyEmail,
+);
+router.post(
+  "/resend-code",
+  auth,
+  emailVerificationLimiter,
+  resendConfirmationCode,
+);
+router.put("/change-email", auth, validators.changeEmail, changeEmail);
+
+
+router.get("/companies", getCompanies);
+
+export default router;
+
+
+=== routes\candidateRoutes.js ===
+import express from "express";
+import auth from "../middleware/auth.js";
+import { authRole } from "../middleware/roles.js";
+import { requireEmailVerification } from "../middleware/requireEmailVerification.js";
+import { uploadRateLimiter } from "../middleware/security.js";
+import { validators } from "../middleware/validate.js";
+import {
+  uploadCV,
+  uploadImage,
+  uploadAttachments,
+  handleMulterError,
+} from "../config/multer.js";
+
+import {
+  updateProfile,
+  uploadProfilePicture,
+  uploadCandidateCV,
+  deleteCV,
+  applyToOffer,
+  updateAccount,
+  getProfile,
+  addToFavorites,
+  removeFromFavorites,
+  getFavorites,
+  addSkill,
+  updateSkill,
+  deleteSkill,
+  addExperience,
+  updateExperience,
+  deleteExperience,
+  addEducation,
+  updateEducation,
+  deleteEducation,
+  getCandidateStats,
+  getActivityTimeline,
+  getRecommendedOffers,
+} from "../controllers/candidateController.js";
+
+import {
+  getMyApplications,
+  getApplicationDetail,
+  withdrawApplication,
+  cancelApplication,
+  checkApplicationStatus,
+} from "../controllers/candidateApplicationController.js";
+
+import {
+  getCandidateInterviews,
+  acceptInterview,
+  declineInterview,
+  proposeAlternativeDate,
+} from "../controllers/interviewController.js";
+
+import {
+  getCandidateConversations,
+  getConversationMessages,
+  sendMessageAsCandidate,
+} from "../controllers/conversationController.js";
+
+const router = express.Router();
+
+router.use(auth, authRole(["candidat"]));
+
+
+router.get("/profil", getProfile);
+router.put("/profil", validators.updateProfile, updateProfile);
+router.put("/compte", updateAccount);
+router.get("/stats", getCandidateStats);
+router.get("/activity", getActivityTimeline);
+
+
+router.post(
+  "/upload-photo",
+  uploadRateLimiter,
+  uploadImage.single("photo"),
+  handleMulterError,
+  uploadProfilePicture,
+);
+router.post(
+  "/upload-cv",
+  uploadRateLimiter,
+  uploadCV.single("cv"),
+  handleMulterError,
+  uploadCandidateCV,
+);
+router.delete("/delete-cv/:cvId", validators.mongoId("cvId"), deleteCV);
+
+
+router.post("/profil/skills", validators.addSkill, addSkill);
+router.put(
+  "/profil/skills/:skillId",
+  validators.mongoId("skillId"),
+  updateSkill,
+);
+router.delete(
+  "/profil/skills/:skillId",
+  validators.mongoId("skillId"),
+  deleteSkill,
+);
+
+
+router.post("/profil/experiences", validators.addExperience, addExperience);
+router.put(
+  "/profil/experiences/:experienceId",
+  validators.mongoId("experienceId"),
+  updateExperience,
+);
+router.delete(
+  "/profil/experiences/:experienceId",
+  validators.mongoId("experienceId"),
+  deleteExperience,
+);
+
+
+router.post("/profil/education", validators.addEducation, addEducation);
+router.put(
+  "/profil/education/:educationId",
+  validators.mongoId("educationId"),
+  updateEducation,
+);
+router.delete(
+  "/profil/education/:educationId",
+  validators.mongoId("educationId"),
+  deleteEducation,
+);
+
+
+router.get("/favorites", getFavorites);
+router.post(
+  "/favorites/:offerId",
+  validators.mongoId("offerId"),
+  addToFavorites,
+);
+router.delete(
+  "/favorites/:offerId",
+  validators.mongoId("offerId"),
+  removeFromFavorites,
+);
+
+
+router.get("/recommended-offers", getRecommendedOffers);
+
+
+router.post(
+  "/postuler",
+  requireEmailVerification,
+  validators.applyToOffer,
+  applyToOffer,
+);
+router.get(
+  "/applications/check/:offerId",
+  validators.mongoId("offerId"),
+  checkApplicationStatus,
+);
+router.get("/applications", validators.pagination, getMyApplications);
+router.get(
+  "/applications/:applicationId",
+  validators.mongoId("applicationId"),
+  getApplicationDetail,
+);
+router.delete(
+  "/applications/:applicationId",
+  validators.mongoId("applicationId"),
+  withdrawApplication,
+);
+router.delete(
+  "/applications/:applicationId/cancel",
+  validators.mongoId("applicationId"),
+  cancelApplication,
+);
+
+
+router.get("/interviews", getCandidateInterviews);
+router.put(
+  "/interviews/:interviewId/accept",
+  validators.mongoId("interviewId"),
+  acceptInterview,
+);
+router.put(
+  "/interviews/:interviewId/decline",
+  validators.mongoId("interviewId"),
+  declineInterview,
+);
+router.put(
+  "/interviews/:interviewId/propose-date",
+  validators.mongoId("interviewId"),
+  proposeAlternativeDate,
+);
+
+
+router.get("/conversations", getCandidateConversations);
+router.get(
+  "/conversations/:conversationId",
+  validators.mongoId("conversationId"),
+  getConversationMessages,
+);
+router.post(
+  "/conversations/:conversationId/messages",
+  validators.mongoId("conversationId"),
+  uploadAttachments.array("attachments", 3),
+  handleMulterError,
+  sendMessageAsCandidate,
+);
+
+export default router;
+
+
+=== routes\notificationRoutes.js ===
+import express from "express";
+import auth from "../middleware/auth.js";
+import {
+  getMyNotifications,
+  getUnreadCount,
+  markAsRead,
+} from "../controllers/notificationController.js";
+
+const router = express.Router();
+
+router.use(auth);
+
+router.get("/", getMyNotifications);
+router.get("/unread-count", getUnreadCount);
+router.put("/:id/read", markAsRead);
+
+export default router;
+
+
+=== routes\offerRoutes.js ===
+import express from "express";
+import {
+  getAllActiveOffers,
+  getOfferDetails,
+} from "../controllers/offerController.js";
+
+const router = express.Router();
+
+router.get("/", getAllActiveOffers);
+
+router.get("/:id", getOfferDetails);
+
+export default router;
+
+
+=== routes\recruiterRoutes.js ===
+import express from "express";
+import auth from "../middleware/auth.js";
+import { optionalAuth } from "../middleware/optionalAuth.js";
+import { authRole } from "../middleware/roles.js";
+import { requireEmailVerification } from "../middleware/requireEmailVerification.js";
+
+import { uploadImage, uploadAttachments } from "../config/multer.js";
+
+
+import {
+  getRecruiterById,
+  createOffer,
+  getMyOffers,
+  updateOffer,
+  deactivateOffer,
+  updateRecruiterProfile,
+  updateCompanyDetails,
+  getRecruiterDashboard,
+  getRecruiterProfileEndpoint,
+  getCompanyTeam,
+  getOfferStats,
+  submitValidationResponse,
+  getCandidateFullProfile,
+  getMyOffersWithStats,
+} from "../controllers/recruiterController.js";
+
+
+import {
+  getOfferApplications, 
+  
+  markAsSeen,
+  updateRecruiterStatus,
+  toggleStarred,
+  updateNotes,
+  getAllApplicationsAdvanced,
+  markAllOfferApplicationsAsSeen,
+} from "../controllers/recruiterApplicationController.js";
+
+import {
+  proposeInterview,
+  getRecruiterInterviews,
+  acceptAlternativeDate,
+  rescheduleByRecruiter,
+  cancelInterviewByRecruiter,
+  completeInterview,
+  getRecruiterInterviewsGrouped,
+} from "../controllers/interviewController.js";
+
+import {
+  getRecruiterConversations,
+  openConversation,
+  sendMessageAsRecruiter,
+  getRecruiterConversationMessages,
+} from "../controllers/conversationController.js";
+
+const router = express.Router();
+
+
+router.get("/public/:id", optionalAuth, getRecruiterById);
+
+
+router.use(auth, authRole(["recruteur"]));
+
+
+router.get("/profile", getRecruiterProfileEndpoint);
+router.put("/profile", updateRecruiterProfile);
+router.get("/candidates/:candidateId", getCandidateFullProfile);
+router.get("/dashboard", getRecruiterDashboard);
+
+router.post(
+  "/validation-response",
+  uploadAttachments.array("documents", 5),
+  submitValidationResponse,
+);
+
+router.post("/offers", requireEmailVerification, createOffer);
+router.get("/my-offers", getMyOffers);
+router.put("/offers/:id", updateOffer);
+router.put("/offers/:id/deactivate", deactivateOffer);
+router.get("/offers/:offerId/stats", getOfferStats);
+
+router.put("/company", updateCompanyDetails);
+router.get("/company/team", getCompanyTeam);
+
+
+
+
+router.get("/offers/:offerId/applications", getOfferApplications); 
+
+router.put("/applications/:applicationId/seen", markAsSeen);
+router.put("/applications/:applicationId/status", updateRecruiterStatus); 
+router.put("/applications/:applicationId/star", toggleStarred);
+router.put("/applications/:applicationId/notes", updateNotes);
+
+
+router.get("/interviews", getRecruiterInterviews);
+router.post("/applications/:applicationId/interviews", proposeInterview);
+router.put(
+  "/interviews/:interviewId/accept-alternative",
+  acceptAlternativeDate,
+);
+router.put("/interviews/:interviewId/reschedule", rescheduleByRecruiter);
+router.put("/interviews/:interviewId/cancel", cancelInterviewByRecruiter);
+router.put("/interviews/:interviewId/complete", completeInterview);
+
+
+router.get("/conversations", getRecruiterConversations);
+router.post("/applications/:applicationId/conversation", openConversation);
+router.post(
+  "/conversations/:conversationId/messages",
+  uploadAttachments.array("attachments", 3),
+  sendMessageAsRecruiter,
+);
+
+
+
+
+router.get("/my-offers-stats", getMyOffersWithStats);
+
+
+router.put("/offers/:offerId/mark-all-seen", markAllOfferApplicationsAsSeen);
+
+
+router.get("/applications/advanced", getAllApplicationsAdvanced);
+
+
+router.get("/conversations/:conversationId", getRecruiterConversationMessages);
+
+
+
+router.get("/interviews/grouped", getRecruiterInterviewsGrouped);
+
+export default router;
+
+
+=== services\emailService.js ===
+import nodemailer from "nodemailer";
+import SystemSettings from "../models/SystemSettings.js";
+
+
+const createTransporter = () => {
+  const host = process.env.SMTP_HOST;
+  const port = parseInt(process.env.SMTP_PORT) || 587;
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+
+  
+  if (!host || !user || !pass) {
+    console.error("❌ SMTP Configuration missing:", {
+      host: !!host,
+      port,
+      user: !!user,
+      pass: !!pass,
+    });
+    throw new Error(
+      "SMTP configuration incomplete. Check environment variables.",
+    );
+  }
+
+  console.log("📧 Creating SMTP transporter with config:", {
+    host,
+    port,
+    user,
+    secure: port === 465,
+  });
+
+  return nodemailer.createTransport({
+    host,
+    port,
+    secure: port === 465, 
+    auth: {
+      user,
+      pass,
+    },
+    
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 10000,
+  });
+};
+
+
+const templates = {
+  verificationCode: (code, userName) => ({
+    subject: "Confirmez votre adresse email",
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <style>
+          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: #4F46E5; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
+          .content { background: #f9fafb; padding: 30px; border-radius: 0 0 8px 8px; }
+          .code { font-size: 32px; font-weight: bold; color: #4F46E5; text-align: center; letter-spacing: 8px; padding: 20px; background: white; border-radius: 8px; margin: 20px 0; }
+          .footer { text-align: center; margin-top: 20px; color: #666; font-size: 12px; }
+          .warning { color: #dc2626; font-size: 14px; margin-top: 15px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1>Vérification de votre email</h1>
+          </div>
+          <div class="content">
+            <p>Bonjour${userName ? ` ${userName}` : ""},</p>
+            <p>Merci de vous être inscrit ! Voici votre code de vérification :</p>
+            <div class="code">${code}</div>
+            <p>Ce code expire dans <strong>15 minutes</strong>.</p>
+            <p class="warning">Si vous n'avez pas demandé ce code, ignorez cet email.</p>
+          </div>
+          <div class="footer">
+            <p>© ${new Date().getFullYear()} Plateforme de Recrutement</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `,
+    text: `Bonjour${userName ? ` ${userName}` : ""},\n\nVotre code de vérification est : ${code}\n\nCe code expire dans 15 minutes.\n\nSi vous n'avez pas demandé ce code, ignorez cet email.`,
+  }),
+
+  welcomeEmail: (userName) => ({
+    subject: "Bienvenue sur notre plateforme !",
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <style>
+          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: #10b981; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
+          .content { background: #f9fafb; padding: 30px; border-radius: 0 0 8px 8px; }
+          .button { display: inline-block; background: #4F46E5; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; margin-top: 15px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1>🎉 Email vérifié avec succès !</h1>
+          </div>
+          <div class="content">
+            <p>Bonjour ${userName || ""},</p>
+            <p>Votre adresse email a été vérifiée avec succès. Votre compte est maintenant pleinement actif !</p>
+            <p>Vous pouvez maintenant :</p>
+            <ul>
+              <li>Compléter votre profil</li>
+              <li>Télécharger votre CV</li>
+              <li>Postuler aux offres d'emploi</li>
+            </ul>
+            <p>Bonne recherche d'emploi !</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `,
+    text: `Bonjour ${userName || ""},\n\nVotre adresse email a été vérifiée avec succès. Votre compte est maintenant pleinement actif !\n\nBonne recherche d'emploi !`,
+  }),
+};
+
+
+export const sendEmail = async (to, templateName, templateData = {}) => {
+  try {
+    const mode = await SystemSettings.getSetting(
+      "email_verification_mode",
+      "development",
+    );
+
+    console.log(`📧 Email mode: ${mode}`);
+    console.log(`📧 Sending to: ${to}`);
+    console.log(`📧 Template: ${templateName}`);
+
+    if (mode === "development") {
+      const template = templates[templateName]?.(
+        templateData.code,
+        templateData.userName,
+      );
+      console.log(`\n📧 [DEV MODE] Email à ${to}:`);
+      console.log(`   Sujet: ${template?.subject}`);
+      if (templateData.code) {
+        console.log(`   Code: ${templateData.code}`);
+      }
+      console.log("");
+      return { success: true, mode: "development" };
+    }
+
+    
+    console.log(`📧 SMTP Config Check:`, {
+      host: process.env.SMTP_HOST,
+      port: process.env.SMTP_PORT,
+      user: process.env.SMTP_USER,
+      passExists: !!process.env.SMTP_PASS,
+    });
+
+    const transporter = createTransporter();
+
+    
+    console.log("📧 Verifying SMTP connection...");
+    await transporter.verify();
+    console.log("📧 SMTP connection verified successfully");
+
+    const template = templates[templateName]?.(
+      templateData.code,
+      templateData.userName,
+    );
+
+    if (!template) {
+      throw new Error(`Template "${templateName}" not found`);
+    }
+
+    const fromEmail = process.env.SMTP_FROM || process.env.SMTP_USER;
+
+    const mailOptions = {
+      from: `"Plateforme Recrutement" <${fromEmail}>`,
+      to,
+      subject: template.subject,
+      html: template.html,
+      text: template.text,
+    };
+
+    console.log("📧 Sending email with options:", {
+      from: mailOptions.from,
+      to: mailOptions.to,
+      subject: mailOptions.subject,
+    });
+
+    const result = await transporter.sendMail(mailOptions);
+
+    console.log(`✅ Email envoyé à ${to}: ${result.messageId}`);
+    return { success: true, messageId: result.messageId, mode: "smtp" };
+  } catch (error) {
+    console.error(`❌ Erreur envoi email à ${to}:`, error);
+    console.error("Error details:", {
+      message: error.message,
+      code: error.code,
+      command: error.command,
+    });
+    throw error;
+  }
+};
+
+
+export const sendVerificationEmail = async (email, code, userName = null) => {
+  return sendEmail(email, "verificationCode", { code, userName });
+};
+
+export const sendWelcomeEmail = async (email, userName = null) => {
+  return sendEmail(email, "welcomeEmail", { userName });
+};
+
+
+export const verifySmtpConnection = async () => {
+  try {
+    console.log("🔍 Checking SMTP environment variables...");
+    console.log({
+      SMTP_HOST: process.env.SMTP_HOST,
+      SMTP_PORT: process.env.SMTP_PORT,
+      SMTP_USER: process.env.SMTP_USER,
+      SMTP_PASS: process.env.SMTP_PASS ? "****" : "NOT SET",
+    });
+
+    if (
+      !process.env.SMTP_HOST ||
+      !process.env.SMTP_USER ||
+      !process.env.SMTP_PASS
+    ) {
+      console.error("❌ SMTP environment variables not set");
+      return false;
+    }
+
+    const transporter = createTransporter();
+    await transporter.verify();
+    console.log("✅ SMTP connection verified");
+    return true;
+  } catch (error) {
+    console.error("❌ SMTP connection failed:", error.message);
+    return false;
+  }
+};
+
+export default {
+  sendEmail,
+  sendVerificationEmail,
+  sendWelcomeEmail,
+  verifySmtpConnection,
+};
+
+
+=== startup\setupFolders.js ===
+import fs from "fs";
+
+export default function setupFolders() {
+  const folders = [
+    "uploads",
+    "uploads/cv",
+    "uploads/images",
+    "uploads/attachments",
+    "uploads/documents",
+  ];
+
+  folders.forEach((dir) => {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+      console.log(`📁 Dossier créé : ${dir}`);
+    }
+  });
+}
+
+
+=== utils\profileCompletion.js ===
+export const calculateProfileCompletion = (candidate, user) => {
+  const checks = {
+    nom: !!user?.nom,
+    telephone: !!candidate?.telephone,
+    residence: !!candidate?.residence?.wilaya,
+
+    bio: !!candidate?.bio,
+    dateOfBirth: !!candidate?.dateOfBirth,
+    gender: !!candidate?.gender,
+    profilePicture: !!candidate?.profilePicture,
+
+    desiredPosition: !!candidate?.desiredPosition,
+    cv: candidate?.cvs?.length > 0,
+    skills: candidate?.skills?.length > 0,
+    experiences: candidate?.experiences?.length > 0,
+    education: candidate?.education?.length > 0,
+  };
+
+  const completed = Object.values(checks).filter(Boolean).length;
+  const total = Object.keys(checks).length;
+
+  const minimumRequiredForApplication = {
+    telephone: !!candidate?.telephone,
+    residence: !!candidate?.residence?.wilaya,
+    cv: candidate?.cvs?.length > 0,
+    skills: candidate?.skills?.length > 0,
+  };
+
+  const canApply = Object.values(minimumRequiredForApplication).every(Boolean);
+  const missingForApplication = Object.entries(minimumRequiredForApplication)
+    .filter(([_, v]) => !v)
+    .map(([k]) => {
+      const labels = {
+        telephone: "Numéro de téléphone",
+        residence: "Localisation (wilaya)",
+        cv: "CV",
+        skills: "Au moins une compétence",
+      };
+      return labels[k] || k;
+    });
+
+  return {
+    percentage: Math.round((completed / total) * 100),
+    missing: Object.entries(checks)
+      .filter(([_, v]) => !v)
+      .map(([k]) => k),
+    isComplete: completed === total,
+    canApply,
+    missingForApplication,
+  };
+};
+
+
+=== utils\statusMapping.js ===
+export const RECRUITER_TO_CANDIDATE_STATUS = {
+  nouvelle: "envoyee",
+  consultee: "en_cours",
+  preselection: "en_cours",
+  en_discussion: "en_cours",
+  entretien_planifie: "en_cours",
+  entretien_termine: "en_cours",
+  retenue: "retenue",
+  refusee: "non_retenue",
+};
+
+export const mapRecruiterToCandidate = (recruiterStatus) => {
+  return RECRUITER_TO_CANDIDATE_STATUS[recruiterStatus] || "en_cours";
+};
+
+
+export const NOTIFY_CANDIDATE_STATUSES = ["retenue", "refusee"];
+
+
+export const TERMINAL_STATUSES = {
+  candidate: ["retenue", "non_retenue", "retiree"],
+  recruiter: ["retenue", "refusee"],
+};

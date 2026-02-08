@@ -18,12 +18,18 @@ const experienceSchema = new mongoose.Schema({
 });
 
 const skillSchema = new mongoose.Schema({
-  name: { type: String, required: true },
+  name: { type: String, required: true, trim: true, lowercase: true },
   level: {
     type: String,
     enum: ["beginner", "intermediate", "expert"],
     default: "beginner",
   },
+  // Domain can be null for proposed skills
+  domain: { type: String, default: null, trim: true },
+  // Reference to official skill if it exists
+  skillId: { type: mongoose.Schema.Types.ObjectId, ref: "Skill" },
+  // True if this was a custom proposed skill
+  isProposed: { type: Boolean, default: false },
 });
 
 const candidateSchema = new mongoose.Schema(
@@ -101,7 +107,7 @@ const candidateSchema = new mongoose.Schema(
     experiences: [experienceSchema],
     education: [educationSchema],
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 candidateSchema.index({ userId: 1 });
 candidateSchema.index({ "residence.wilaya": 1 });

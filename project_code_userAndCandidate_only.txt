@@ -1,0 +1,7357 @@
+
+
+=== package.json ===
+{
+  "name": "refresh_project",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "bcryptjs": "2.4.3",
+    "cloudinary": "^2.9.0",
+    "cors": "2.8.5",
+    "dotenv": "16.4.5",
+    "express": "4.21.2",
+    "express-mongo-sanitize": "^2.2.0",
+    "express-rate-limit": "^8.2.1",
+    "express-validator": "^7.3.1",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "9.0.2",
+    "mongoose": "8.9.5",
+    "morgan": "1.10.1",
+    "multer": "1.4.5-lts.1",
+    "nodemailer": "^7.0.13",
+    "validator": "^13.15.26"
+  }
+}
+
+
+=== server.js ===
+import express from "express";
+import dotenv from "dotenv";
+import cors from "cors";
+import morgan from "morgan";
+import connectDB from "./config/db.js";
+import setupFolders from "./startup/setupFolders.js";
+import { seedAdmin } from "./startup/seedAdmin.js"; 
+import { setupSecurity } from "./middleware/security.js"; 
+import SystemSettings from "./models/SystemSettings.js"; 
+
+
+import authRoutes from "./routes/authRoutes.js";
+import candidateRoutes from "./routes/candidateRoutes.js";
+import offerRoutes from "./routes/offerRoutes.js";
+import notificationRoutes from "./routes/notificationRoutes.js";
+import skillRoutes from "./routes/skillRoutes.js";
+import supportRoutes from "./routes/supportRoutes.js";
+import announcementRoutes from "./routes/announcementRoutes.js";
+
+import recruiterRoutes from "./routes/recruiterRoutes.js";
+import adminRoutes from "./routes/adminRoutes.js";
+import anemRoutes from "./routes/anemRoutes.js";
+
+dotenv.config();
+const app = express();
+
+
+
+try {
+  setupSecurity(app);
+} catch (err) {
+  console.warn("⚠️ setupSecurity not found or failed, skipping...");
+}
+
+
+app.use(
+  cors({
+    origin:
+      process.env.NODE_ENV === "production"
+        ? process.env.FRONTEND_URL?.split(",")
+        : "*",
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "ngrok-skip-browser-warning",
+    ],
+    credentials: true,
+  }),
+);
+
+
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+
+
+if (process.env.NODE_ENV !== "test") {
+  app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
+}
+
+
+app.use("/uploads", express.static("uploads"));
+
+
+app.use((err, req, res, next) => {
+  if (err instanceof SyntaxError && err.status === 400 && "body" in err) {
+    return res.status(400).json({ msg: "JSON invalide" });
+  }
+  next(err);
+});
+
+async function startServer() {
+  try {
+    await connectDB();
+    setupFolders();
+
+    
+    await seedAdmin();
+
+    
+    await SystemSettings.initializeDefaults();
+    console.log("⚙️ Paramètres système initialisés");
+
+    
+    app.use("/api/auth", authRoutes);
+    app.use("/api/skills", skillRoutes);
+    app.use("/api/offers", offerRoutes);
+    app.use("/api/candidates", candidateRoutes);
+    app.use("/api/notifications", notificationRoutes);
+    app.use("/api/support", supportRoutes);
+    app.use("/api/announcements", announcementRoutes);
+
+    
+    app.use("/api/recruiters", recruiterRoutes);
+    app.use("/api/admin", adminRoutes);
+    app.use("/api/anem", anemRoutes);
+
+    
+    app.get("/", (req, res) =>
+      res.json({
+        status: "ok",
+        message: "✅ API Recrutement opérationnelle !",
+        timestamp: new Date().toISOString(),
+      }),
+    );
+
+    app.get("/health", (req, res) =>
+      res.json({
+        status: "healthy",
+        uptime: process.uptime(),
+        timestamp: new Date().toISOString(),
+      }),
+    );
+
+    
+    app.use((req, res) => {
+      res.status(404).json({ msg: "Route non trouvée" });
+    });
+
+    
+    app.use((err, req, res, next) => {
+      console.error("❌ Erreur serveur:", err);
+
+      const message =
+        process.env.NODE_ENV === "production"
+          ? "Erreur interne du serveur"
+          : err.message;
+
+      res.status(err.status || 500).json({
+        msg: message,
+        ...(process.env.NODE_ENV !== "production" && { stack: err.stack }),
+      });
+    });
+
+    const PORT = process.env.PORT || 5000;
+    app.listen(PORT, () => {
+      console.log(`🚀 Serveur lancé sur le port ${PORT}`);
+      console.log(`📊 Environnement: ${process.env.NODE_ENV || "development"}`);
+    });
+  } catch (error) {
+    console.error("❌ Erreur lors du démarrage du serveur :", error);
+    process.exit(1);
+  }
+}
+
+startServer();
+
+
+process.on("uncaughtException", (err) => {
+  console.error("❌ Uncaught Exception:", err);
+  process.exit(1);
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("❌ Unhandled Rejection at:", promise, "reason:", reason);
+});
+
+export default app;
+
+
+=== config\cloudinary.js ===
+import { v2 as cloudinary } from "cloudinary";
+import { Readable } from "stream";
+
+
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+
+export const uploadToCloudinary = (buffer, options = {}) => {
+  return new Promise((resolve, reject) => {
+    const uploadOptions = {
+      resource_type: "auto",
+      ...options,
+    };
+
+    const uploadStream = cloudinary.uploader.upload_stream(
+      uploadOptions,
+      (error, result) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve(result);
+        }
+      },
+    );
+
+    const readableStream = new Readable();
+    readableStream.push(buffer);
+    readableStream.push(null);
+    readableStream.pipe(uploadStream);
+  });
+};
+
+
+export const deleteFromCloudinary = async (
+  publicId,
+  resourceType = "image",
+) => {
+  try {
+    const result = await cloudinary.uploader.destroy(publicId, {
+      resource_type: resourceType,
+    });
+    return result;
+  } catch (error) {
+    console.error(`Failed to delete from Cloudinary: ${publicId}`, error);
+    
+    return { result: "error", error: error.message };
+  }
+};
+
+
+export const getPublicIdFromUrl = (url) => {
+  if (!url || !url.includes("cloudinary.com")) {
+    return null;
+  }
+
+  try {
+    
+    
+    
+    const regex =
+      /\/(?:image|raw|video)\/upload\/(?:v\d+\/)?(.+?)(?:\.[^.]+)?$/;
+    const match = url.match(regex);
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+};
+
+
+export const uploadCV = async (buffer, filename, userId) => {
+  const extension = filename.split(".").pop().toLowerCase();
+
+  return uploadToCloudinary(buffer, {
+    folder: `recruitment/cvs/${userId}`,
+    resource_type: "raw",
+    public_id: `cv_${Date.now()}`,
+    format: extension,
+    tags: ["cv", userId],
+  });
+};
+
+
+export const uploadProfileImage = async (buffer, userId) => {
+  return uploadToCloudinary(buffer, {
+    folder: `recruitment/profiles/${userId}`,
+    resource_type: "image",
+    public_id: `profile_${Date.now()}`,
+    transformation: [
+      { width: 400, height: 400, crop: "fill", gravity: "face" },
+      { quality: "auto:good" },
+      { fetch_format: "auto" },
+    ],
+    tags: ["profile", userId],
+  });
+};
+
+
+export const uploadAttachment = async (
+  buffer,
+  filename,
+  folder = "attachments",
+) => {
+  const extension = filename.split(".").pop().toLowerCase();
+  const isImage = ["jpg", "jpeg", "png", "webp", "gif"].includes(extension);
+
+  return uploadToCloudinary(buffer, {
+    folder: `recruitment/${folder}`,
+    resource_type: isImage ? "image" : "raw",
+    public_id: `attachment_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+    format: isImage ? undefined : extension,
+    tags: ["attachment"],
+  });
+};
+
+
+export const deleteMultipleFromCloudinary = async (urls) => {
+  const deletePromises = urls.map(async (url) => {
+    const publicId = getPublicIdFromUrl(url);
+    if (publicId) {
+      
+      const resourceType = url.includes("/raw/") ? "raw" : "image";
+      return deleteFromCloudinary(publicId, resourceType);
+    }
+  });
+
+  await Promise.allSettled(deletePromises);
+};
+
+export default {
+  uploadToCloudinary,
+  deleteFromCloudinary,
+  getPublicIdFromUrl,
+  uploadCV,
+  uploadProfileImage,
+  uploadAttachment,
+  deleteMultipleFromCloudinary,
+};
+
+
+=== config\db.js ===
+import mongoose from "mongoose";
+
+const connectDB = async () => {
+  try {
+    await mongoose.connect(process.env.MONGO_URI);
+    console.log("🟢 Connecté à MongoDB");
+  } catch (err) {
+    console.error("❌ Erreur MongoDB :", err.message);
+    process.exit(1);
+  }
+};
+
+export default connectDB;
+
+
+=== config\email.js ===
+import nodemailer from "nodemailer";
+
+export const transporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
+});
+
+
+=== config\multer.js ===
+import multer from "multer";
+import path from "path";
+
+
+const memoryStorage = multer.memoryStorage();
+
+
+const fileFilterCV = (req, file, cb) => {
+  const allowed = [".pdf", ".doc", ".docx"];
+  const ext = path.extname(file.originalname).toLowerCase();
+
+  if (!allowed.includes(ext)) {
+    return cb(new Error("Seulement PDF, DOC ou DOCX autorisés"));
+  }
+  cb(null, true);
+};
+
+
+const fileFilterImage = (req, file, cb) => {
+  const allowed = [".jpg", ".jpeg", ".png", ".webp"];
+  const ext = path.extname(file.originalname).toLowerCase();
+
+  if (!allowed.includes(ext)) {
+    return cb(new Error("Seulement JPG, JPEG, PNG ou WEBP autorisés"));
+  }
+  cb(null, true);
+};
+
+
+const fileFilterAttachments = (req, file, cb) => {
+  const allowed = [".pdf", ".doc", ".docx", ".jpg", ".jpeg", ".png", ".webp"];
+  const ext = path.extname(file.originalname).toLowerCase();
+
+  if (!allowed.includes(ext)) {
+    return cb(new Error("Type de fichier non autorisé"));
+  }
+  cb(null, true);
+};
+
+
+export const uploadCV = multer({
+  storage: memoryStorage,
+  fileFilter: fileFilterCV,
+  limits: { fileSize: 5 * 1024 * 1024 }, 
+});
+
+
+export const uploadImage = multer({
+  storage: memoryStorage,
+  fileFilter: fileFilterImage,
+  limits: { fileSize: 5 * 1024 * 1024 }, 
+});
+
+
+export const uploadAttachments = multer({
+  storage: memoryStorage,
+  fileFilter: fileFilterAttachments,
+  limits: { fileSize: 10 * 1024 * 1024 }, 
+});
+
+
+export const handleMulterError = (err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    if (err.code === "LIMIT_FILE_SIZE") {
+      return res.status(400).json({ msg: "Fichier trop volumineux" });
+    }
+    if (err.code === "LIMIT_FILE_COUNT") {
+      return res.status(400).json({ msg: "Trop de fichiers" });
+    }
+    return res.status(400).json({ msg: err.message });
+  }
+  if (err) {
+    return res.status(400).json({ msg: err.message });
+  }
+  next();
+};
+
+export default { uploadCV, uploadImage, uploadAttachments, handleMulterError };
+
+
+=== controllers\adminSettingsController.js ===
+import SystemSettings from "../models/SystemSettings.js";
+import { verifySmtpConnection } from "../services/emailService.js";
+
+
+export const toggleEmailVerificationMode = async (req, res) => {
+  try {
+    const { mode } = req.body;
+
+    if (!["smtp", "development"].includes(mode)) {
+      return res.status(400).json({
+        msg: "Mode invalide. Utilisez 'smtp' ou 'development'.",
+      });
+    }
+
+    
+    if (mode === "smtp") {
+      const isConnected = await verifySmtpConnection();
+      if (!isConnected) {
+        return res.status(400).json({
+          msg: "Impossible d'activer le mode SMTP : connexion SMTP échouée. Vérifiez les variables d'environnement SMTP.",
+        });
+      }
+    }
+
+    await SystemSettings.setSetting(
+      "email_verification_mode",
+      mode,
+      "Mode de vérification email",
+      req.user.id,
+    );
+
+    res.json({
+      msg: `Mode de vérification email changé en : ${mode}`,
+      mode,
+      description:
+        mode === "smtp"
+          ? "Les emails de vérification seront envoyés via SMTP"
+          : "Mode développement actif : le code 123456 sera accepté pour tous les utilisateurs",
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const getEmailVerificationMode = async (req, res) => {
+  try {
+    const mode = await SystemSettings.getSetting(
+      "email_verification_mode",
+      "development",
+    );
+
+    res.json({
+      mode,
+      description:
+        mode === "smtp"
+          ? "Les emails de vérification sont envoyés via SMTP"
+          : "Mode développement : le code 123456 est accepté",
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const toggleSkillProposal = async (req, res) => {
+  try {
+    const { enabled } = req.body;
+
+    if (typeof enabled !== "boolean") {
+      return res
+        .status(400)
+        .json({ msg: "Valeur 'enabled' requise (boolean)" });
+    }
+
+    await SystemSettings.setSetting(
+      "skill_proposal_enabled",
+      enabled,
+      "Permet aux candidats de proposer de nouvelles compétences",
+      req.user.id,
+    );
+
+    res.json({
+      msg: enabled
+        ? "Proposition de compétences activée"
+        : "Proposition de compétences désactivée",
+      enabled,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const getAllSettings = async (req, res) => {
+  try {
+    const settings = await SystemSettings.find({})
+      .select("-__v")
+      .populate("updatedBy", "nom email");
+
+    res.json(settings);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+=== controllers\announcementController.js ===
+import Announcement from "../models/Announcement.js";
+import User from "../models/User.js";
+import Admin from "../models/Admin.js";
+import { logAdminAction } from "../models/AdminLog.js";
+
+export const createAnnouncement = async (req, res) => {
+  try {
+    const {
+      title,
+      content,
+      targetAudience,
+      status,
+      publishAt,
+      expiresAt,
+      priority,
+      displayType,
+    } = req.body;
+
+    let finalStatus = status || "draft";
+    if (
+      status === "published" &&
+      publishAt &&
+      new Date(publishAt) > new Date()
+    ) {
+      finalStatus = "scheduled";
+    }
+
+    const announcement = await Announcement.create({
+      title,
+      content,
+      targetAudience: targetAudience || "all",
+      status: finalStatus,
+      publishAt: publishAt ? new Date(publishAt) : null,
+      expiresAt: expiresAt ? new Date(expiresAt) : null,
+      priority: priority || "normal",
+      displayType: displayType || "inline",
+      createdBy: req.user.id,
+    });
+
+    await logAdminAction(
+      req.user.id,
+      "announcement_created",
+      { type: "announcement", id: announcement._id },
+      { title },
+      req
+    );
+
+    res.status(201).json({ msg: "Annonce créée ✅", announcement });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getAllAnnouncements = async (req, res) => {
+  try {
+    const { status, targetAudience, page = 1, limit = 20 } = req.query;
+
+    let query = {};
+    if (status) query.status = status;
+    if (targetAudience) query.targetAudience = targetAudience;
+
+    const announcements = await Announcement.find(query)
+      .populate("createdBy", "nom email")
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit));
+
+    const total = await Announcement.countDocuments(query);
+
+    res.json({
+      data: announcements,
+      meta: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / limit),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getActiveAnnouncements = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    const now = new Date();
+
+    let audienceFilter = ["all"];
+    if (user.role === "admin") audienceFilter.push("admins");
+    if (user.role === "recruteur") audienceFilter.push("recruiters");
+    if (user.role === "candidat") audienceFilter.push("candidates");
+
+    const announcements = await Announcement.find({
+      status: "published",
+      targetAudience: { $in: audienceFilter },
+      $or: [{ publishAt: null }, { publishAt: { $lte: now } }],
+      dismissedBy: { $ne: req.user.id },
+    })
+      .and([
+        {
+          $or: [{ expiresAt: null }, { expiresAt: { $gt: now } }],
+        },
+      ])
+      .sort({ priority: -1, createdAt: -1 });
+
+    res.json(announcements);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const updateAnnouncement = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updates = req.body;
+
+    const announcement = await Announcement.findByIdAndUpdate(
+      id,
+      {
+        ...updates,
+        updatedBy: req.user.id,
+      },
+      { new: true }
+    );
+
+    if (!announcement) {
+      return res.status(404).json({ msg: "Annonce introuvable" });
+    }
+
+    await logAdminAction(
+      req.user.id,
+      "announcement_updated",
+      { type: "announcement", id: announcement._id },
+      { updates },
+      req
+    );
+
+    res.json({ msg: "Annonce mise à jour ✅", announcement });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const deleteAnnouncement = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const announcement = await Announcement.findByIdAndDelete(id);
+    if (!announcement) {
+      return res.status(404).json({ msg: "Annonce introuvable" });
+    }
+
+    await logAdminAction(
+      req.user.id,
+      "announcement_deleted",
+      { type: "announcement", id },
+      { title: announcement.title },
+      req
+    );
+
+    res.json({ msg: "Annonce supprimée 🗑️" });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const dismissAnnouncement = async (req, res) => {
+  try {
+    const { announcementId } = req.params;
+
+    await Announcement.findByIdAndUpdate(announcementId, {
+      $addToSet: { dismissedBy: req.user.id },
+    });
+
+    res.json({ msg: "Annonce masquée." });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const publishScheduledAnnouncements = async () => {
+  const now = new Date();
+
+  const publishedResult = await Announcement.updateMany(
+    { status: "scheduled", publishAt: { $lte: now } },
+    { $set: { status: "published" } }
+  );
+
+  const expiredResult = await Announcement.updateMany(
+    { status: "published", expiresAt: { $lte: now } },
+    { $set: { status: "expired" } }
+  );
+
+  console.log(
+    `📢 Annonces publiées: ${publishedResult.modifiedCount}, expirées: ${expiredResult.modifiedCount}`
+  );
+};
+
+
+=== controllers\authController.js ===
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import User from "../models/User.js";
+import Candidate from "../models/Candidate.js";
+import Company from "../models/Company.js";
+import Recruiter from "../models/Recruiter.js"; 
+import VerificationToken from "../models/VerificationToken.js"; 
+import SystemSettings from "../models/SystemSettings.js"; 
+import {
+  sendVerificationEmail,
+  sendWelcomeEmail,
+} from "../services/emailService.js"; 
+
+const generateToken = (user) => {
+  return jwt.sign(
+    {
+      id: user._id,
+      role: user.role,
+      emailVerified: user.emailVerified,
+    },
+    process.env.JWT_SECRET,
+    { expiresIn: "1d" },
+  );
+};
+
+
+function getRecruiterStatusMessage(status) {
+  const messages = {
+    pending_validation:
+      "Votre compte est en attente de validation par un administrateur.",
+    pending_documents:
+      "Des documents vous ont été demandés. Veuillez les fournir.",
+    pending_info: "Des informations complémentaires vous ont été demandées.",
+    pending_info_and_documents:
+      "Des informations et des documents vous ont été demandés.",
+    pending_revalidation: "Vos réponses sont en cours d'examen.",
+  };
+  return messages[status] || "Statut en attente.";
+}
+
+export const register = async (req, res) => {
+  try {
+    const {
+      nom,
+      email,
+      motDePasse,
+      role,
+      companyId,
+      nouveauNomEntreprise,
+      nouveauSiteWeb,
+    } = req.body;
+
+    
+    const exist = await User.findOne({ email: email.toLowerCase() });
+    if (exist) {
+      return res.status(400).json({ msg: "Email déjà utilisé" });
+    }
+
+    
+    const hash = await bcrypt.hash(motDePasse, 12);
+
+    
+    const user = await User.create({
+      nom,
+      email: email.toLowerCase(),
+      motDePasse: hash,
+      role,
+      emailVerified: false,
+      accountStatus: "active",
+    });
+
+    try {
+      
+      if (role === "recruteur") {
+        let finalCompanyId;
+
+        
+        if (companyId) {
+          const comp = await Company.findById(companyId);
+          if (!comp) {
+            await User.findByIdAndDelete(user._id);
+            return res.status(400).json({ msg: "Entreprise introuvable" });
+          }
+          finalCompanyId = comp._id;
+        } else if (nouveauNomEntreprise) {
+          const newComp = await Company.create({
+            name: nouveauNomEntreprise,
+            website: nouveauSiteWeb,
+            status: "pending",
+          });
+          finalCompanyId = newComp._id;
+        } else {
+          
+          await User.findByIdAndDelete(user._id);
+          return res.status(400).json({
+            msg: "Vous devez sélectionner ou créer une entreprise.",
+          });
+        }
+
+        
+        await Recruiter.create({
+          userId: user._id,
+          companyId: finalCompanyId,
+          position: "Recruteur", 
+          status: "pending_validation",
+          isAdmin: !companyId, 
+        });
+        
+      } else if (role === "candidat") {
+        await Candidate.create({ userId: user._id });
+      }
+
+      
+      
+      const verificationMode = await SystemSettings.getSetting(
+        "email_verification_mode",
+        "development",
+      );
+
+      if (verificationMode === "smtp") {
+        const { code } = await VerificationToken.createVerificationToken(
+          user._id,
+          "email_verification",
+          15,
+        );
+        await sendVerificationEmail(user.email, code, user.nom);
+      } else {
+        console.log(
+          `📨 [DEV MODE] User Registered: ${user.email}. Code will be static: 123456`,
+        );
+      }
+
+      const token = generateToken(user);
+
+      res.status(201).json({
+        msg: "Inscription réussie. Vérifiez votre email.",
+        token,
+        user: {
+          id: user._id,
+          email: user.email,
+          role: user.role,
+          emailVerified: false,
+        },
+        needsEmailVerification: true,
+      });
+    } catch (err) {
+      
+      await User.findByIdAndDelete(user._id);
+      throw err;
+    }
+  } catch (err) {
+    console.error("Registration error:", err);
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const login = async (req, res) => {
+  try {
+    const { email, motDePasse } = req.body;
+
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) {
+      return res.status(404).json({ msg: "Utilisateur non trouvé" });
+    }
+
+    const ok = await bcrypt.compare(motDePasse, user.motDePasse);
+    if (!ok) {
+      return res.status(401).json({ msg: "Mot de passe incorrect" });
+    }
+
+    
+    if (!user.canLogin()) {
+      if (user.accountStatus === "banned") {
+        return res.status(403).json({
+          msg: "Votre compte a été banni. Veuillez contacter l'administrateur.",
+          code: "ACCOUNT_BANNED",
+        });
+      }
+      if (user.accountStatus === "suspended") {
+        return res.status(403).json({
+          msg: `Votre compte est suspendu${
+            user.suspendedUntil
+              ? ` jusqu'au ${user.suspendedUntil.toLocaleDateString("fr-FR")}`
+              : ""
+          }.`,
+          code: "ACCOUNT_SUSPENDED",
+          reason: user.suspensionReason,
+        });
+      }
+    }
+
+    
+    if (user.role === "recruteur") {
+      if (!user.emailVerified) {
+        return res.status(403).json({
+          msg: "Veuillez confirmer votre email avant de vous connecter.",
+          code: "EMAIL_NOT_VERIFIED",
+          needEmailVerification: true,
+        });
+      }
+
+      const recruiter = await Recruiter.findOne({ userId: user._id });
+      if (recruiter) {
+        if (recruiter.status === "rejected") {
+          return res.status(403).json({
+            msg: "Votre compte recruteur a été refusé.",
+            code: "RECRUITER_REJECTED",
+            reason: recruiter.rejectionReason,
+          });
+        }
+
+        
+        if (recruiter.status !== "validated") {
+          const token = generateToken(user);
+          user.derniereConnexion = new Date();
+          await user.save();
+
+          return res.json({
+            msg: "Connexion réussie (accès limité)",
+            token,
+            user: {
+              id: user._id,
+              nom: user.nom,
+              email: user.email,
+              role: user.role,
+              emailVerified: user.emailVerified,
+            },
+            recruiterStatus: recruiter.status,
+            limitedAccess: true,
+            statusMessage: getRecruiterStatusMessage(recruiter.status),
+          });
+        }
+      }
+    }
+
+    
+    const token = generateToken(user);
+    user.derniereConnexion = new Date();
+    await user.save();
+
+    res.json({
+      msg: "Connexion réussie ✅",
+      token,
+      user: {
+        id: user._id,
+        nom: user.nom,
+        email: user.email,
+        role: user.role,
+        emailVerified: user.emailVerified,
+      },
+      needsEmailVerification: !user.emailVerified,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const resendConfirmationCode = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ msg: "Utilisateur introuvable" });
+    }
+
+    if (user.emailVerified) {
+      return res.status(400).json({ msg: "Email déjà vérifié" });
+    }
+
+    
+    const verificationMode = await SystemSettings.getSetting(
+      "email_verification_mode",
+      "development",
+    );
+
+    if (verificationMode === "smtp") {
+      const { code, expiresAt } =
+        await VerificationToken.createVerificationToken(
+          user._id,
+          "email_verification",
+          15,
+        );
+
+      await sendVerificationEmail(user.email, code, user.nom);
+
+      res.json({
+        msg: "Code de confirmation envoyé 📨",
+        expiresAt,
+      });
+    } else {
+      
+      console.log(
+        `📨 [DEV MODE] Code de confirmation pour ${user.email}: 123456`,
+      );
+      res.json({
+        msg: "Code de confirmation envoyé (Mode développement: utilisez 123456) 📨",
+      });
+    }
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const verifyEmail = async (req, res) => {
+  try {
+    const { code } = req.body;
+    const userId = req.user.id;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ msg: "Utilisateur introuvable" });
+    }
+
+    if (user.emailVerified) {
+      return res.status(400).json({ msg: "Email déjà vérifié" });
+    }
+
+    const verificationMode = await SystemSettings.getSetting(
+      "email_verification_mode",
+      "development",
+    );
+
+    let isValid = false;
+
+    if (verificationMode === "development") {
+      
+      isValid = code === "123456";
+      if (!isValid) {
+        return res
+          .status(400)
+          .json({
+            msg: "Code incorrect. Utilisez 123456 en mode développement.",
+          });
+      }
+    } else {
+      
+      const result = await VerificationToken.verifyCode(
+        userId,
+        code,
+        "email_verification",
+      );
+
+      if (!result.valid) {
+        return res.status(400).json({
+          msg: result.error,
+          attemptsRemaining: result.attemptsRemaining,
+        });
+      }
+      isValid = true;
+    }
+
+    if (isValid) {
+      user.emailVerified = true;
+      await user.save();
+
+      
+      try {
+        await sendWelcomeEmail(user.email, user.nom);
+      } catch (emailErr) {
+        console.error("Failed to send welcome email:", emailErr);
+      }
+
+      const newToken = generateToken(user);
+
+      return res.json({
+        msg: "E-mail confirmé avec succès ! 🎉",
+        token: newToken,
+        user: {
+          id: user._id,
+          nom: user.nom,
+          email: user.email,
+          role: user.role,
+          emailVerified: true,
+        },
+      });
+    }
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const changeEmail = async (req, res) => {
+  try {
+    const { newEmail } = req.body;
+    const userId = req.user.id;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ msg: "Utilisateur introuvable" });
+    }
+
+    if (user.emailVerified) {
+      return res.status(400).json({
+        msg: "Impossible de changer l'email car il est déjà vérifié.",
+      });
+    }
+
+    const normalizedEmail = newEmail.toLowerCase();
+    const exist = await User.findOne({
+      email: normalizedEmail,
+      _id: { $ne: userId },
+    });
+    if (exist) {
+      return res.status(400).json({ msg: "Cet email est déjà utilisé." });
+    }
+
+    user.email = normalizedEmail;
+    await user.save();
+
+    
+    await VerificationToken.deleteMany({ userId, type: "email_verification" });
+
+    res.json({
+      msg: `Email mis à jour vers ${normalizedEmail}. Veuillez confirmer ce nouvel email.`,
+      email: normalizedEmail,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getCompanies = async (req, res) => {
+  try {
+    
+    const companies = await Company.find({ status: "active" })
+      .select("_id name")
+      .sort({ name: 1 })
+      .lean();
+
+    res.json(companies);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export default {
+  register,
+  login,
+  verifyEmail,
+  resendConfirmationCode,
+  changeEmail,
+  getCompanies,
+};
+
+
+=== controllers\candidateApplicationController.js ===
+import Application from "../models/Application.js";
+import Interview from "../models/Interview.js";
+import Conversation from "../models/Conversation.js";
+import Candidate from "../models/Candidate.js";
+import Notification from "../models/Notification.js";
+import Offer from "../models/Offer.js";
+
+
+export const getMyApplications = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id });
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil introuvable" });
+    }
+
+    const { status, page = 1, limit = 20 } = req.query;
+    const skip = (page - 1) * limit;
+
+    let query = { candidateId: candidate._id };
+
+    if (status && status !== "all") {
+      query.candidateStatus = status;
+    }
+
+    const [applications, total] = await Promise.all([
+      Application.find(query)
+        .sort({ datePostulation: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .populate({
+          path: "offerId",
+          select: "titre actif companyId type wilaya",
+          populate: { path: "companyId", select: "name logo" },
+        })
+        .lean(),
+      Application.countDocuments(query),
+    ]);
+
+    
+    const enriched = await Promise.all(
+      applications.map(async (app) => {
+        const [conversation, upcomingInterview, interviewCount] =
+          await Promise.all([
+            Conversation.findOne({ applicationId: app._id })
+              .select("unreadByCandidate lastMessageAt status")
+              .lean(),
+            Interview.findOne({
+              applicationId: app._id,
+              status: {
+                $in: ["proposed", "confirmed", "rescheduled_by_recruiter"],
+              },
+              scheduledAt: { $gte: new Date() },
+            })
+              .sort({ scheduledAt: 1 })
+              .lean(),
+            Interview.countDocuments({ applicationId: app._id }),
+          ]);
+
+        return {
+          _id: app._id,
+          status: app.candidateStatus,
+          source: app.source,
+          datePostulation: app.datePostulation,
+          offer: app.offerId
+            ? {
+                _id: app.offerId._id,
+                titre: app.offerId.titre,
+                entreprise: app.offerId.companyId?.name,
+                logo: app.offerId.companyId?.logo,
+                type: app.offerId.type,
+                wilaya: app.offerId.wilaya,
+                actif: app.offerId.actif,
+              }
+            : {
+                titre: app.offerSnapshot?.titre,
+                entreprise: app.offerSnapshot?.entrepriseNom,
+                actif: false,
+                deleted: true,
+              },
+          hasConversation: !!conversation,
+          unreadMessages: conversation?.unreadByCandidate || 0,
+          upcomingInterview: upcomingInterview
+            ? {
+                _id: upcomingInterview._id,
+                scheduledAt: upcomingInterview.scheduledAt,
+                type: upcomingInterview.type,
+                status: upcomingInterview.status,
+                needsResponse: upcomingInterview.status === "proposed",
+              }
+            : null,
+          totalInterviews: interviewCount,
+        };
+      }),
+    );
+
+    res.json({
+      data: enriched,
+      meta: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / limit),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const getApplicationDetail = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id });
+    const { applicationId } = req.params;
+
+    
+    const application = await Application.findOne({
+      _id: applicationId,
+      candidateId: candidate._id,
+    })
+      .populate({
+        path: "offerId",
+        select:
+          "titre description type wilaya companyId requirements salaryMin salaryMax",
+        populate: {
+          path: "companyId",
+          select: "name logo website location size description",
+        },
+      })
+      .lean();
+
+    if (!application) {
+      return res.status(404).json({ msg: "Candidature introuvable" });
+    }
+
+    
+    const [conversation, interviews] = await Promise.all([
+      Conversation.findOne({ applicationId })
+        .select("_id messages unreadByCandidate status lastMessageAt") 
+        .lean(),
+      Interview.find({ applicationId }).sort({ scheduledAt: -1 }).lean(),
+    ]);
+
+    
+    res.json({
+      application: {
+        _id: application._id,
+        status: application.candidateStatus,
+        recruiterStatus: application.recruiterStatus, 
+        source: application.source,
+        cvUrl: application.cvUrl,
+        coverLetter: application.coverLetter,
+        datePostulation: application.datePostulation,
+        dateDecision: application.dateDecision,
+      },
+      
+      offer: application.offerId || application.offerSnapshot,
+
+      
+      conversation: conversation
+        ? {
+            exists: true,
+            _id: conversation._id, 
+            unreadCount: conversation.unreadByCandidate,
+            messageCount: conversation.messages?.length || 0,
+            status: conversation.status,
+            lastMessageAt: conversation.lastMessageAt,
+          }
+        : { exists: false },
+
+      interviews: interviews.map((i) => ({
+        _id: i._id,
+        type: i.type,
+        scheduledAt: i.scheduledAt,
+        duration: i.duration,
+        location: i.location,
+        meetingLink: i.meetingLink,
+        status: i.status,
+        proposedAlternative: i.proposedAlternative,
+        preparationNotes: i.preparationNotes,
+        
+        canAccept:
+          i.status === "proposed" || i.status === "rescheduled_by_recruiter",
+        canCounter:
+          i.status === "proposed" || i.status === "rescheduled_by_recruiter",
+      })),
+
+      statusHistory: application.statusHistory?.map((h) => ({
+        status: h.candidateStatus,
+        date: h.changedAt,
+        note: h.note,
+      })),
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const withdrawApplication = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id });
+    const { applicationId } = req.params;
+    const { reason } = req.body;
+
+    const application = await Application.findOne({
+      _id: applicationId,
+      candidateId: candidate._id,
+    });
+
+    if (!application)
+      return res.status(404).json({ msg: "Candidature introuvable" });
+
+    
+    const terminalStatuses = ["retiree", "cancelled", "refusee"]; 
+    if (terminalStatuses.includes(application.candidateStatus)) {
+      return res
+        .status(400)
+        .json({ msg: "Action impossible pour le statut actuel." });
+    }
+
+    application.candidateStatus = "retiree";
+    application.recruiterStatus = "retiree_par_candidat";
+    application.withdrawnAt = new Date();
+    application.withdrawReason = reason;
+
+    application.statusHistory.push({
+      candidateStatus: "retiree",
+      recruiterStatus: "retiree_par_candidat",
+      changedBy: req.user.id,
+      note: "Retrait volontaire par le candidat",
+    });
+
+    await application.save();
+
+    
+    await Interview.updateMany(
+      { applicationId, status: { $in: ["proposed", "confirmed"] } },
+      { status: "cancelled_by_candidate" },
+    );
+
+    
+    
+    
+    await Offer.findByIdAndUpdate(application.offerId, {
+      $inc: { nombreCandidatures: -1 },
+    });
+
+    
+    const offer = await Offer.findById(application.offerId).populate(
+      "recruteurId",
+    );
+    if (offer?.recruteurId?.userId) {
+      await Notification.create({
+        userId: offer.recruteurId.userId,
+        message: `Le candidat a retiré sa candidature pour "${offer.titre}"`,
+        type: "info",
+      });
+    }
+
+    res.json({ msg: "Candidature retirée avec succès" });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const cancelApplication = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id });
+    const { applicationId } = req.params;
+
+    const application = await Application.findOne({
+      _id: applicationId,
+      candidateId: candidate._id,
+    });
+
+    if (!application)
+      return res.status(404).json({ msg: "Candidature introuvable" });
+
+    
+    if (
+      application.candidateStatus !== "envoyee" ||
+      application.seenByRecruiter
+    ) {
+      return res.status(403).json({
+        msg: "Trop tard pour annuler. Utilisez l'option 'Retirer' si disponible.",
+      });
+    }
+
+    application.candidateStatus = "cancelled";
+    application.recruiterStatus = "annulee_par_candidat"; 
+
+    application.statusHistory.push({
+      candidateStatus: "cancelled",
+      recruiterStatus: "annulee_par_candidat",
+      changedBy: req.user.id,
+      note: "Annulation par le candidat (avant lecture)",
+    });
+
+    await application.save();
+
+    
+    await Offer.findByIdAndUpdate(application.offerId, {
+      $inc: { nombreCandidatures: -1 },
+    });
+
+    res.json({ msg: "Candidature annulée." });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const checkApplicationStatus = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id });
+    if (!candidate) return res.status(404).json({ msg: "Profil introuvable" });
+
+    const { offerId } = req.params;
+
+    const application = await Application.findOne({
+      offerId: offerId,
+      candidateId: candidate._id,
+    }).populate("offerId", "allowRepostulation"); 
+
+    
+    if (!application) {
+      return res.json({
+        hasApplied: false,
+        status: null,
+        canCancel: false,
+        canWithdraw: false,
+        canRepostulate: false, 
+        action: "apply", 
+      });
+    }
+
+    const { candidateStatus, seenByRecruiter, recruiterStatus } = application;
+
+    
+    let canCancel = false;
+    let canWithdraw = false;
+    let canRepostulate = false;
+    let action = "none"; 
+
+    
+    if (
+      candidateStatus === "envoyee" &&
+      !seenByRecruiter &&
+      recruiterStatus === "nouvelle"
+    ) {
+      canCancel = true;
+      action = "cancel";
+    }
+
+    
+    
+    const isEnCours =
+      ["en_cours"].includes(candidateStatus) ||
+      (candidateStatus === "envoyee" && seenByRecruiter);
+    if (isEnCours) {
+      canWithdraw = true;
+      action = "withdraw";
+    }
+
+    
+    
+    if (["retiree", "cancelled"].includes(candidateStatus)) {
+      if (application.offerId.allowRepostulation !== false) {
+        
+        canRepostulate = true;
+        action = candidateStatus === "cancelled" ? "apply" : "repostulate"; 
+      } else {
+        action = "disabled"; 
+      }
+    }
+
+    
+    if (["retenue", "non_retenue"].includes(candidateStatus)) {
+      action = "finished";
+    }
+
+    res.json({
+      hasApplied: true,
+      applicationId: application._id,
+      status: candidateStatus,
+      recruiterStatus: recruiterStatus,
+      seenByRecruiter: seenByRecruiter,
+      canCancel,
+      canWithdraw,
+      canRepostulate,
+      action, 
+      allowRepostulation: application.offerId.allowRepostulation,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+=== controllers\candidateController.js ===
+import Candidate from "../models/Candidate.js";
+import Offer from "../models/Offer.js";
+import User from "../models/User.js";
+import Application from "../models/Application.js";
+import Company from "../models/Company.js";
+import Skill from "../models/Skills.js";
+import ProposedSkill from "../models/ProposedSkill.js";
+import SystemSettings from "../models/SystemSettings.js";
+import Notification from "../models/Notification.js";
+import Interview from "../models/Interview.js";
+import {
+  uploadCV as cloudinaryUploadCV,
+  uploadProfileImage,
+  deleteFromCloudinary,
+  getPublicIdFromUrl,
+  deleteMultipleFromCloudinary,
+} from "../config/cloudinary.js";
+import { calculateProfileCompletion } from "../utils/profileCompletion.js";
+
+
+
+export const getProfile = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id })
+      .populate("userId", "nom email emailVerified")
+      .populate("skills.skillId", "name category");
+
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil introuvable." });
+    }
+
+    const user = await User.findById(req.user.id);
+    const completion = calculateProfileCompletion(candidate, user);
+
+    res.json({
+      profil: candidate,
+      completion,
+      emailVerified: user.emailVerified,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const updateProfile = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const {
+      telephone,
+      residence,
+      searchPreferences,
+      desiredPosition,
+      desiredJobTypes,
+      dateOfBirth,
+      bio,
+      gender,
+      autoriserProposition,
+      links,
+    } = req.body;
+
+    let candidate = await Candidate.findOne({ userId });
+    if (!candidate) {
+      candidate = new Candidate({ userId });
+    }
+
+    
+    if (telephone !== undefined) candidate.telephone = telephone;
+    if (residence !== undefined) candidate.residence = residence;
+    if (searchPreferences !== undefined)
+      candidate.searchPreferences = searchPreferences;
+    if (desiredPosition !== undefined)
+      candidate.desiredPosition = desiredPosition;
+    if (desiredJobTypes !== undefined)
+      candidate.desiredJobTypes = desiredJobTypes;
+    if (dateOfBirth !== undefined) candidate.dateOfBirth = dateOfBirth;
+    if (bio !== undefined) candidate.bio = bio;
+    if (gender !== undefined) candidate.gender = gender;
+    if (autoriserProposition !== undefined)
+      candidate.autoriserProposition = autoriserProposition;
+    if (links !== undefined) candidate.links = links;
+
+    await candidate.save();
+
+    const user = await User.findById(userId);
+    const completion = calculateProfileCompletion(candidate, user);
+
+    res.json({
+      msg: "Profil mis à jour ✅",
+      candidate,
+      completion,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const updateAccount = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { nom, email, motDePasse } = req.body;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ msg: "Utilisateur introuvable." });
+    }
+
+    if (nom) user.nom = nom;
+
+    if (email && email !== user.email) {
+      const emailExists = await User.findOne({ email, _id: { $ne: userId } });
+      if (emailExists) {
+        return res.status(400).json({ msg: "Cet email est déjà utilisé." });
+      }
+      
+      user.email = email;
+    }
+
+    if (motDePasse) {
+      const bcrypt = await import("bcryptjs");
+      user.motDePasse = await bcrypt.default.hash(motDePasse, 10);
+    }
+
+    await user.save();
+    res.json({ msg: "Compte mis à jour ✅" });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+
+export const uploadProfilePicture = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const candidate = await Candidate.findOne({ userId });
+
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil introuvable." });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ msg: "Aucune image fournie." });
+    }
+
+    
+    if (candidate.profilePicture) {
+      const publicId = getPublicIdFromUrl(candidate.profilePicture);
+      if (publicId) {
+        await deleteFromCloudinary(publicId, "image");
+      }
+    }
+
+    
+    const result = await uploadProfileImage(req.file.buffer, userId);
+
+    candidate.profilePicture = result.secure_url;
+    await candidate.save();
+
+    res.json({
+      msg: "Photo de profil mise à jour 📸",
+      profilePicture: candidate.profilePicture,
+    });
+  } catch (err) {
+    console.error("Profile picture upload error:", err);
+    res.status(500).json({ msg: "Erreur lors du téléchargement de l'image" });
+  }
+};
+
+export const uploadCandidateCV = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const candidate = await Candidate.findOne({ userId });
+
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil introuvable." });
+    }
+
+    const maxCVs = await SystemSettings.getSetting("max_cv_per_candidate", 3);
+    if (candidate.cvs.length >= maxCVs) {
+      return res.status(400).json({
+        msg: `Vous ne pouvez pas ajouter plus de ${maxCVs} CV.`,
+      });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ msg: "Aucun fichier fourni." });
+    }
+
+    
+    const result = await cloudinaryUploadCV(
+      req.file.buffer,
+      req.file.originalname,
+      userId,
+    );
+
+    
+    const fileSize = req.file.size;
+    let score = 100;
+    if (fileSize < 20 * 1024)
+      score = 50; 
+    else if (fileSize > 5 * 1024 * 1024) score = 70; 
+
+    candidate.cvs.push({
+      url: result.secure_url,
+      dateDepot: new Date(),
+      score,
+    });
+
+    await candidate.save();
+
+    res.json({
+      msg: "CV ajouté avec succès ✅",
+      cv: {
+        _id: candidate.cvs[candidate.cvs.length - 1]._id,
+        url: result.secure_url,
+        score,
+      },
+    });
+  } catch (err) {
+    console.error("CV upload error:", err);
+    res.status(500).json({ msg: "Erreur lors du téléchargement du CV" });
+  }
+};
+
+export const deleteCV = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { cvId } = req.params;
+
+    const candidate = await Candidate.findOne({ userId });
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil introuvable." });
+    }
+
+    const cv = candidate.cvs.id(cvId);
+    if (!cv) {
+      return res.status(404).json({ msg: "CV introuvable." });
+    }
+
+    
+    const publicId = getPublicIdFromUrl(cv.url);
+    if (publicId) {
+      await deleteFromCloudinary(publicId, "raw");
+    }
+
+    candidate.cvs.pull(cvId);
+    await candidate.save();
+
+    res.json({
+      msg: "CV supprimé avec succès 🗑️",
+      cvs: candidate.cvs,
+    });
+  } catch (err) {
+    console.error("CV deletion error:", err);
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+
+export const addSkill = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { name, level } = req.body;
+
+    const candidate = await Candidate.findOne({ userId });
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil introuvable." });
+    }
+
+    const normalizedName = name.trim().toLowerCase();
+
+    
+    const existingSkill = candidate.skills.find(
+      (s) => s.name.toLowerCase() === normalizedName,
+    );
+    if (existingSkill) {
+      return res.status(400).json({ msg: "Vous avez déjà cette compétence." });
+    }
+
+    
+    const officialSkill = await Skill.findOne({ name: normalizedName });
+
+    if (officialSkill) {
+      
+      candidate.skills.push({
+        name: officialSkill.name,
+        level: level || "beginner",
+        domain: officialSkill.category,
+        skillId: officialSkill._id,
+        isProposed: false,
+      });
+    } else {
+      
+      const proposalEnabled = await SystemSettings.getSetting(
+        "skill_proposal_enabled",
+        true,
+      );
+
+      if (!proposalEnabled) {
+        return res.status(400).json({
+          msg: "Cette compétence n'existe pas dans notre liste. Veuillez en sélectionner une parmi les suggestions.",
+        });
+      }
+
+      
+      await ProposedSkill.proposeSkill(normalizedName, userId, candidate._id);
+
+      
+      candidate.skills.push({
+        name: normalizedName,
+        level: level || "beginner",
+        domain: null,
+        skillId: null,
+        isProposed: true,
+      });
+    }
+
+    await candidate.save();
+
+    res.json({
+      msg: officialSkill
+        ? "Compétence ajoutée"
+        : "Compétence proposée et ajoutée à votre profil",
+      skills: candidate.skills,
+      wasProposed: !officialSkill,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const updateSkill = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { skillId } = req.params;
+    const { level } = req.body;
+
+    const candidate = await Candidate.findOne({ userId });
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil introuvable." });
+    }
+
+    const skill = candidate.skills.id(skillId);
+    if (!skill) {
+      return res.status(404).json({ msg: "Compétence introuvable." });
+    }
+
+    
+    if (level) skill.level = level;
+
+    await candidate.save();
+    res.json({ msg: "Compétence mise à jour", skills: candidate.skills });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const deleteSkill = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { skillId } = req.params;
+
+    const candidate = await Candidate.findOne({ userId });
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil introuvable." });
+    }
+
+    candidate.skills.pull(skillId);
+    await candidate.save();
+
+    res.json({ msg: "Compétence supprimée", skills: candidate.skills });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+
+export const addExperience = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { jobTitle, company, startDate, endDate, description } = req.body;
+
+    const candidate = await Candidate.findOne({ userId });
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil introuvable." });
+    }
+
+    candidate.experiences.push({
+      jobTitle,
+      company,
+      startDate,
+      endDate: endDate || null,
+      description,
+    });
+
+    await candidate.save();
+
+    res.json({ msg: "Expérience ajoutée", experiences: candidate.experiences });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const updateExperience = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { experienceId } = req.params;
+    const { jobTitle, company, startDate, endDate, description } = req.body;
+
+    const candidate = await Candidate.findOne({ userId });
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil introuvable." });
+    }
+
+    const experience = candidate.experiences.id(experienceId);
+    if (!experience) {
+      return res.status(404).json({ msg: "Expérience introuvable." });
+    }
+
+    if (jobTitle) experience.jobTitle = jobTitle;
+    if (company) experience.company = company;
+    if (startDate) experience.startDate = startDate;
+    if (endDate !== undefined) experience.endDate = endDate;
+    if (description !== undefined) experience.description = description;
+
+    await candidate.save();
+
+    res.json({
+      msg: "Expérience mise à jour",
+      experiences: candidate.experiences,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const deleteExperience = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { experienceId } = req.params;
+
+    const candidate = await Candidate.findOne({ userId });
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil introuvable." });
+    }
+
+    candidate.experiences.pull(experienceId);
+    await candidate.save();
+
+    res.json({
+      msg: "Expérience supprimée",
+      experiences: candidate.experiences,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+
+export const addEducation = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { institut, degree, fieldOfStudy, startDate, endDate, description } =
+      req.body;
+
+    const candidate = await Candidate.findOne({ userId });
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil introuvable." });
+    }
+
+    candidate.education.push({
+      institut,
+      degree,
+      fieldOfStudy,
+      startDate,
+      endDate: endDate || null,
+      description,
+    });
+
+    await candidate.save();
+
+    res.json({
+      msg: "Formation ajoutée avec succès 🎓",
+      education: candidate.education,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const updateEducation = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { educationId } = req.params;
+    const { institut, degree, fieldOfStudy, startDate, endDate, description } =
+      req.body;
+
+    const candidate = await Candidate.findOne({ userId });
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil introuvable." });
+    }
+
+    const edu = candidate.education.id(educationId);
+    if (!edu) {
+      return res.status(404).json({ msg: "Formation introuvable." });
+    }
+
+    if (institut) edu.institut = institut;
+    if (degree) edu.degree = degree;
+    if (fieldOfStudy !== undefined) edu.fieldOfStudy = fieldOfStudy;
+    if (startDate) edu.startDate = startDate;
+    if (endDate !== undefined) edu.endDate = endDate;
+    if (description !== undefined) edu.description = description;
+
+    await candidate.save();
+
+    res.json({
+      msg: "Formation mise à jour ✅",
+      education: candidate.education,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const deleteEducation = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { educationId } = req.params;
+
+    const candidate = await Candidate.findOne({ userId });
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil introuvable." });
+    }
+
+    candidate.education.pull(educationId);
+    await candidate.save();
+
+    res.json({ msg: "Formation supprimée 🗑️", education: candidate.education });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+
+export const getFavorites = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const candidate = await Candidate.findOne({ userId }).populate({
+      path: "favoris.offerId",
+      select:
+        "titre companyId type wilaya salaryMin salaryMax datePublication actif validationStatus",
+      populate: {
+        path: "companyId",
+        select: "name logo location",
+      },
+    });
+
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil introuvable." });
+    }
+
+    
+    const validFavorites = candidate.favoris
+      .filter((f) => f.offerId !== null)
+      .map((f) => ({
+        _id: f._id,
+        savedAt: f.savedAt,
+        offer: {
+          _id: f.offerId._id,
+          titre: f.offerId.titre,
+          type: f.offerId.type,
+          wilaya: f.offerId.wilaya,
+          salaryMin: f.offerId.salaryMin,
+          salaryMax: f.offerId.salaryMax,
+          datePublication: f.offerId.datePublication,
+          isActive:
+            f.offerId.actif && f.offerId.validationStatus === "approved",
+          company: {
+            name: f.offerId.companyId?.name,
+            logo: f.offerId.companyId?.logo,
+            location: f.offerId.companyId?.location,
+          },
+        },
+      }));
+
+    res.json(validFavorites);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const addToFavorites = async (req, res) => {
+  try {
+    const { offerId } = req.params;
+    const userId = req.user.id;
+
+    const offerExists = await Offer.exists({
+      _id: offerId,
+      actif: true,
+      validationStatus: "approved",
+    });
+    if (!offerExists) {
+      return res.status(404).json({ msg: "Offre introuvable ou inactive." });
+    }
+
+    const candidateCheck = await Candidate.findOne({
+      userId,
+      "favoris.offerId": offerId,
+    });
+
+    if (candidateCheck) {
+      return res
+        .status(400)
+        .json({ msg: "Cette offre est déjà dans vos favoris." });
+    }
+
+    const updatedCandidate = await Candidate.findOneAndUpdate(
+      { userId },
+      {
+        $push: {
+          favoris: {
+            offerId: offerId,
+            savedAt: new Date(),
+          },
+        },
+      },
+      { new: true },
+    );
+
+    if (!updatedCandidate) {
+      return res.status(404).json({ msg: "Profil candidat introuvable." });
+    }
+
+    res.json({
+      msg: "Offre ajoutée aux favoris ❤️",
+      favorisCount: updatedCandidate.favoris.length,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const removeFromFavorites = async (req, res) => {
+  try {
+    const { offerId } = req.params;
+    const userId = req.user.id;
+
+    const updatedCandidate = await Candidate.findOneAndUpdate(
+      { userId },
+      {
+        $pull: {
+          favoris: { offerId: offerId },
+        },
+      },
+      { new: true },
+    );
+
+    if (!updatedCandidate) {
+      return res.status(404).json({ msg: "Profil candidat introuvable." });
+    }
+
+    res.json({
+      msg: "Offre retirée des favoris 💔",
+      favorisCount: updatedCandidate.favoris.length,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+
+export const applyToOffer = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { offreId, cvUrl, coverLetter } = req.body;
+
+    const candidate = await Candidate.findOne({ userId });
+    const user = await User.findById(userId);
+
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil introuvable." });
+    }
+
+    if (!user.emailVerified) {
+      return res.status(403).json({
+        msg: "Email non vérifié.",
+        code: "EMAIL_NOT_VERIFIED",
+      });
+    }
+
+    const completion = calculateProfileCompletion(candidate, user);
+    if (!completion.canApply) {
+      return res.status(400).json({
+        msg: "Profil incomplet.",
+        missing: completion.missingForApplication,
+      });
+    }
+
+    const cvExists = candidate.cvs.some((cv) => cv.url === cvUrl);
+    if (!cvExists) {
+      return res.status(400).json({ msg: "CV invalide." });
+    }
+
+    const offer = await Offer.findById(offreId);
+    if (!offer || !offer.actif || offer.validationStatus !== "approved") {
+      return res
+        .status(400)
+        .json({ msg: "Cette offre n'est plus disponible." });
+    }
+
+    
+    const existingApp = await Application.findOne({
+      offerId: offreId,
+      candidateId: candidate._id,
+    });
+
+    if (existingApp) {
+      const activeStatuses = ["envoyee", "en_cours", "retenue", "non_retenue"];
+
+      if (activeStatuses.includes(existingApp.candidateStatus)) {
+        return res.status(400).json({
+          msg: "Vous avez déjà une candidature active pour cette offre.",
+        });
+      }
+
+      if (["cancelled", "retiree"].includes(existingApp.candidateStatus)) {
+        if (offer.allowRepostulation === false) {
+          return res.status(403).json({
+            msg: "L'employeur n'accepte pas les repostulations pour cette offre.",
+          });
+        }
+
+        const wasWithdrawn = existingApp.candidateStatus === "retiree";
+
+        existingApp.candidateStatus = "envoyee";
+        existingApp.recruiterStatus = "nouvelle";
+        existingApp.cvUrl = cvUrl;
+        existingApp.coverLetter = coverLetter || "";
+        existingApp.seenByRecruiter = false;
+        existingApp.seenAt = null;
+        existingApp.datePostulation = new Date();
+        existingApp.isRepostulation = true;
+        existingApp.withdrawReason = undefined;
+        existingApp.withdrawnAt = undefined;
+
+        existingApp.statusHistory.push({
+          candidateStatus: "envoyee",
+          recruiterStatus: "nouvelle",
+          changedBy: userId,
+          note: wasWithdrawn
+            ? "Repostulation après retrait"
+            : "Nouvelle postulation après annulation",
+        });
+
+        await existingApp.save();
+
+        await Offer.findByIdAndUpdate(offreId, {
+          $inc: { nombreCandidatures: 1 },
+        });
+
+        return res.json({
+          msg: "Candidature envoyée avec succès ✅",
+          applicationId: existingApp._id,
+          reactivated: true,
+        });
+      }
+    }
+
+    
+    const company = await Company.findById(offer.companyId);
+
+    const newApplication = await Application.create({
+      offerId: offreId,
+      candidateId: candidate._id,
+      cvUrl,
+      coverLetter: coverLetter || "",
+      candidateStatus: "envoyee",
+      recruiterStatus: "nouvelle",
+      source: "direct",
+      isRepostulation: false,
+      offerSnapshot: {
+        titre: offer.titre,
+        entrepriseNom: company?.name || "Entreprise",
+        companyId: offer.companyId,
+        location: offer.wilaya,
+        salaryMin: offer.salaryMin,
+        salaryMax: offer.salaryMax,
+        type: offer.type,
+      },
+    });
+
+    await Offer.findByIdAndUpdate(offreId, {
+      $inc: { nombreCandidatures: 1 },
+    });
+
+    res.json({
+      msg: "Candidature envoyée avec succès ✅",
+      applicationId: newApplication._id,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+
+export const getCandidateStats = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id });
+    if (!candidate) {
+      return res.status(404).json({ msg: "Candidat introuvable" });
+    }
+
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+    const [
+      totalApplications,
+      applicationsByStatus,
+      recentApplications,
+      weeklyApplications,
+      viewedApplications,
+      upcomingInterviews,
+      pendingInterviewResponses,
+    ] = await Promise.all([
+      Application.countDocuments({ candidateId: candidate._id }),
+      Application.aggregate([
+        { $match: { candidateId: candidate._id } },
+        { $group: { _id: "$candidateStatus", count: { $sum: 1 } } },
+      ]),
+      Application.countDocuments({
+        candidateId: candidate._id,
+        datePostulation: { $gte: thirtyDaysAgo },
+      }),
+      Application.countDocuments({
+        candidateId: candidate._id,
+        datePostulation: { $gte: sevenDaysAgo },
+      }),
+      Application.countDocuments({
+        candidateId: candidate._id,
+        seenByRecruiter: true,
+      }),
+      Interview.countDocuments({
+        candidateId: candidate._id,
+        status: "confirmed",
+        scheduledAt: { $gte: new Date() },
+      }),
+      Interview.countDocuments({
+        candidateId: candidate._id,
+        status: "proposed",
+        scheduledAt: { $gte: new Date() },
+      }),
+    ]);
+
+    const statusMap = {};
+    applicationsByStatus.forEach((item) => {
+      statusMap[item._id] = item.count;
+    });
+
+    const responded =
+      (statusMap["retenue"] || 0) +
+      (statusMap["non_retenue"] || 0) +
+      (statusMap["en_cours"] || 0);
+
+    const responseRate =
+      totalApplications > 0
+        ? Math.round((responded / totalApplications) * 100)
+        : 0;
+
+    const viewRate =
+      totalApplications > 0
+        ? Math.round((viewedApplications / totalApplications) * 100)
+        : 0;
+
+    const user = await User.findById(req.user.id);
+    const profileCompletion = calculateProfileCompletion(candidate, user);
+
+    
+    const suggestions = [];
+
+    if (!user.emailVerified) {
+      suggestions.push({
+        type: "critical",
+        priority: 1,
+        message: "Confirmez votre email pour postuler aux offres",
+        action: "verify_email",
+        icon: "mail",
+      });
+    }
+
+    if (profileCompletion.percentage < 100) {
+      suggestions.push({
+        type: "important",
+        priority: 2,
+        message: `Complétez votre profil (${profileCompletion.percentage}%)`,
+        action: "complete_profile",
+        missing: profileCompletion.missing,
+        icon: "user",
+      });
+    }
+
+    if (candidate.cvs.length === 0) {
+      suggestions.push({
+        type: "important",
+        priority: 3,
+        message: "Ajoutez votre CV pour augmenter vos chances",
+        action: "upload_cv",
+        icon: "file",
+      });
+    }
+
+    if (candidate.skills.length < 3) {
+      suggestions.push({
+        type: "suggestion",
+        priority: 4,
+        message:
+          "Ajoutez plus de compétences pour de meilleures recommandations",
+        action: "add_skills",
+        icon: "star",
+      });
+    }
+
+    if (pendingInterviewResponses > 0) {
+      suggestions.push({
+        type: "urgent",
+        priority: 0,
+        message: `${pendingInterviewResponses} proposition(s) d'entretien en attente`,
+        action: "view_interviews",
+        icon: "calendar",
+      });
+    }
+
+    
+    suggestions.sort((a, b) => a.priority - b.priority);
+
+    res.json({
+      applications: {
+        total: totalApplications,
+        thisMonth: recentApplications,
+        thisWeek: weeklyApplications,
+        byStatus: statusMap,
+      },
+      interviews: {
+        upcoming: upcomingInterviews,
+        pendingResponse: pendingInterviewResponses,
+      },
+      favorites: candidate.favoris.length,
+      rates: {
+        response: responseRate,
+        view: viewRate,
+      },
+      completion: profileCompletion,
+      suggestions,
+      cvCount: candidate.cvs.length,
+      skillCount: candidate.skills.length,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getActivityTimeline = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id });
+    if (!candidate) {
+      return res.status(404).json({ msg: "Candidat introuvable" });
+    }
+
+    const { limit = 20 } = req.query;
+
+    
+    const recentApplications = await Application.find({
+      candidateId: candidate._id,
+    })
+      .sort({ updatedAt: -1 })
+      .limit(parseInt(limit))
+      .populate({
+        path: "offerId",
+        select: "titre",
+        populate: { path: "companyId", select: "name logo" },
+      })
+      .lean();
+
+    
+    const recentInterviews = await Interview.find({
+      candidateId: candidate._id,
+    })
+      .sort({ updatedAt: -1 })
+      .limit(10)
+      .populate("offerId", "titre")
+      .lean();
+
+    
+    const activities = [
+      ...recentApplications.map((app) => ({
+        type: "application",
+        date: app.updatedAt,
+        title:
+          app.offerId?.titre || app.offerSnapshot?.titre || "Offre supprimée",
+        company:
+          app.offerId?.companyId?.name || app.offerSnapshot?.entrepriseNom,
+        companyLogo: app.offerId?.companyId?.logo,
+        status: app.candidateStatus,
+        applicationId: app._id,
+        icon: getApplicationIcon(app.candidateStatus),
+      })),
+      ...recentInterviews.map((interview) => ({
+        type: "interview",
+        date: interview.updatedAt,
+        title: interview.offerId?.titre || "Offre supprimée",
+        status: interview.status,
+        scheduledAt: interview.scheduledAt,
+        interviewType: interview.type,
+        interviewId: interview._id,
+        icon: getInterviewIcon(interview.status),
+      })),
+    ];
+
+    
+    activities.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+    res.json(activities.slice(0, parseInt(limit)));
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+function getApplicationIcon(status) {
+  const icons = {
+    envoyee: "send",
+    en_cours: "clock",
+    retenue: "check-circle",
+    non_retenue: "x-circle",
+    retiree: "arrow-left",
+    cancelled: "x",
+  };
+  return icons[status] || "file";
+}
+
+function getInterviewIcon(status) {
+  const icons = {
+    proposed: "calendar-plus",
+    confirmed: "calendar-check",
+    completed: "check",
+    cancelled_by_candidate: "x",
+    cancelled_by_recruiter: "x",
+  };
+  return icons[status] || "calendar";
+}
+
+
+
+export const getRecommendedOffers = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id });
+
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil candidat introuvable" });
+    }
+
+    
+    const appliedOfferIds = await Application.find({
+      candidateId: candidate._id,
+    }).distinct("offerId");
+
+    
+    const baseQuery = {
+      actif: true,
+      validationStatus: "approved",
+      _id: { $nin: appliedOfferIds },
+    };
+
+    
+    const candidateSkills = (candidate.skills || [])
+      .map((s) => s.name?.trim().toLowerCase())
+      .filter(Boolean);
+
+    const candidateWilaya = candidate.residence?.wilaya;
+    const desiredPosition = candidate.desiredPosition?.toLowerCase();
+    const desiredJobTypes = candidate.desiredJobTypes || [];
+
+    
+    if (candidateSkills.length === 0 && !candidateWilaya && !desiredPosition) {
+      const popularOffers = await Offer.find(baseQuery)
+        .populate("companyId", "name logo location")
+        .sort({ nombreCandidatures: -1 })
+        .limit(10)
+        .lean();
+
+      return res.json(
+        popularOffers.map((o) => ({
+          ...o,
+          matchScore: 0,
+          matchReasons: ["Offres populaires"],
+        })),
+      );
+    }
+
+    
+    const queryConditions = [];
+
+    
+    if (candidateSkills.length > 0) {
+      queryConditions.push({
+        skills: {
+          $in: candidateSkills.map((s) => new RegExp(s, "i")),
+        },
+      });
+    }
+
+    
+    if (candidateWilaya) {
+      queryConditions.push({ wilaya: candidateWilaya });
+    }
+
+    
+    if (desiredPosition) {
+      queryConditions.push({
+        titre: { $regex: desiredPosition, $options: "i" },
+      });
+    }
+
+    
+    if (desiredJobTypes.length > 0) {
+      queryConditions.push({ type: { $in: desiredJobTypes } });
+    }
+
+    
+    let offerQuery = { ...baseQuery };
+    if (queryConditions.length > 0) {
+      offerQuery.$or = queryConditions;
+    }
+
+    const offers = await Offer.find(offerQuery)
+      .populate("companyId", "name logo location industry")
+      .sort({ datePublication: -1 })
+      .limit(50)
+      .lean();
+
+    
+    const scoredOffers = offers.map((offer) => {
+      let score = 0;
+      const matchReasons = [];
+
+      
+      const offerSkills = (offer.skills || []).map((s) =>
+        s.trim().toLowerCase(),
+      );
+      const matchingSkills = offerSkills.filter((skill) =>
+        candidateSkills.some((cs) => skill.includes(cs) || cs.includes(skill)),
+      );
+      if (matchingSkills.length > 0) {
+        const skillScore = Math.min(
+          (matchingSkills.length / Math.max(offerSkills.length, 1)) * 40,
+          40,
+        );
+        score += skillScore;
+        matchReasons.push(
+          `${matchingSkills.length} compétence(s) correspondante(s)`,
+        );
+      }
+
+      
+      if (candidateWilaya && offer.wilaya === candidateWilaya) {
+        score += 25;
+        matchReasons.push("Même wilaya");
+      }
+
+      
+      if (desiredJobTypes.length > 0 && desiredJobTypes.includes(offer.type)) {
+        score += 20;
+        matchReasons.push("Type de contrat souhaité");
+      }
+
+      
+      if (
+        desiredPosition &&
+        offer.titre.toLowerCase().includes(desiredPosition)
+      ) {
+        score += 15;
+        matchReasons.push("Correspond au poste recherché");
+      }
+
+      
+      const isNew =
+        new Date() - new Date(offer.datePublication) < 7 * 24 * 60 * 60 * 1000;
+      if (isNew) {
+        score += 5;
+        matchReasons.push("Offre récente");
+      }
+
+      return {
+        ...offer,
+        matchScore: Math.round(score),
+        matchReasons,
+        matchingSkills,
+        isNew,
+      };
+    });
+
+    
+    scoredOffers.sort((a, b) => {
+      if (b.matchScore !== a.matchScore) {
+        return b.matchScore - a.matchScore;
+      }
+      return (
+        new Date(b.datePublication).getTime() -
+        new Date(a.datePublication).getTime()
+      );
+    });
+
+    
+    res.json(scoredOffers.slice(0, 10));
+  } catch (err) {
+    console.error("Recommendation error:", err);
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+=== controllers\conversationController.js ===
+import Conversation from "../models/Conversation.js";
+import Application from "../models/Application.js";
+import Offer from "../models/Offer.js";
+import Candidate from "../models/Candidate.js";
+import Recruiter from "../models/Recruiter.js";
+import Notification from "../models/Notification.js";
+import { mapRecruiterToCandidate } from "../utils/statusMapping.js";
+
+
+
+
+export const openConversation = async (req, res) => {
+  try {
+    const recruiter = await Recruiter.findOne({ userId: req.user.id });
+    const { applicationId } = req.params;
+    const { initialMessage } = req.body;
+
+    const application =
+      await Application.findById(applicationId).populate("offerId");
+
+    if (!application) {
+      return res.status(404).json({ msg: "Candidature introuvable" });
+    }
+
+    if (
+      application.offerId.recruteurId.toString() !== recruiter._id.toString()
+    ) {
+      return res.status(403).json({ msg: "Non autorisé" });
+    }
+
+    
+    let conversation = await Conversation.findOne({ applicationId });
+
+    if (conversation) {
+      return res.status(400).json({
+        msg: "Une conversation existe déjà pour cette candidature",
+        conversationId: conversation._id,
+      });
+    }
+
+    
+    conversation = await Conversation.create({
+      applicationId,
+      offerId: application.offerId._id,
+      candidateId: application.candidateId,
+      recruiterId: recruiter._id,
+      openedBy: req.user.id,
+      messages: initialMessage
+        ? [
+            {
+              senderId: req.user.id,
+              senderType: "recruiter",
+              content: initialMessage,
+            },
+          ]
+        : [],
+      unreadByCandidate: initialMessage ? 1 : 0,
+      lastMessageAt: initialMessage ? new Date() : null,
+    });
+
+    
+    if (
+      application.recruiterStatus !== "en_discussion" &&
+      ![
+        "entretien_planifie",
+        "entretien_termine",
+        "retenue",
+        "refusee",
+      ].includes(application.recruiterStatus)
+    ) {
+      application.recruiterStatus = "en_discussion";
+      application.candidateStatus = mapRecruiterToCandidate("en_discussion");
+      application.statusHistory.push({
+        candidateStatus: application.candidateStatus,
+        recruiterStatus: "en_discussion",
+        changedBy: req.user.id,
+        note: "Conversation ouverte",
+      });
+      await application.save();
+    }
+
+    
+    if (initialMessage) {
+      const candidate = await Candidate.findById(application.candidateId);
+      await Notification.create({
+        userId: candidate.userId,
+        message: `Nouveau message du recruteur pour "${application.offerId.titre}"`,
+        type: "info",
+      });
+    }
+
+    res.status(201).json({ msg: "Conversation ouverte", conversation });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const sendMessageAsRecruiter = async (req, res) => {
+  try {
+    const recruiter = await Recruiter.findOne({ userId: req.user.id });
+    const { conversationId } = req.params;
+    const { content } = req.body;
+    const attachments = req.files?.map((f) => f.path.replace(/\\/g, "/")) || [];
+
+    const conversation = await Conversation.findOne({
+      _id: conversationId,
+      recruiterId: recruiter._id,
+      status: "active",
+    });
+
+    if (!conversation) {
+      return res
+        .status(404)
+        .json({ msg: "Conversation introuvable ou fermée" });
+    }
+
+    conversation.messages.push({
+      senderId: req.user.id,
+      senderType: "recruiter",
+      content,
+      attachments,
+    });
+    conversation.unreadByCandidate += 1;
+    conversation.lastMessageAt = new Date();
+    await conversation.save();
+
+    
+    const candidate = await Candidate.findById(conversation.candidateId);
+    await Notification.create({
+      userId: candidate.userId,
+      message: `Nouveau message du recruteur`,
+      type: "info",
+    });
+
+    res.json({
+      msg: "Message envoyé",
+      message: conversation.messages.slice(-1)[0],
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const getRecruiterConversations = async (req, res) => {
+  try {
+    const recruiter = await Recruiter.findOne({ userId: req.user.id });
+    const { offerId, hasUnread, isActive } = req.query;
+
+    let query = { recruiterId: recruiter._id, status: "active" };
+
+    if (offerId) query.offerId = offerId;
+    if (hasUnread === "true") query.unreadByRecruiter = { $gt: 0 };
+
+    
+    if (isActive === "true") query.candidateHasReplied = true;
+    if (isActive === "false") query.candidateHasReplied = false;
+
+    const conversations = await Conversation.find(query)
+      .sort({ lastMessageAt: -1 })
+      .populate({
+        path: "candidateId",
+        select: "profilePicture userId",
+        populate: { path: "userId", select: "nom" },
+      })
+      .populate("offerId", "titre")
+      .lean();
+
+    const enriched = conversations.map((c) => ({
+      _id: c._id,
+      applicationId: c.applicationId,
+      offer: { _id: c.offerId?._id, titre: c.offerId?.titre },
+      candidate: {
+        nom: c.candidateId?.userId?.nom,
+        profilePicture: c.candidateId?.profilePicture,
+      },
+      lastMessage: c.messages?.slice(-1)[0],
+      unreadCount: c.unreadByRecruiter,
+      lastMessageAt: c.lastMessageAt,
+    }));
+
+    res.json(enriched);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+
+
+export const getCandidateConversations = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id });
+
+    const conversations = await Conversation.find({
+      candidateId: candidate._id,
+      status: "active",
+    })
+      .sort({ lastMessageAt: -1 })
+      .populate("offerId", "titre companyId")
+      .populate({
+        path: "offerId",
+        populate: { path: "companyId", select: "name logo" },
+      })
+      .lean();
+
+    const enriched = conversations.map((c) => ({
+      _id: c._id,
+      applicationId: c.applicationId,
+      offer: {
+        titre: c.offerId?.titre,
+        entreprise: c.offerId?.companyId?.name,
+        logo: c.offerId?.companyId?.logo,
+      },
+      lastMessage: c.messages?.slice(-1)[0],
+      unreadCount: c.unreadByCandidate,
+      lastMessageAt: c.lastMessageAt,
+    }));
+
+    res.json(enriched);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const getConversationMessages = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id });
+    const { conversationId } = req.params;
+
+    
+    const conversation = await Conversation.findOne({
+      _id: conversationId,
+      candidateId: candidate._id,
+    })
+      .populate({
+        path: "offerId",
+        select: "titre companyId",
+        populate: {
+          path: "companyId",
+          select: "name logo", 
+        },
+      })
+      .lean();
+
+    if (!conversation) {
+      return res.status(404).json({ msg: "Conversation introuvable" });
+    }
+
+    
+    await Conversation.findByIdAndUpdate(conversationId, {
+      unreadByCandidate: 0,
+    });
+
+    
+    await Conversation.updateOne(
+      { _id: conversationId },
+      { $set: { "messages.$[elem].readAt": new Date() } },
+      {
+        arrayFilters: [
+          { "elem.readAt": { $exists: false }, "elem.senderType": "recruiter" },
+        ],
+      },
+    );
+
+    
+    res.json({
+      _id: conversation._id,
+      applicationId: conversation.applicationId,
+      status: conversation.status,
+      
+      context: {
+        offerId: conversation.offerId?._id,
+        offerTitle: conversation.offerId?.titre || "Offre supprimée",
+        companyName:
+          conversation.offerId?.companyId?.name || "Entreprise inconnue",
+        companyLogo: conversation.offerId?.companyId?.logo,
+      },
+      messages: conversation.messages,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const sendMessageAsCandidate = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id });
+    const { conversationId } = req.params;
+    const { content } = req.body;
+    const attachments = req.files?.map((f) => f.path.replace(/\\/g, "/")) || [];
+
+    const conversation = await Conversation.findOne({
+      _id: conversationId,
+      candidateId: candidate._id,
+      status: "active",
+    });
+
+    if (!conversation) {
+      return res
+        .status(404)
+        .json({ msg: "Conversation introuvable ou fermée" });
+    }
+
+    
+    if (!conversation.candidateHasReplied) {
+      conversation.candidateHasReplied = true;
+      conversation.firstCandidateReplyAt = new Date();
+    }
+
+    conversation.messages.push({
+      senderId: req.user.id,
+      senderType: "candidate",
+      content,
+      attachments,
+    });
+    conversation.unreadByRecruiter += 1;
+    conversation.lastMessageAt = new Date();
+    await conversation.save();
+
+    
+    const recruiter = await Recruiter.findById(conversation.recruiterId);
+    await Notification.create({
+      userId: recruiter.userId,
+      message: `Nouvelle réponse d'un candidat`,
+      type: "info",
+    });
+
+    res.json({
+      msg: "Message envoyé",
+      message: conversation.messages.slice(-1)[0],
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+export const getRecruiterConversationMessages = async (req, res) => {
+  try {
+    const recruiter = await Recruiter.findOne({ userId: req.user.id });
+    const { conversationId } = req.params;
+
+    const conversation = await Conversation.findOne({
+      _id: conversationId,
+      recruiterId: recruiter._id, 
+    })
+      .populate("candidateId", "profilePicture")
+      .populate({
+        path: "candidateId",
+        populate: { path: "userId", select: "nom" },
+      })
+      .populate("offerId", "titre")
+      .lean();
+
+    if (!conversation) {
+      return res.status(404).json({ msg: "Conversation introuvable" });
+    }
+
+    
+    await Conversation.findByIdAndUpdate(conversationId, {
+      unreadByRecruiter: 0,
+    });
+
+    res.json({
+      _id: conversation._id,
+      applicationId: conversation.applicationId,
+      candidateId: conversation.candidateId?._id,
+      offer: { titre: conversation.offerId?.titre },
+      candidate: {
+        nom: conversation.candidateId?.userId?.nom,
+        profilePicture: conversation.candidateId?.profilePicture,
+      },
+      messages: conversation.messages,
+      status: conversation.status,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+=== controllers\interviewController.js ===
+import Interview from "../models/Interview.js";
+import Application from "../models/Application.js";
+import Offer from "../models/Offer.js";
+import Candidate from "../models/Candidate.js";
+import Recruiter from "../models/Recruiter.js";
+import Notification from "../models/Notification.js";
+import { mapRecruiterToCandidate } from "../utils/statusMapping.js";
+
+
+
+
+export const proposeInterview = async (req, res) => {
+  try {
+    const recruiter = await Recruiter.findOne({ userId: req.user.id });
+    const { applicationId } = req.params;
+    const {
+      type,
+      scheduledAt,
+      duration,
+      location,
+      meetingLink,
+      phoneNumber,
+      preparationNotes,
+    } = req.body;
+
+    const application =
+      await Application.findById(applicationId).populate("offerId");
+
+    if (!application) {
+      return res.status(404).json({ msg: "Candidature introuvable" });
+    }
+
+    if (
+      application.offerId.recruteurId.toString() !== recruiter._id.toString()
+    ) {
+      return res.status(403).json({ msg: "Non autorisé" });
+    }
+
+    
+    const allowedStatuses = [
+      "consultee",
+      "preselection",
+      "en_discussion",
+      "entretien_termine",
+    ];
+    if (!allowedStatuses.includes(application.recruiterStatus)) {
+      return res.status(400).json({
+        msg: "Cette candidature ne peut pas recevoir d'entretien dans son état actuel",
+      });
+    }
+
+    const interview = await Interview.create({
+      applicationId,
+      offerId: application.offerId._id,
+      candidateId: application.candidateId,
+      recruiterId: recruiter._id,
+      type,
+      scheduledAt: new Date(scheduledAt),
+      duration: duration || 30,
+      location,
+      meetingLink,
+      phoneNumber,
+      preparationNotes,
+      status: "proposed",
+    });
+
+    
+    if (application.recruiterStatus !== "entretien_planifie") {
+      application.recruiterStatus = "entretien_planifie";
+      application.candidateStatus =
+        mapRecruiterToCandidate("entretien_planifie");
+      application.statusHistory.push({
+        candidateStatus: application.candidateStatus,
+        recruiterStatus: "entretien_planifie",
+        changedBy: req.user.id,
+        note: "Entretien proposé",
+      });
+      await application.save();
+    }
+
+    
+    const candidate = await Candidate.findById(application.candidateId);
+    await Notification.create({
+      userId: candidate.userId,
+      message: `Un entretien vous est proposé pour "${
+        application.offerId.titre
+      }" le ${new Date(scheduledAt).toLocaleDateString("fr-FR")}`,
+      type: "validation",
+    });
+
+    res.status(201).json({ msg: "Entretien proposé", interview });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const getRecruiterInterviews = async (req, res) => {
+  try {
+    const recruiter = await Recruiter.findOne({ userId: req.user.id });
+    const { status, upcoming, page = 1, limit = 20 } = req.query;
+
+    let query = { recruiterId: recruiter._id };
+
+    if (status) {
+      query.status = status;
+    }
+
+    if (upcoming === "true") {
+      query.scheduledAt = { $gte: new Date() };
+      query.status = {
+        $in: ["proposed", "confirmed", "rescheduled_by_candidate"],
+      };
+    }
+
+    const skip = (page - 1) * limit;
+
+    const [interviews, total] = await Promise.all([
+      Interview.find(query)
+        .sort({ scheduledAt: 1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .populate({
+          path: "candidateId",
+          select: "profilePicture userId",
+          populate: { path: "userId", select: "nom email" },
+        })
+        .populate("offerId", "titre")
+        .lean(),
+      Interview.countDocuments(query),
+    ]);
+
+    
+    const enriched = interviews.map((i) => ({
+      ...i,
+      needsAction: i.status === "rescheduled_by_candidate",
+      isToday:
+        new Date(i.scheduledAt).toDateString() === new Date().toDateString(),
+      isPast: new Date(i.scheduledAt) < new Date(),
+    }));
+
+    res.json({
+      data: enriched,
+      meta: {
+        total,
+        page: parseInt(page),
+        totalPages: Math.ceil(total / limit),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getRecruiterInterviewsGrouped = async (req, res) => {
+  try {
+    const recruiter = await Recruiter.findOne({ userId: req.user.id });
+    const { view = "upcoming" } = req.query; 
+
+    const now = new Date();
+    const sevenDaysAgo = new Date(now - 7 * 24 * 60 * 60 * 1000);
+
+    let query = { recruiterId: recruiter._id };
+
+    if (view === "upcoming") {
+      query.scheduledAt = { $gte: now };
+      query.status = {
+        $in: [
+          "proposed",
+          "confirmed",
+          "rescheduled_by_candidate",
+          "rescheduled_by_recruiter",
+        ],
+      };
+    } else if (view === "recent") {
+      query.scheduledAt = { $gte: sevenDaysAgo, $lt: now };
+    }
+
+    const interviews = await Interview.find(query)
+      .sort({ scheduledAt: view === "upcoming" ? 1 : -1 })
+      .populate({
+        path: "candidateId",
+        select: "profilePicture userId",
+        populate: { path: "userId", select: "nom" },
+      })
+      .populate("offerId", "titre")
+      .lean();
+
+    
+    const grouped = interviews.reduce((acc, interview) => {
+      const dateKey = new Date(interview.scheduledAt)
+        .toISOString()
+        .split("T")[0];
+      if (!acc[dateKey]) {
+        acc[dateKey] = [];
+      }
+      acc[dateKey].push({
+        _id: interview._id,
+        type: interview.type,
+        scheduledAt: interview.scheduledAt,
+        duration: interview.duration,
+        status: interview.status,
+        location: interview.location,
+        meetingLink: interview.meetingLink,
+        candidate: {
+          nom: interview.candidateId?.userId?.nom,
+          profilePicture: interview.candidateId?.profilePicture,
+        },
+        offer: {
+          _id: interview.offerId?._id,
+          titre: interview.offerId?.titre,
+        },
+        needsAction: interview.status === "rescheduled_by_candidate",
+      });
+      return acc;
+    }, {});
+
+    res.json({
+      grouped,
+      total: interviews.length,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const acceptAlternativeDate = async (req, res) => {
+  try {
+    const recruiter = await Recruiter.findOne({ userId: req.user.id });
+    const { interviewId } = req.params;
+
+    const interview = await Interview.findOne({
+      _id: interviewId,
+      recruiterId: recruiter._id,
+      status: "rescheduled_by_candidate",
+    });
+
+    if (!interview) {
+      return res
+        .status(404)
+        .json({ msg: "Entretien introuvable ou pas de proposition" });
+    }
+
+    interview.scheduledAt = interview.proposedAlternative.date;
+    interview.status = "confirmed";
+    interview.proposedAlternative = undefined;
+    await interview.save();
+
+    
+    const candidate = await Candidate.findById(interview.candidateId);
+    await Notification.create({
+      userId: candidate.userId,
+      message: `Votre nouvelle date d'entretien a été confirmée`,
+      type: "validation",
+    });
+
+    res.json({ msg: "Nouvelle date acceptée", interview });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const rescheduleByRecruiter = async (req, res) => {
+  try {
+    const recruiter = await Recruiter.findOne({ userId: req.user.id });
+    const { interviewId } = req.params;
+    const { newDate, message } = req.body;
+
+    const interview = await Interview.findOne({
+      _id: interviewId,
+      recruiterId: recruiter._id,
+    });
+
+    if (!interview) {
+      return res.status(404).json({ msg: "Entretien introuvable" });
+    }
+
+    interview.scheduledAt = new Date(newDate);
+    interview.status = "rescheduled_by_recruiter";
+    interview.proposedAlternative = {
+      date: new Date(newDate),
+      proposedBy: "recruiter",
+      message,
+      proposedAt: new Date(),
+    };
+    await interview.save();
+
+    const candidate = await Candidate.findById(interview.candidateId);
+    await Notification.create({
+      userId: candidate.userId,
+      message: `L'entretien a été reprogrammé, veuillez confirmer la nouvelle date`,
+      type: "validation",
+    });
+
+    res.json({ msg: "Entretien reprogrammé", interview });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const cancelInterviewByRecruiter = async (req, res) => {
+  try {
+    const recruiter = await Recruiter.findOne({ userId: req.user.id });
+    const { interviewId } = req.params;
+    const { reason } = req.body;
+
+    const interview = await Interview.findOneAndUpdate(
+      {
+        _id: interviewId,
+        recruiterId: recruiter._id,
+        status: {
+          $in: [
+            "proposed",
+            "confirmed",
+            "rescheduled_by_candidate",
+            "rescheduled_by_recruiter",
+          ],
+        },
+      },
+      {
+        status: "cancelled_by_recruiter",
+        recruiterNotes: reason,
+      },
+      { new: true },
+    );
+
+    if (!interview) {
+      return res
+        .status(404)
+        .json({ msg: "Entretien introuvable ou déjà terminé" });
+    }
+
+    const candidate = await Candidate.findById(interview.candidateId);
+    await Notification.create({
+      userId: candidate.userId,
+      message: `L'entretien prévu a été annulé par le recruteur`,
+      type: "info",
+    });
+
+    res.json({ msg: "Entretien annulé", interview });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const completeInterview = async (req, res) => {
+  try {
+    const recruiter = await Recruiter.findOne({ userId: req.user.id });
+    const { interviewId } = req.params;
+
+    const { rating, notes, strengths, concerns, recommendation, status } =
+      req.body;
+
+    const interview = await Interview.findOne({
+      _id: interviewId,
+      recruiterId: recruiter._id,
+    });
+
+    if (!interview) {
+      return res.status(404).json({ msg: "Entretien introuvable" });
+    }
+
+    interview.status = "completed";
+    interview.feedback = {
+      rating,
+      notes,
+      strengths,
+      concerns,
+      recommendation,
+      completedAt: new Date(),
+    };
+
+    await interview.save();
+
+    if (status === "retenue" || status === "refusee") {
+      const application = await Application.findById(interview.applicationId);
+
+      application.recruiterStatus = status;
+
+      if (status === "retenue") {
+        application.candidateStatus = "retenue";
+        application.dateDecision = new Date();
+      } else {
+        application.candidateStatus = "non_retenue";
+        application.dateDecision = new Date();
+      }
+
+      application.statusHistory.push({
+        candidateStatus: application.candidateStatus,
+        recruiterStatus: status,
+        changedBy: req.user.id,
+        note: `Décision finale après entretien: ${recommendation}`,
+      });
+
+      await application.save();
+    } else {
+      const pendingInterviews = await Interview.countDocuments({
+        applicationId: interview.applicationId,
+        status: { $in: ["proposed", "confirmed"] },
+      });
+
+      if (pendingInterviews === 0) {
+        const application = await Application.findById(interview.applicationId);
+
+        if (
+          application.recruiterStatus !== "retenue" &&
+          application.recruiterStatus !== "refusee"
+        ) {
+          application.recruiterStatus = "entretien_termine";
+          application.candidateStatus =
+            mapRecruiterToCandidate("entretien_termine");
+
+          application.statusHistory.push({
+            candidateStatus: application.candidateStatus,
+            recruiterStatus: "entretien_termine",
+            changedBy: req.user.id,
+            note: "Tous les entretiens terminés",
+          });
+
+          await application.save();
+        }
+      }
+    }
+
+    res.json({
+      msg: "Entretien terminé et décision enregistrée",
+      interview,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+
+
+export const getCandidateInterviews = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id });
+    const { upcoming } = req.query;
+
+    let query = { candidateId: candidate._id };
+
+    if (upcoming === "true") {
+      query.scheduledAt = { $gte: new Date() };
+      
+      query.status = {
+        $nin: [
+          "cancelled_by_candidate",
+          "cancelled_by_recruiter",
+          "completed",
+          "no_show_candidate",
+          "no_show_recruiter",
+        ],
+      };
+    }
+
+    const interviews = await Interview.find(query)
+      .sort({ scheduledAt: 1 })
+      .populate("offerId", "titre companyId")
+      .populate({
+        path: "offerId",
+        populate: { path: "companyId", select: "name logo" },
+      })
+      .lean();
+
+    const enriched = interviews.map((i) => ({
+      _id: i._id,
+      type: i.type,
+      scheduledAt: i.scheduledAt,
+      duration: i.duration,
+      location: i.location,
+      meetingLink: i.meetingLink,
+      phoneNumber: i.phoneNumber,
+      status: i.status,
+      preparationNotes: i.preparationNotes,
+      proposedAlternative: i.proposedAlternative,
+
+      
+      offerTitle: i.offerId?.titre,
+      companyName: i.offerId?.companyId?.name,
+      companyLogo: i.offerId?.companyId?.logo,
+
+      
+      needsResponse: ["proposed", "rescheduled_by_recruiter"].includes(
+        i.status,
+      ),
+      isConfirmed: i.status === "confirmed",
+      isPendingRecruiter: i.status === "rescheduled_by_candidate",
+    }));
+
+    res.json(enriched);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const acceptInterview = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id });
+    const { interviewId } = req.params;
+
+    const interview = await Interview.findOneAndUpdate(
+      {
+        _id: interviewId,
+        candidateId: candidate._id,
+        status: { $in: ["proposed", "rescheduled_by_recruiter"] },
+      },
+      { status: "confirmed" },
+      { new: true },
+    );
+
+    if (!interview) {
+      return res
+        .status(404)
+        .json({ msg: "Entretien introuvable ou déjà traité" });
+    }
+
+    
+    const recruiter = await Recruiter.findById(interview.recruiterId);
+    await Notification.create({
+      userId: recruiter.userId,
+      message: `Le candidat a confirmé l'entretien`,
+      type: "validation",
+    });
+
+    res.json({ msg: "Entretien confirmé", interview });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const declineInterview = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id });
+    const { interviewId } = req.params;
+    const { reason } = req.body;
+
+    const interview = await Interview.findOneAndUpdate(
+      {
+        _id: interviewId,
+        candidateId: candidate._id,
+        status: { $in: ["proposed", "rescheduled_by_recruiter"] },
+      },
+      { status: "cancelled_by_candidate" },
+      { new: true },
+    );
+
+    if (!interview) {
+      return res.status(404).json({ msg: "Entretien introuvable" });
+    }
+
+    const recruiter = await Recruiter.findById(interview.recruiterId);
+    await Notification.create({
+      userId: recruiter.userId,
+      message: `Le candidat a décliné l'entretien${
+        reason ? `: ${reason}` : ""
+      }`,
+      type: "info",
+    });
+
+    res.json({ msg: "Entretien décliné", interview });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const proposeAlternativeDate = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id });
+    const { interviewId } = req.params;
+    const { newDate, message } = req.body;
+
+    const interview = await Interview.findOne({
+      _id: interviewId,
+      candidateId: candidate._id,
+      status: { $in: ["proposed", "rescheduled_by_recruiter"] },
+    });
+
+    if (!interview) {
+      return res.status(404).json({ msg: "Entretien introuvable" });
+    }
+
+    interview.status = "rescheduled_by_candidate";
+    interview.proposedAlternative = {
+      date: new Date(newDate),
+      proposedBy: "candidate",
+      message,
+      proposedAt: new Date(),
+    };
+    await interview.save();
+
+    const recruiter = await Recruiter.findById(interview.recruiterId);
+    await Notification.create({
+      userId: recruiter.userId,
+      message: `Le candidat propose une nouvelle date pour l'entretien`,
+      type: "validation",
+    });
+
+    res.json({ msg: "Proposition envoyée", interview });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+=== controllers\notificationController.js ===
+import Notification from "../models/Notification.js";
+
+export const getMyNotifications = async (req, res) => {
+  try {
+    const notifications = await Notification.find({ userId: req.user.id }).sort(
+      {
+        date: -1,
+      }
+    );
+    res.json(notifications);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getUnreadCount = async (req, res) => {
+  try {
+    const count = await Notification.countDocuments({
+      userId: req.user.id,
+      lu: false,
+    });
+    res.json({ count });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const markAsRead = async (req, res) => {
+  try {
+    const notification = await Notification.findOneAndUpdate(
+      { _id: req.params.id, userId: req.user.id },
+      { lu: true },
+      { new: true }
+    );
+
+    if (!notification)
+      return res.status(404).json({ msg: "Notification introuvable" });
+
+    res.json(notification);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+=== controllers\offerController.js ===
+import Offer from "../models/Offer.js";
+import Company from "../models/Company.js";
+import AnemOffer from "../models/AnemOffer.js";
+
+const toCursor = (payload) => {
+  return Buffer.from(JSON.stringify(payload)).toString("base64");
+};
+
+const fromCursor = (cursor) => {
+  try {
+    return JSON.parse(Buffer.from(cursor, "base64").toString("utf8"));
+  } catch (e) {
+    return null;
+  }
+};
+
+export const getAllActiveOffers = async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 10;
+    const {
+      cursor,
+      wilaya,
+      sort,
+      search,
+      type,
+      domaine,
+      experienceLevel,
+      minSalary,
+      maxSalary,
+      hasAnem,
+    } = req.query;
+
+    let query = { actif: true, validationStatus: "approved" };
+
+    if (wilaya) {
+      query.wilaya = { $regex: new RegExp(`^${wilaya}$`, "i") };
+    }
+
+    if (type) {
+      query.type = type;
+    }
+
+    if (domaine) {
+      query.domaine = domaine;
+    }
+
+    if (experienceLevel) {
+      query.experienceLevel = experienceLevel;
+    }
+
+    if (minSalary) {
+      query.salaryMax = { $gte: parseInt(minSalary) };
+    }
+
+    if (maxSalary) {
+      query.salaryMin = { $lte: parseInt(maxSalary) };
+    }
+
+    
+    if (hasAnem === "true" || hasAnem === "false") {
+      const anemOfferIds = await AnemOffer.find({ anemEnabled: true }).distinct(
+        "offerId",
+      );
+      if (hasAnem === "true") {
+        query._id = { $in: anemOfferIds };
+      } else {
+        query._id = { $nin: anemOfferIds };
+      }
+    }
+
+    if (search) {
+      const matchingCompanies = await Company.find({
+        name: { $regex: search, $options: "i" },
+      }).select("_id");
+
+      const companyIds = matchingCompanies.map((c) => c._id);
+
+      query.$or = [
+        { titre: { $regex: search, $options: "i" } },
+        { description: { $regex: search, $options: "i" } },
+        { skills: { $in: [new RegExp(search, "i")] } },
+        { companyId: { $in: companyIds } },
+      ];
+    }
+
+    if (cursor) {
+      const decrypted = fromCursor(cursor);
+
+      if (decrypted) {
+        const { id, value } = decrypted;
+
+        if (sort === "popular") {
+          query.$and = [
+            ...(query.$and || []),
+            {
+              $or: [
+                { nombreCandidatures: { $lt: value } },
+                { nombreCandidatures: value, _id: { $lt: id } },
+              ],
+            },
+          ];
+        } else {
+          query.$and = [
+            ...(query.$and || []),
+            {
+              $or: [
+                { datePublication: { $lt: new Date(value) } },
+                { datePublication: new Date(value), _id: { $lt: id } },
+              ],
+            },
+          ];
+        }
+      }
+    }
+
+    let sortQuery = {};
+    if (sort === "popular") {
+      sortQuery = { nombreCandidatures: -1, _id: -1 };
+    } else {
+      sortQuery = { datePublication: -1, _id: -1 };
+    }
+
+    const offers = await Offer.find(query)
+      .populate("companyId", "name logo location industry")
+      .populate("recruteurId", "position")
+      .sort(sortQuery)
+      .limit(limit + 1);
+
+    const hasNextPage = offers.length > limit;
+    const data = hasNextPage ? offers.slice(0, limit) : offers;
+
+    
+    const offerIds = data.map((o) => o._id);
+    const anemOffers = await AnemOffer.find({
+      offerId: { $in: offerIds },
+      anemEnabled: true,
+    }).lean();
+    const anemMap = new Map(
+      anemOffers.map((a) => [a.offerId.toString(), true]),
+    );
+
+    const enrichedData = data.map((offer) => {
+      const isNew =
+        new Date() - new Date(offer.datePublication) < 2 * 24 * 60 * 60 * 1000;
+      return {
+        ...offer.toObject(),
+        isNew,
+        hasAnem: anemMap.has(offer._id.toString()),
+      };
+    });
+
+    let nextCursor = null;
+    if (hasNextPage && data.length > 0) {
+      const lastItem = data[data.length - 1];
+
+      const cursorValue =
+        sort === "popular"
+          ? lastItem.nombreCandidatures
+          : lastItem.datePublication;
+
+      nextCursor = toCursor({
+        id: lastItem._id,
+        value: cursorValue,
+      });
+    }
+
+    res.json({
+      data: enrichedData,
+      meta: {
+        nextCursor,
+        hasNextPage,
+        limit,
+      },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getOfferDetails = async (req, res) => {
+  try {
+    const offer = await Offer.findOne({ _id: req.params.id, actif: true })
+      .populate("companyId", "name logo website description location size")
+      .populate("recruteurId", "position");
+
+    if (!offer) return res.status(404).json({ msg: "Offre introuvable" });
+
+    const isNew =
+      new Date() - new Date(offer.datePublication) < 2 * 24 * 60 * 60 * 1000;
+
+    
+    const anemOffer = await AnemOffer.findOne({
+      offerId: offer._id,
+      anemEnabled: true,
+    }).lean();
+
+    res.json({
+      ...offer.toObject(),
+      isNew,
+      hasAnem: !!anemOffer,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+=== controllers\skillController.js ===
+import Skill from "../models/Skills.js";
+import ProposedSkill from "../models/ProposedSkill.js";
+import Candidate from "../models/Candidate.js";
+import SystemSettings from "../models/SystemSettings.js";
+
+
+export const getSkills = async (req, res) => {
+  try {
+    const { search, category } = req.query;
+    let query = {};
+
+    if (search) {
+      query.name = { $regex: search, $options: "i" };
+    }
+
+    if (category) {
+      query.category = category;
+    }
+
+    const skills = await Skill.find(query).sort({ name: 1 }).limit(50).lean();
+
+    
+    const categories = await Skill.distinct("category");
+
+    res.json({
+      skills,
+      categories: categories.filter(Boolean),
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const getSkillProposalStatus = async (req, res) => {
+  try {
+    const enabled = await SystemSettings.getSetting(
+      "skill_proposal_enabled",
+      true,
+    );
+    res.json({ enabled });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const createSkill = async (req, res) => {
+  try {
+    const { name, category } = req.body;
+    const normalizedName = name.trim().toLowerCase();
+
+    const exist = await Skill.findOne({ name: normalizedName });
+    if (exist) {
+      return res.status(400).json({ msg: "Cette compétence existe déjà." });
+    }
+
+    const newSkill = await Skill.create({
+      name: normalizedName,
+      category: category?.trim() || null,
+    });
+
+    res.status(201).json(newSkill);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const deleteSkill = async (req, res) => {
+  try {
+    const skill = await Skill.findByIdAndDelete(req.params.id);
+    if (!skill) {
+      return res.status(404).json({ msg: "Compétence introuvable" });
+    }
+    res.json({ msg: "Compétence supprimée" });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const getProposedSkills = async (req, res) => {
+  try {
+    const { status = "pending", page = 1, limit = 20 } = req.query;
+    const skip = (page - 1) * limit;
+
+    let query = {};
+    if (status !== "all") {
+      query.status = status;
+    }
+
+    const [proposedSkills, total] = await Promise.all([
+      ProposedSkill.find(query)
+        .sort({ proposalCount: -1, createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .populate("proposedBy.userId", "nom email")
+        .populate("reviewedBy", "nom")
+        .lean(),
+      ProposedSkill.countDocuments(query),
+    ]);
+
+    res.json({
+      data: proposedSkills,
+      meta: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / limit),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const approveProposedSkill = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { domain } = req.body;
+
+    const proposedSkill = await ProposedSkill.findById(id);
+    if (!proposedSkill) {
+      return res.status(404).json({ msg: "Compétence proposée introuvable" });
+    }
+
+    if (proposedSkill.status !== "pending") {
+      return res
+        .status(400)
+        .json({ msg: "Cette compétence a déjà été traitée" });
+    }
+
+    
+    let officialSkill = await Skill.findOne({ name: proposedSkill.label });
+
+    if (!officialSkill) {
+      
+      officialSkill = await Skill.create({
+        name: proposedSkill.label,
+        category: domain?.trim() || null,
+        wasProposed: true,
+        proposedSkillId: proposedSkill._id,
+      });
+    }
+
+    
+    proposedSkill.status = "approved";
+    proposedSkill.domain = domain?.trim() || null;
+    proposedSkill.approvedSkillId = officialSkill._id;
+    proposedSkill.reviewedBy = req.user.id;
+    proposedSkill.reviewedAt = new Date();
+    await proposedSkill.save();
+
+    
+    const updateResult = await Candidate.updateMany(
+      {
+        "skills.name": proposedSkill.label,
+        "skills.domain": null,
+      },
+      {
+        $set: {
+          "skills.$[elem].domain": domain?.trim() || null,
+          "skills.$[elem].skillId": officialSkill._id,
+          "skills.$[elem].isProposed": false,
+        },
+      },
+      {
+        arrayFilters: [
+          { "elem.name": proposedSkill.label, "elem.domain": null },
+        ],
+      },
+    );
+
+    res.json({
+      msg: "Compétence approuvée et ajoutée à la liste officielle",
+      skill: officialSkill,
+      candidatesUpdated: updateResult.modifiedCount,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const rejectProposedSkill = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    const proposedSkill = await ProposedSkill.findById(id);
+    if (!proposedSkill) {
+      return res.status(404).json({ msg: "Compétence proposée introuvable" });
+    }
+
+    proposedSkill.status = "rejected";
+    proposedSkill.reviewedBy = req.user.id;
+    proposedSkill.reviewedAt = new Date();
+    proposedSkill.reviewNote = reason;
+    await proposedSkill.save();
+
+    res.json({ msg: "Compétence proposée rejetée", proposedSkill });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const getProposedSkillsStats = async (req, res) => {
+  try {
+    const stats = await ProposedSkill.aggregate([
+      {
+        $group: {
+          _id: "$status",
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const statsMap = {
+      pending: 0,
+      approved: 0,
+      rejected: 0,
+      merged: 0,
+    };
+
+    stats.forEach((s) => {
+      statsMap[s._id] = s.count;
+    });
+
+    const mostProposed = await ProposedSkill.find({ status: "pending" })
+      .sort({ proposalCount: -1 })
+      .limit(5)
+      .select("label proposalCount");
+
+    res.json({
+      byStatus: statsMap,
+      total: Object.values(statsMap).reduce((a, b) => a + b, 0),
+      mostProposed,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export default {
+  getSkills,
+  getSkillProposalStatus,
+  createSkill,
+  deleteSkill,
+  getProposedSkills,
+  approveProposedSkill,
+  rejectProposedSkill,
+  getProposedSkillsStats,
+};
+
+
+=== controllers\supportController.js ===
+import SupportTicket from "../models/SupportTicket.js";
+import Admin from "../models/Admin.js";
+import Notification from "../models/Notification.js";
+import { logAdminAction } from "../models/AdminLog.js";
+
+export const createTicket = async (req, res) => {
+  try {
+    const { subject, description, category } = req.body;
+    const attachments = req.files?.map((f) => f.path.replace(/\\/g, "/")) || [];
+
+    if (!subject || !description || !category) {
+      return res.status(400).json({
+        msg: "Sujet, description et catégorie sont obligatoires.",
+      });
+    }
+
+    const ticket = await SupportTicket.create({
+      userId: req.user.id,
+      subject,
+      description,
+      category,
+      attachments,
+    });
+
+    const admins = await Admin.find({
+      label: ticket.assignedToLabel,
+      status: "active",
+      "permissions.handleSupportTickets": true,
+    }).populate("userId", "_id");
+
+    const notifPromises = admins.map((admin) =>
+      Notification.create({
+        userId: admin.userId._id,
+        message: `Nouveau ticket support: "${subject}"`,
+        type: "info",
+      })
+    );
+    await Promise.all(notifPromises);
+
+    res.status(201).json({ msg: "Ticket créé avec succès.", ticket });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getMyTickets = async (req, res) => {
+  try {
+    const tickets = await SupportTicket.find({ userId: req.user.id })
+      .sort({ createdAt: -1 })
+      .select("-messages.adminId");
+
+    res.json(tickets);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getTicketDetails = async (req, res) => {
+  try {
+    const { ticketId } = req.params;
+
+    const ticket = await SupportTicket.findOne({
+      _id: ticketId,
+      userId: req.user.id,
+    });
+
+    if (!ticket) {
+      return res.status(404).json({ msg: "Ticket introuvable." });
+    }
+
+    res.json(ticket);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const replyToTicket = async (req, res) => {
+  try {
+    const { ticketId } = req.params;
+    const { content } = req.body;
+    const attachments = req.files?.map((f) => f.path.replace(/\\/g, "/")) || [];
+
+    if (!content) {
+      return res.status(400).json({ msg: "Le contenu est obligatoire." });
+    }
+
+    const ticket = await SupportTicket.findOne({
+      _id: ticketId,
+      userId: req.user.id,
+      status: { $nin: ["closed"] },
+    });
+
+    if (!ticket) {
+      return res.status(404).json({ msg: "Ticket introuvable ou fermé." });
+    }
+
+    ticket.messages.push({
+      from: "user",
+      content,
+      attachments,
+    });
+
+    if (ticket.status === "awaiting_user") {
+      ticket.status = "in_progress";
+    }
+
+    await ticket.save();
+
+    if (ticket.assignedTo) {
+      const admin = await Admin.findById(ticket.assignedTo).populate("userId");
+      if (admin) {
+        await Notification.create({
+          userId: admin.userId._id,
+          message: `Nouvelle réponse sur le ticket: "${ticket.subject}"`,
+          type: "info",
+        });
+      }
+    }
+
+    res.json({ msg: "Réponse envoyée.", ticket });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+=== middleware\auth.js ===
+import jwt from "jsonwebtoken";
+
+export default function auth(req, res, next) {
+  const token = req.header("Authorization");
+  if (!token) return res.status(401).json({ msg: "Pas de token fourni" });
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch {
+    res.status(401).json({ msg: "Token invalide" });
+  }
+}
+
+
+=== middleware\optionalAuth.js ===
+import jwt from "jsonwebtoken";
+
+export const optionalAuth = (req, res, next) => {
+  const token = req.header("Authorization");
+
+  if (!token) {
+    req.user = null;
+    return next();
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+  } catch (err) {
+    req.user = null;
+  }
+  next();
+};
+
+
+=== middleware\requireEmailVerification.js ===
+import User from "../models/User.js";
+
+export const requireEmailVerification = async (req, res, next) => {
+  if (!req.user) {
+    return res.status(401).json({ msg: "Utilisateur non authentifié." });
+  }
+
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ msg: "Utilisateur introuvable." });
+    }
+
+    if (!user.emailVerified) {
+      return res.status(403).json({
+        msg: "Veuillez confirmer votre adresse e-mail pour effectuer cette action.",
+        code: "EMAIL_NOT_VERIFIED",
+      });
+    }
+    next();
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+=== middleware\roles.js ===
+export const authRole = (roles = []) => {
+  return (req, res, next) => {
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({ msg: "Accès refusé : rôle non autorisé" });
+    }
+    next();
+  };
+};
+
+
+=== middleware\security.js ===
+import helmet from "helmet";
+import mongoSanitize from "express-mongo-sanitize";
+
+
+const rateLimitStore = new Map();
+
+const createRateLimiter = (options = {}) => {
+  const {
+    windowMs = 15 * 60 * 1000, 
+    max = 100,
+    message = "Trop de requêtes, veuillez réessayer plus tard.",
+    keyGenerator = (req) => req.ip,
+  } = options;
+
+  
+  setInterval(() => {
+    const now = Date.now();
+    for (const [key, data] of rateLimitStore.entries()) {
+      if (now - data.startTime > windowMs) {
+        rateLimitStore.delete(key);
+      }
+    }
+  }, windowMs);
+
+  return (req, res, next) => {
+    const key = keyGenerator(req);
+    const now = Date.now();
+
+    let record = rateLimitStore.get(key);
+
+    if (!record || now - record.startTime > windowMs) {
+      record = { count: 1, startTime: now };
+      rateLimitStore.set(key, record);
+    } else {
+      record.count++;
+    }
+
+    res.setHeader("X-RateLimit-Limit", max);
+    res.setHeader("X-RateLimit-Remaining", Math.max(0, max - record.count));
+    res.setHeader(
+      "X-RateLimit-Reset",
+      new Date(record.startTime + windowMs).toISOString(),
+    );
+
+    if (record.count > max) {
+      return res
+        .status(429)
+        .json({
+          msg: message,
+          retryAfter: Math.ceil((record.startTime + windowMs - now) / 1000),
+        });
+    }
+
+    next();
+  };
+};
+
+
+export const authRateLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: "Trop de tentatives de connexion. Réessayez dans 15 minutes.",
+  keyGenerator: (req) => `auth:${req.ip}`,
+});
+
+export const emailVerificationLimiter = createRateLimiter({
+  windowMs: 60 * 1000, 
+  max: 3,
+  message: "Trop de demandes de vérification. Réessayez dans 1 minute.",
+  keyGenerator: (req) => `email:${req.user?.id || req.ip}`,
+});
+
+export const uploadRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  max: 10,
+  message: "Trop de téléchargements. Réessayez dans 1 minute.",
+  keyGenerator: (req) => `upload:${req.user?.id || req.ip}`,
+});
+
+export const generalRateLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 200,
+});
+
+
+export const setupSecurity = (app) => {
+  
+  app.use(
+    helmet({
+      contentSecurityPolicy: false, 
+      crossOriginEmbedderPolicy: false,
+    }),
+  );
+
+  
+  app.use(mongoSanitize());
+
+  
+  app.use(generalRateLimiter);
+};
+
+export default {
+  setupSecurity,
+  authRateLimiter,
+  emailVerificationLimiter,
+  uploadRateLimiter,
+};
+
+
+=== middleware\validate.js ===
+import { validationResult, body, param, query } from "express-validator";
+
+
+export const handleValidationErrors = (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({
+      msg: "Données invalides",
+      errors: errors.array().map((e) => ({ field: e.path, message: e.msg })),
+    });
+  }
+  next();
+};
+
+
+export const validators = {
+  
+  register: [
+    body("nom")
+      .trim()
+      .notEmpty()
+      .withMessage("Le nom est requis")
+      .isLength({ max: 100 }),
+    body("email")
+      .trim()
+      .isEmail()
+      .withMessage("Email invalide")
+      .normalizeEmail(),
+    body("motDePasse")
+      .isLength({ min: 8 })
+      .withMessage("Le mot de passe doit contenir au moins 8 caractères")
+      .matches(/[a-z]/)
+      .withMessage("Le mot de passe doit contenir une minuscule")
+      .matches(/[A-Z]/)
+      .withMessage("Le mot de passe doit contenir une majuscule")
+      .matches(/\d/)
+      .withMessage("Le mot de passe doit contenir un chiffre"),
+    body("role").isIn(["candidat", "recruteur"]).withMessage("Rôle invalide"),
+    handleValidationErrors,
+  ],
+
+  login: [
+    body("email")
+      .trim()
+      .isEmail()
+      .withMessage("Email invalide")
+      .normalizeEmail(),
+    body("motDePasse").notEmpty().withMessage("Mot de passe requis"),
+    handleValidationErrors,
+  ],
+
+  verifyEmail: [
+    body("code")
+      .trim()
+      .notEmpty()
+      .withMessage("Code requis")
+      .isLength({ min: 6, max: 6 }),
+    handleValidationErrors,
+  ],
+
+  changeEmail: [
+    body("newEmail")
+      .trim()
+      .isEmail()
+      .withMessage("Email invalide")
+      .normalizeEmail(),
+    handleValidationErrors,
+  ],
+
+  
+  updateProfile: [
+    body("telephone")
+      .optional()
+      .trim()
+      .matches(/^[0-9+\s-]{8,20}$/)
+      .withMessage("Téléphone invalide"),
+    body("bio")
+      .optional()
+      .trim()
+      .isLength({ max: 1000 })
+      .withMessage("Bio trop longue (max 1000)"),
+    body("dateOfBirth").optional().isISO8601().withMessage("Date invalide"),
+    body("gender")
+      .optional()
+      .isIn(["homme", "femme"])
+      .withMessage("Genre invalide"),
+    handleValidationErrors,
+  ],
+
+  applyToOffer: [
+    body("offreId").isMongoId().withMessage("ID offre invalide"),
+    body("cvUrl").notEmpty().withMessage("CV requis"),
+    body("coverLetter")
+      .optional()
+      .trim()
+      .isLength({ max: 5000 })
+      .withMessage("Lettre trop longue"),
+    handleValidationErrors,
+  ],
+
+  addSkill: [
+    body("name")
+      .trim()
+      .notEmpty()
+      .withMessage("Nom requis")
+      .isLength({ max: 100 }),
+    body("level").optional().isIn(["beginner", "intermediate", "expert"]),
+    handleValidationErrors,
+  ],
+
+  addExperience: [
+    body("jobTitle")
+      .trim()
+      .notEmpty()
+      .withMessage("Titre requis")
+      .isLength({ max: 200 }),
+    body("company")
+      .trim()
+      .notEmpty()
+      .withMessage("Entreprise requise")
+      .isLength({ max: 200 }),
+    body("startDate").optional().isISO8601().withMessage("Date invalide"),
+    body("endDate").optional().isISO8601().withMessage("Date invalide"),
+    handleValidationErrors,
+  ],
+
+  addEducation: [
+    body("institut")
+      .trim()
+      .notEmpty()
+      .withMessage("Institut requis")
+      .isLength({ max: 200 }),
+    body("degree")
+      .trim()
+      .notEmpty()
+      .withMessage("Diplôme requis")
+      .isLength({ max: 200 }),
+    body("startDate").optional().isISO8601().withMessage("Date invalide"),
+    handleValidationErrors,
+  ],
+
+  
+  createTicket: [
+    body("subject")
+      .trim()
+      .notEmpty()
+      .withMessage("Sujet requis")
+      .isLength({ max: 200 }),
+    body("description")
+      .trim()
+      .notEmpty()
+      .withMessage("Description requise")
+      .isLength({ max: 5000 }),
+    body("category")
+      .isIn([
+        "support_understanding",
+        "technical_issue",
+        "account_profile",
+        "company_recruitment",
+        "documents_verification",
+        "special_request",
+        "feedback_suggestion",
+      ])
+      .withMessage("Catégorie invalide"),
+    handleValidationErrors,
+  ],
+
+  replyToTicket: [
+    body("content")
+      .trim()
+      .notEmpty()
+      .withMessage("Contenu requis")
+      .isLength({ max: 5000 }),
+    handleValidationErrors,
+  ],
+
+  
+  mongoId: (paramName = "id") => [
+    param(paramName).isMongoId().withMessage("ID invalide"),
+    handleValidationErrors,
+  ],
+
+  
+  pagination: [
+    query("page").optional().isInt({ min: 1 }).toInt(),
+    query("limit").optional().isInt({ min: 1, max: 100 }).toInt(),
+    handleValidationErrors,
+  ],
+};
+
+export default validators;
+
+
+=== models\Admin.js ===
+import mongoose from "mongoose";
+
+const adminSchema = new mongoose.Schema(
+  {
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      unique: true,
+    },
+
+    label: {
+      type: String,
+      enum: [
+        "super_admin",
+        "support",
+        "technical",
+        "operational",
+        "recruitment",
+        "moderation",
+        "product",
+      ],
+      default: "support",
+    },
+
+    permissions: {
+      createAdmin: { type: Boolean, default: false },
+      deleteAdmin: { type: Boolean, default: false },
+      editAdminPermissions: { type: Boolean, default: false },
+      assignAdminLabels: { type: Boolean, default: false },
+
+      validateOffers: { type: Boolean, default: false },
+      validateRecruiters: { type: Boolean, default: false },
+      validateCompanies: { type: Boolean, default: false },
+
+      banUsers: { type: Boolean, default: false },
+      suspendUsers: { type: Boolean, default: false },
+
+      proposeCandidates: { type: Boolean, default: false },
+
+      manageAnnouncements: { type: Boolean, default: false },
+      sendNotifications: { type: Boolean, default: false },
+
+      handleSupportTickets: { type: Boolean, default: false },
+
+      viewStats: { type: Boolean, default: true },
+      viewLogs: { type: Boolean, default: false },
+    },
+
+    status: {
+      type: String,
+      enum: ["active", "suspended", "revoked"],
+      default: "active",
+    },
+    suspensionReason: String,
+    suspendedUntil: Date,
+
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+  },
+  { timestamps: true }
+);
+
+adminSchema.methods.hasPermission = function (permission) {
+  if (this.label === "super_admin") return true;
+  return this.permissions[permission] === true;
+};
+
+export default mongoose.model("Admin", adminSchema);
+
+
+=== models\AdminLog.js ===
+import mongoose from "mongoose";
+
+const adminLogSchema = new mongoose.Schema(
+  {
+    adminId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      index: true,
+    },
+    action: {
+      type: String,
+      enum: [
+        
+        "admin_created",
+        "admin_deleted",
+        "admin_suspended",
+        "admin_reactivated",
+        "admin_permissions_updated",
+        "admin_label_changed",
+        "recruiter_validated",
+        "recruiter_rejected",
+        "recruiter_suspended",
+        "recruiter_documents_requested",
+        "recruiter_revalidated",
+        "recruiter_request_canceled",
+        "recruiter_multiple_requests",
+        "company_validated",
+        "company_rejected",
+        "company_suspended",
+        "company_created_by_admin",
+        "company_updated_by_admin",
+        "company_admin_assigned",
+        "company_admin_removed",
+        "offer_approved",
+        "offer_rejected",
+        "offer_changes_requested",
+        "offer_deleted",
+        "offer_updated_by_admin",
+        "offer_activated_admin",
+        "offer_deactivated_admin",
+        "user_banned",
+        "user_unbanned",
+        "user_message_sent",
+        "candidate_proposed",
+        "announcement_created",
+        "announcement_updated",
+        "announcement_deleted",
+        "ticket_responded",
+        "ticket_closed",
+        "ticket_reassigned",
+        
+        "anem_demande_viewed",
+        "anem_demande_assigned",
+        "anem_demande_in_progress",
+        "anem_pdf_downloaded",
+        "anem_id_approved",
+        "anem_id_rejected",
+        "anem_registration_success",
+        "anem_registration_failed",
+        "anem_bulk_status_update",
+        "anem_note_added",
+      ],
+      required: true,
+      index: true,
+    },
+    targetType: {
+      type: String,
+      enum: [
+        "user",
+        "recruiter",
+        "company",
+        "offer",
+        "application",
+        "announcement",
+        "ticket",
+        "admin",
+        "anem_registration",
+      ],
+    },
+    targetId: { type: mongoose.Schema.Types.ObjectId },
+    details: { type: mongoose.Schema.Types.Mixed },
+    ip: { type: String },
+    userAgent: { type: String },
+  },
+  { timestamps: true },
+);
+
+adminLogSchema.index({ createdAt: -1 });
+adminLogSchema.index({ action: 1, createdAt: -1 });
+adminLogSchema.index({ targetType: 1, targetId: 1 });
+
+const AdminLog = mongoose.model("AdminLog", adminLogSchema);
+
+export const logAdminAction = async (
+  adminId,
+  action,
+  target = {},
+  details = {},
+  req = null,
+) => {
+  try {
+    await AdminLog.create({
+      adminId,
+      action,
+      targetType: target.type,
+      targetId: target.id,
+      details,
+      ip: req?.ip || req?.connection?.remoteAddress,
+      userAgent: req?.get?.("User-Agent") || req?.headers?.["user-agent"],
+    });
+  } catch (err) {
+    console.error("Erreur lors du logging admin:", err);
+  }
+};
+
+export default AdminLog;
+
+
+=== models\AnemOffer.js ===
+import mongoose from "mongoose";
+
+const anemOfferSchema = new mongoose.Schema(
+  {
+    offerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Offer",
+      required: true,
+      unique: true,
+    },
+    recruiterId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Recruiter",
+      required: true,
+    },
+    anemRegistrationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "AnemRegistration",
+      required: true,
+    },
+
+    
+    anemEnabled: { type: Boolean, default: true },
+    anemId: { type: String, required: true },
+
+    
+    enabledAt: { type: Date, default: Date.now },
+    disabledAt: { type: Date },
+
+    
+    submittedToAnem: { type: Boolean, default: false },
+    submittedAt: { type: Date },
+    anemReference: { type: String },
+    anemResponse: { type: mongoose.Schema.Types.Mixed },
+  },
+  { timestamps: true },
+);
+
+anemOfferSchema.index({ offerId: 1 });
+anemOfferSchema.index({ recruiterId: 1 });
+anemOfferSchema.index({ anemEnabled: 1 });
+anemOfferSchema.index({ recruiterId: 1, anemEnabled: 1 });
+
+export default mongoose.model("AnemOffer", anemOfferSchema);
+
+
+=== models\AnemRegistration.js ===
+import mongoose from "mongoose";
+
+const anemRegistrationSchema = new mongoose.Schema(
+  {
+    recruiterId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Recruiter",
+      required: true,
+    },
+    companyId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Company",
+      required: true,
+    },
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+
+    
+    registrationType: {
+      type: String,
+      enum: ["self_declared", "site_registration"],
+      required: true,
+    },
+
+    
+    declaredAnemId: { type: String },
+    declaredAt: { type: Date },
+
+    
+    step1: {
+      typeAffiliation: {
+        type: String,
+        enum: ["CNAS", "CASNOS"],
+      },
+      numeroCnas: { type: String },
+      rib: { type: String },
+      raisonSociale: { type: String },
+      denominationCommerciale: { type: String },
+      numeroRc: { type: String },
+      entrepriseEtrangere: { type: Boolean, default: false },
+      responsable: { type: String },
+      fonction: { type: String },
+      nif: { type: String },
+    },
+
+    
+    step2: {
+      secteurActivite: { type: String },
+      brancheActivite: { type: String },
+      secteurJuridique: { type: String },
+      statutJuridique: { type: String },
+      adresse: { type: String },
+      telephone: { type: String },
+      fax: { type: String },
+      mobile: { type: String },
+      paysOrigine: { type: String, default: "Algérie" },
+      wilaya: { type: String },
+      commune: { type: String },
+      codePostal: { type: String },
+    },
+
+    
+    step3: {
+      effectifDeclare: { type: Number },
+      dontInseresCta: { type: Number },
+      nombreInseresDaip: { type: Number },
+      autresIndications: { type: String },
+    },
+
+    
+    step4: {
+      email: { type: String },
+      
+      consentementRgpd: { type: Boolean, default: false },
+      consentementAt: { type: Date },
+    },
+
+    
+    currentStep: {
+      type: Number,
+      default: 1,
+      min: 1,
+      max: 4,
+    },
+
+    
+    formCompleted: { type: Boolean, default: false },
+    formCompletedAt: { type: Date },
+    formSubmittedAt: { type: Date },
+
+    
+    status: {
+      type: String,
+      enum: [
+        "draft",
+        "pending",
+        "pending_verification",
+        "in_progress",
+        "registered",
+        "failed",
+        "rejected",
+      ],
+      default: "draft",
+    },
+
+    
+    verifiedAnemId: { type: String },
+    verifiedAt: { type: Date },
+    verifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+
+    
+    failureReason: { type: String },
+    rejectionReason: { type: String },
+
+    
+    assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: "Admin" },
+    assignedAt: { type: Date },
+    assignedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+
+    
+    pdfDownloads: [
+      {
+        downloadedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+        downloadedAt: { type: Date, default: Date.now },
+        ip: { type: String },
+      },
+    ],
+
+    
+    adminNotes: [
+      {
+        content: { type: String, required: true },
+        createdBy: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "User",
+          required: true,
+        },
+        createdAt: { type: Date, default: Date.now },
+        isPublic: { type: Boolean, default: false }, 
+      },
+    ],
+
+    
+    auditLog: [
+      {
+        action: {
+          type: String,
+          enum: [
+            "created",
+            "step_saved",
+            "form_submitted",
+            "pdf_downloaded",
+            "assigned",
+            "status_changed",
+            "note_added",
+            "anem_id_submitted",
+            "anem_id_updated",
+          ],
+          required: true,
+        },
+        previousValue: { type: mongoose.Schema.Types.Mixed },
+        newValue: { type: mongoose.Schema.Types.Mixed },
+        performedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+        performedAt: { type: Date, default: Date.now },
+        ip: { type: String },
+        userAgent: { type: String },
+      },
+    ],
+
+    
+    anemIdHistory: [
+      {
+        anemId: { type: String, required: true },
+        submittedAt: { type: Date, default: Date.now },
+        status: {
+          type: String,
+          enum: ["pending", "approved", "rejected"],
+          default: "pending",
+        },
+        reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+        reviewedAt: { type: Date },
+        rejectionReason: { type: String },
+        adminComment: { type: String },
+      },
+    ],
+  },
+  { timestamps: true },
+);
+
+
+anemRegistrationSchema.index({ recruiterId: 1 }, { unique: true });
+anemRegistrationSchema.index({ userId: 1 });
+anemRegistrationSchema.index({ companyId: 1 });
+anemRegistrationSchema.index({ status: 1 });
+anemRegistrationSchema.index({ status: 1, createdAt: -1 });
+anemRegistrationSchema.index({ assignedTo: 1, status: 1 });
+anemRegistrationSchema.index({ "step2.wilaya": 1 });
+anemRegistrationSchema.index({ registrationType: 1, status: 1 });
+
+
+anemRegistrationSchema.methods.isRegistered = function () {
+  return this.status === "registered" && this.verifiedAnemId;
+};
+
+anemRegistrationSchema.methods.canCreateAnemOffer = function () {
+  return this.status === "registered" && this.verifiedAnemId;
+};
+
+anemRegistrationSchema.methods.addAuditEntry = function (
+  action,
+  performedBy,
+  details = {},
+  req = null,
+) {
+  this.auditLog.push({
+    action,
+    previousValue: details.previousValue,
+    newValue: details.newValue,
+    performedBy,
+    performedAt: new Date(),
+    ip: req?.ip || req?.connection?.remoteAddress,
+    userAgent: req?.get?.("User-Agent") || req?.headers?.["user-agent"],
+  });
+};
+
+anemRegistrationSchema.methods.getPublicNotes = function () {
+  return this.adminNotes
+    .filter((note) => note.isPublic)
+    .sort((a, b) => b.createdAt - a.createdAt);
+};
+
+anemRegistrationSchema.methods.getLatestPublicNote = function () {
+  const publicNotes = this.getPublicNotes();
+  return publicNotes.length > 0 ? publicNotes[0] : null;
+};
+
+
+anemRegistrationSchema.virtual("effectiveAnemId").get(function () {
+  return this.verifiedAnemId || null;
+});
+
+
+anemRegistrationSchema.methods.generatePdfData = async function () {
+  await this.populate([
+    { path: "recruiterId", select: "position telephone" },
+    { path: "userId", select: "nom email" },
+    { path: "companyId", select: "name website location" },
+  ]);
+
+  return {
+    
+    documentTitle: "Demande d'inscription ANEM",
+    generatedAt: new Date().toISOString(),
+    registrationId: this._id.toString(),
+    submittedAt: this.formSubmittedAt || this.formCompletedAt,
+
+    
+    recruiter: {
+      nom: this.userId?.nom,
+      email: this.userId?.email,
+      telephone: this.recruiterId?.telephone,
+      position: this.recruiterId?.position,
+    },
+
+    
+    company: {
+      name: this.companyId?.name,
+      website: this.companyId?.website,
+      location: this.companyId?.location,
+    },
+
+    
+    informationsGenerales: {
+      typeAffiliation: this.step1?.typeAffiliation,
+      numeroCnas: this.step1?.numeroCnas,
+      rib: this.step1?.rib,
+      raisonSociale: this.step1?.raisonSociale,
+      denominationCommerciale: this.step1?.denominationCommerciale,
+      numeroRc: this.step1?.numeroRc,
+      entrepriseEtrangere: this.step1?.entrepriseEtrangere ? "Oui" : "Non",
+      responsable: this.step1?.responsable,
+      fonction: this.step1?.fonction,
+      nif: this.step1?.nif,
+    },
+
+    
+    informationsEmployeur: {
+      secteurActivite: this.step2?.secteurActivite,
+      brancheActivite: this.step2?.brancheActivite,
+      secteurJuridique: this.step2?.secteurJuridique,
+      statutJuridique: this.step2?.statutJuridique,
+      adresse: this.step2?.adresse,
+      telephone: this.step2?.telephone,
+      fax: this.step2?.fax,
+      mobile: this.step2?.mobile,
+      paysOrigine: this.step2?.paysOrigine,
+      wilaya: this.step2?.wilaya,
+      commune: this.step2?.commune,
+      codePostal: this.step2?.codePostal,
+    },
+
+    
+    informationsCnas: {
+      effectifDeclare: this.step3?.effectifDeclare,
+      dontInseresCta: this.step3?.dontInseresCta,
+      nombreInseresDaip: this.step3?.nombreInseresDaip,
+      autresIndications: this.step3?.autresIndications,
+    },
+
+    
+    compteEnLigne: {
+      email: this.step4?.email,
+      consentementRgpd: this.step4?.consentementRgpd
+        ? "Accepté"
+        : "Non accepté",
+      consentementAt: this.step4?.consentementAt,
+    },
+
+    
+    legalReference:
+      "Loi 18-07 relative à la protection des données personnelles",
+  };
+};
+
+export default mongoose.model("AnemRegistration", anemRegistrationSchema);
+
+
+=== models\Announcement.js ===
+import mongoose from "mongoose";
+
+const announcementSchema = new mongoose.Schema(
+  {
+    title: { type: String, required: true },
+    content: { type: String, required: true },
+    targetAudience: {
+      type: String,
+      enum: ["all", "admins", "recruiters", "candidates"],
+      default: "all",
+    },
+    status: {
+      type: String,
+      enum: ["draft", "scheduled", "published", "expired", "archived"],
+      default: "draft",
+    },
+    publishAt: { type: Date },
+    expiresAt: { type: Date },
+    priority: {
+      type: String,
+      enum: ["low", "normal", "high", "critical"],
+      default: "normal",
+    },
+    displayType: {
+      type: String,
+      enum: ["banner", "modal", "inline"],
+      default: "inline",
+    },
+    viewCount: { type: Number, default: 0 },
+    dismissedBy: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+    updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+  },
+  { timestamps: true }
+);
+
+announcementSchema.index({ status: 1, publishAt: 1, expiresAt: 1 });
+
+export default mongoose.model("Announcement", announcementSchema);
+
+
+=== models\Application.js ===
+import mongoose from "mongoose";
+
+const applicationSchema = new mongoose.Schema(
+  {
+    offerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Offer",
+      required: true,
+    },
+    candidateId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Candidate",
+      required: true,
+    },
+
+    
+    source: {
+      type: String,
+      enum: ["direct", "admin_proposal"],
+      default: "direct",
+    },
+    proposedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User", 
+    },
+    proposedAt: Date,
+
+    
+    candidateStatus: {
+      type: String,
+      enum: [
+        "envoyee",
+        "en_cours",
+        "retenue",
+        "non_retenue", 
+        "retiree", 
+        "cancelled",
+      ],
+      default: "envoyee",
+    },
+
+    recruiterStatus: {
+      type: String,
+      enum: [
+        "nouvelle",
+        "consultee",
+        "preselection",
+        "en_discussion",
+        "entretien_planifie",
+        "entretien_termine",
+        "retenue", 
+        "refusee", 
+        "retiree_par_candidat",
+        "annulee_par_candidat",
+      ],
+      default: "nouvelle",
+    },
+
+    
+    cvUrl: { type: String, required: true },
+    coverLetter: { type: String },
+
+    isRepostulation: { type: Boolean, default: false },
+
+    
+    offerSnapshot: {
+      titre: String,
+      entrepriseNom: String,
+      companyId: { type: mongoose.Schema.Types.ObjectId, ref: "Company" },
+      location: String,
+      type: { type: String },
+    },
+
+    
+    recruiterNotes: {
+      type: String,
+      maxLength: 2000,
+    },
+
+    
+    isStarred: { type: Boolean, default: false }, 
+    seenByRecruiter: { type: Boolean, default: false },
+    seenAt: Date,
+
+    
+    datePostulation: { type: Date, default: Date.now },
+    dateDecision: Date, 
+    withdrawnAt: Date, 
+    withdrawReason: String,
+
+    
+    statusHistory: [
+      {
+        candidateStatus: String,
+        recruiterStatus: String,
+        changedBy: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "User",
+        },
+        changedAt: { type: Date, default: Date.now },
+        note: String,
+      },
+    ],
+  },
+  { timestamps: true },
+);
+
+
+applicationSchema.index({ offerId: 1, candidateId: 1 }, { unique: true });
+
+
+applicationSchema.index({ offerId: 1, recruiterStatus: 1 });
+applicationSchema.index({ candidateId: 1, candidateStatus: 1 });
+applicationSchema.index({ offerId: 1, datePostulation: -1 });
+applicationSchema.index({ recruiterStatus: 1, isStarred: 1 });
+
+export default mongoose.model("Application", applicationSchema);
+
+
+=== models\Candidate.js ===
+import mongoose from "mongoose";
+
+const educationSchema = new mongoose.Schema({
+  institut: { type: String, required: true },
+  degree: { type: String, required: true },
+  fieldOfStudy: { type: String },
+  startDate: { type: Date },
+  endDate: { type: Date },
+  description: { type: String },
+});
+
+const experienceSchema = new mongoose.Schema({
+  jobTitle: { type: String, required: true },
+  company: { type: String, required: true },
+  startDate: { type: Date },
+  endDate: { type: Date },
+  description: { type: String },
+});
+
+const skillSchema = new mongoose.Schema({
+  name: { type: String, required: true, trim: true, lowercase: true },
+  level: {
+    type: String,
+    enum: ["beginner", "intermediate", "expert"],
+    default: "beginner",
+  },
+  
+  domain: { type: String, default: null, trim: true },
+  
+  skillId: { type: mongoose.Schema.Types.ObjectId, ref: "Skill" },
+  
+  isProposed: { type: Boolean, default: false },
+});
+
+const candidateSchema = new mongoose.Schema(
+  {
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      unique: true,
+    },
+
+    dateOfBirth: { type: Date },
+    bio: { type: String, maxLength: 1000 },
+    gender: {
+      type: String,
+      enum: ["homme", "femme"],
+    },
+
+    residence: {
+      wilaya: { type: String },
+      commune: { type: String },
+      address: { type: String },
+    },
+
+    searchPreferences: {
+      wilayas: [{ type: String }],
+      remoteOnly: { type: Boolean, default: false },
+      willingToRelocate: { type: Boolean, default: false },
+    },
+
+    desiredPosition: { type: String },
+
+    desiredJobTypes: [
+      {
+        type: String,
+        enum: [
+          "full-time",
+          "part-time",
+          "remote",
+          "internship",
+          "freelance",
+          "CDI",
+          "CDD",
+        ],
+      },
+    ],
+
+    profilePicture: { type: String },
+    telephone: { type: String },
+    links: {
+      website: { type: String },
+      linkedin: { type: String },
+      github: { type: String },
+      portfolio: { type: String },
+    },
+
+    autoriserProposition: { type: Boolean, default: true },
+
+    favoris: [
+      {
+        offerId: { type: mongoose.Schema.Types.ObjectId, ref: "Offer" },
+        savedAt: { type: Date, default: Date.now },
+      },
+    ],
+
+    cvs: [
+      {
+        url: { type: String, required: true },
+        dateDepot: { type: Date, default: Date.now },
+        score: { type: Number, default: 0 },
+      },
+    ],
+
+    skills: [skillSchema],
+    experiences: [experienceSchema],
+    education: [educationSchema],
+  },
+  { timestamps: true },
+);
+candidateSchema.index({ userId: 1 });
+candidateSchema.index({ "residence.wilaya": 1 });
+candidateSchema.index({ autoriserProposition: 1 });
+export default mongoose.model("Candidate", candidateSchema);
+
+
+=== models\Company.js ===
+import mongoose from "mongoose";
+
+const companySchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true, unique: true },
+    logo: { type: String },
+    website: { type: String },
+    description: { type: String },
+    industry: { type: String },
+    location: { type: String },
+    size: { type: String },
+
+    status: {
+      type: String,
+      enum: ["pending", "active", "rejected"],
+      default: "pending",
+    },
+  },
+  { timestamps: true }
+);
+companySchema.index({ status: 1 });
+companySchema.index({ name: "text" });
+export default mongoose.model("Company", companySchema);
+
+
+=== models\Conversation.js ===
+import mongoose from "mongoose";
+
+const messageSchema = new mongoose.Schema({
+  senderId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    required: true,
+  },
+  senderType: {
+    type: String,
+    enum: ["candidate", "recruiter"],
+    required: true,
+  },
+  content: { type: String, required: true, maxLength: 5000 },
+  attachments: [String],
+  readAt: Date,
+  createdAt: { type: Date, default: Date.now },
+});
+
+const conversationSchema = new mongoose.Schema(
+  {
+    applicationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Application",
+      required: true,
+      unique: true, 
+    },
+    offerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Offer",
+      required: true,
+    },
+    candidateId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Candidate",
+      required: true,
+    },
+    recruiterId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Recruiter",
+      required: true,
+    },
+
+    
+    candidateHasReplied: { type: Boolean, default: false },
+
+    
+    initiatedAt: { type: Date, default: Date.now },
+
+    
+    firstCandidateReplyAt: Date,
+
+    
+    openedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+    openedAt: { type: Date, default: Date.now },
+
+    messages: [messageSchema],
+
+    
+    unreadByCandidate: { type: Number, default: 0 },
+    unreadByRecruiter: { type: Number, default: 0 },
+
+    lastMessageAt: Date,
+
+    
+    status: {
+      type: String,
+      enum: ["active", "archived", "closed"],
+      default: "active",
+    },
+    
+    createdWith: {
+      type: String,
+      enum: ["custom_message", "standard_message"],
+      default: "custom_message",
+    },
+  },
+  { timestamps: true },
+);
+
+
+conversationSchema.index({ recruiterId: 1, candidateHasReplied: 1 });
+conversationSchema.index({ candidateId: 1, lastMessageAt: -1 });
+conversationSchema.index({ recruiterId: 1, lastMessageAt: -1 });
+conversationSchema.index({ applicationId: 1 });
+
+export default mongoose.model("Conversation", conversationSchema);
+
+
+=== models\Interview.js ===
+import mongoose from "mongoose";
+
+const interviewSchema = new mongoose.Schema(
+  {
+    applicationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Application",
+      required: true,
+    },
+    offerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Offer",
+      required: true,
+    },
+    candidateId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Candidate",
+      required: true,
+    },
+    recruiterId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Recruiter",
+      required: true,
+    },
+
+    
+    type: {
+      type: String,
+      enum: ["phone", "video", "in_person"],
+      default: "video",
+    },
+    scheduledAt: { type: Date, required: true },
+    duration: { type: Number, default: 30 }, 
+    location: String, 
+    meetingLink: String, 
+    phoneNumber: String, 
+
+    
+    status: {
+      type: String,
+      enum: [
+        "proposed", 
+        "confirmed", 
+        "rescheduled_by_candidate", 
+        "rescheduled_by_recruiter", 
+        "cancelled_by_candidate",
+        "cancelled_by_recruiter",
+        "completed", 
+        "no_show_candidate", 
+        "no_show_recruiter", 
+      ],
+      default: "proposed",
+    },
+
+    
+    proposedAlternative: {
+      date: Date,
+      proposedBy: {
+        type: String,
+        enum: ["candidate", "recruiter"],
+      },
+      message: String,
+      proposedAt: Date,
+    },
+
+    
+    recruiterNotes: String, 
+    preparationNotes: String, 
+
+    
+    feedback: {
+      rating: { type: Number, min: 1, max: 5 },
+      notes: String,
+      strengths: [String],
+      concerns: [String],
+      recommendation: {
+        type: String,
+        enum: ["strong_yes", "yes", "maybe", "no", "strong_no"],
+      },
+      completedAt: Date,
+    },
+
+    
+    reminderSentToCandidate: { type: Boolean, default: false },
+    reminderSentToRecruiter: { type: Boolean, default: false },
+  },
+  { timestamps: true }
+);
+
+
+interviewSchema.index({ applicationId: 1 });
+interviewSchema.index({ candidateId: 1, status: 1 });
+interviewSchema.index({ recruiterId: 1, scheduledAt: 1 });
+interviewSchema.index({ status: 1, scheduledAt: 1 });
+interviewSchema.index({ scheduledAt: 1 }); 
+
+export default mongoose.model("Interview", interviewSchema);
+
+
+=== models\Notification.js ===
+import mongoose from "mongoose";
+
+const notificationSchema = new mongoose.Schema(
+  {
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+    message: { type: String, required: true },
+    type: {
+      type: String,
+      enum: ["info", "alerte", "validation"],
+      default: "info",
+    },
+    lu: { type: Boolean, default: false },
+    date: { type: Date, default: Date.now },
+  },
+  { timestamps: true }
+);
+
+notificationSchema.index({ userId: 1, lu: 1 });
+notificationSchema.index({ userId: 1, date: -1 });
+
+export default mongoose.model("Notification", notificationSchema);
+
+
+=== models\Offer.js ===
+import mongoose from "mongoose";
+
+const offerSchema = new mongoose.Schema(
+  {
+    recruteurId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Recruiter",
+      required: true,
+    },
+    companyId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Company",
+      required: true,
+    },
+
+    titre: { type: String, required: true },
+    description: { type: String, required: true },
+    requirements: { type: String, required: true },
+
+    domaine: { type: String },
+    type: {
+      type: String,
+      enum: [
+        "full-time",
+        "part-time",
+        "remote",
+        "internship",
+        "freelance",
+        "CDI",
+        "CDD",
+      ],
+      default: "full-time",
+    },
+    salaryMin: { type: Number },
+    salaryMax: { type: Number },
+    experienceLevel: { type: String, enum: ["junior", "mid", "senior"] },
+    skills: [{ type: String, index: true }],
+    wilaya: { type: String },
+
+    
+    isAnem: { type: Boolean, default: false },
+    
+
+    allowRepostulation: { type: Boolean, default: true },
+
+    validationStatus: {
+      type: String,
+      enum: ["draft", "pending", "approved", "rejected", "changes_requested"],
+      default: "pending",
+    },
+    validationHistory: [
+      {
+        status: String,
+        message: String,
+        adminId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+        date: { type: Date, default: Date.now },
+      },
+    ],
+    rejectionReason: String,
+
+    visibility: {
+      isPublic: { type: Boolean, default: true },
+      acceptsDirectApplications: { type: Boolean, default: true },
+    },
+
+    candidateSearchMode: {
+      type: String,
+      enum: ["disabled", "manual", "automatic"],
+      default: "disabled",
+    },
+
+    actif: { type: Boolean, default: false },
+    datePublication: { type: Date },
+    nombreCandidatures: { type: Number, default: 0 },
+  },
+  { timestamps: true },
+);
+
+offerSchema.methods.isVisible = function () {
+  return this.validationStatus === "approved" && this.actif;
+};
+
+offerSchema.index({ titre: "text", description: "text", skills: "text" });
+
+export default mongoose.model("Offer", offerSchema);
+
+
+=== models\ProposedSkill.js ===
+import mongoose from "mongoose";
+
+const proposedSkillSchema = new mongoose.Schema(
+  {
+    label: {
+      type: String,
+      required: true,
+      trim: true,
+      lowercase: true,
+      index: true,
+    },
+    domain: {
+      type: String,
+      default: null,
+      trim: true,
+    },
+    status: {
+      type: String,
+      enum: ["pending", "approved", "rejected", "merged"],
+      default: "pending",
+      index: true,
+    },
+    proposedBy: [
+      {
+        userId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+        candidateId: { type: mongoose.Schema.Types.ObjectId, ref: "Candidate" },
+        proposedAt: { type: Date, default: Date.now },
+      },
+    ],
+    proposalCount: {
+      type: Number,
+      default: 1,
+    },
+    
+    approvedSkillId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Skill",
+    },
+    
+    reviewedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+    reviewedAt: Date,
+    reviewNote: String,
+    
+    mergedInto: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "ProposedSkill",
+    },
+  },
+  { timestamps: true },
+);
+
+
+proposedSkillSchema.index({ label: 1 }, { unique: true });
+proposedSkillSchema.index({ status: 1, proposalCount: -1 });
+
+
+proposedSkillSchema.statics.proposeSkill = async function (
+  label,
+  userId,
+  candidateId,
+) {
+  const normalizedLabel = label.trim().toLowerCase();
+
+  
+  let proposedSkill = await this.findOne({ label: normalizedLabel });
+
+  if (proposedSkill) {
+    
+    const alreadyProposed = proposedSkill.proposedBy.some(
+      (p) => p.userId?.toString() === userId,
+    );
+
+    if (!alreadyProposed) {
+      proposedSkill.proposedBy.push({
+        userId,
+        candidateId,
+        proposedAt: new Date(),
+      });
+      proposedSkill.proposalCount += 1;
+      await proposedSkill.save();
+    }
+
+    return { proposedSkill, isNew: false };
+  }
+
+  
+  proposedSkill = await this.create({
+    label: normalizedLabel,
+    proposedBy: [{ userId, candidateId, proposedAt: new Date() }],
+  });
+
+  return { proposedSkill, isNew: true };
+};
+
+export default mongoose.model("ProposedSkill", proposedSkillSchema);
+
+
+=== models\Recruiter.js ===
+import mongoose from "mongoose";
+
+const recruiterSchema = new mongoose.Schema(
+  {
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      unique: true,
+    },
+    companyId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Company",
+      required: true,
+    },
+
+    telephone: { type: String },
+    position: { type: String },
+
+    status: {
+      type: String,
+      enum: [
+        "pending_validation",
+        "pending_documents",
+        "pending_info",
+        "pending_info_and_documents",
+        "pending_revalidation",
+        "validated",
+        "rejected",
+      ],
+      default: "pending_validation",
+    },
+
+    rejectionReason: String,
+
+    validationRequests: [
+      {
+        type: {
+          type: String,
+          enum: ["document", "information", "clarification"],
+        },
+        message: String,
+        requiredFields: [String],
+        requiredDocuments: Number,
+        response: {
+          text: String,
+          documents: [String],
+          submittedAt: Date,
+        },
+        status: {
+          type: String,
+          enum: ["pending", "submitted", "approved", "rejected"],
+          default: "pending",
+        },
+        createdAt: { type: Date, default: Date.now },
+        reviewedAt: Date,
+        reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+      },
+    ],
+
+    permissions: {
+      postJobs: { type: Boolean, default: true },
+      reviewCandidates: { type: Boolean, default: true },
+      scheduleInterviews: { type: Boolean, default: true },
+      manageTeam: { type: Boolean, default: false },
+      editCompany: { type: Boolean, default: false },
+    },
+
+    isAdmin: { type: Boolean, default: false },
+
+    
+    
+    
+    anem: {
+      
+      registrationId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "AnemRegistration",
+      },
+
+      
+      status: {
+        type: String,
+        enum: [
+          "not_started",
+          "draft",
+          "pending",
+          "pending_verification",
+          "in_progress",
+          "registered",
+          "failed",
+          "rejected",
+        ],
+        default: "not_started",
+      },
+
+      
+      anemId: { type: String },
+
+      
+      registeredAt: { type: Date },
+
+      
+      hasSeenAnemModal: { type: Boolean, default: false },
+      modalSeenAt: { type: Date },
+
+      
+      declinedAnem: { type: Boolean, default: false },
+      declinedAt: { type: Date },
+
+      
+      lastStatusUpdate: { type: Date },
+    },
+
+    favoriteCandidates: [
+      {
+        candidateId: { type: mongoose.Schema.Types.ObjectId, ref: "Candidate" },
+        savedAt: { type: Date, default: Date.now },
+        notes: String,
+      },
+    ],
+
+    invitedBy: { type: mongoose.Schema.Types.ObjectId, ref: "Recruiter" },
+    invitedAt: Date,
+  },
+  { timestamps: true },
+);
+
+recruiterSchema.index({ userId: 1 });
+recruiterSchema.index({ companyId: 1 });
+recruiterSchema.index({ status: 1 });
+recruiterSchema.index({ "anem.status": 1 });
+recruiterSchema.index({ "anem.anemId": 1 });
+
+recruiterSchema.methods.canPerformActions = function () {
+  return this.status === "validated";
+};
+
+recruiterSchema.methods.hasPendingRequests = function () {
+  return this.validationRequests.some((r) => r.status === "pending");
+};
+
+recruiterSchema.methods.isAnemRegistered = function () {
+  return this.anem.status === "registered" && this.anem.anemId;
+};
+
+recruiterSchema.methods.canCreateAnemOffer = function () {
+  return this.anem.status === "registered" && this.anem.anemId;
+};
+
+recruiterSchema.methods.shouldShowAnemModal = function (offerCount) {
+  
+  
+  
+  if (offerCount === 0 && !this.anem.hasSeenAnemModal) {
+    return { show: true, reason: "first_offer" };
+  }
+  return { show: false, reason: null };
+};
+
+recruiterSchema.methods.updateAnemStatus = async function (
+  newStatus,
+  anemId = null,
+) {
+  this.anem.status = newStatus;
+  this.anem.lastStatusUpdate = new Date();
+
+  if (newStatus === "registered" && anemId) {
+    this.anem.anemId = anemId;
+    this.anem.registeredAt = new Date();
+  }
+
+  await this.save();
+};
+
+export default mongoose.model("Recruiter", recruiterSchema);
+
+
+=== models\Skills.js ===
+import mongoose from "mongoose";
+
+const skillSchema = new mongoose.Schema(
+  {
+    name: {
+      type: String,
+      required: true,
+      unique: true,
+      trim: true,
+      lowercase: true,
+      index: true,
+    },
+    category: {
+      type: String,
+      trim: true,
+      index: true,
+    },
+    
+    wasProposed: {
+      type: Boolean,
+      default: false,
+    },
+    proposedSkillId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "ProposedSkill",
+    },
+  },
+  { timestamps: true },
+);
+
+skillSchema.index({ name: "text", category: "text" });
+
+export default mongoose.model("Skill", skillSchema);
+
+
+=== models\SupportTicket.js ===
+import mongoose from "mongoose";
+
+const supportTicketSchema = new mongoose.Schema(
+  {
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      index: true,
+    },
+    subject: { type: String, required: true },
+    description: { type: String, required: true },
+    category: {
+      type: String,
+      enum: [
+        "support_understanding",
+        "technical_issue",
+        "account_profile",
+        "company_recruitment",
+        "documents_verification",
+        "special_request",
+        "feedback_suggestion",
+      ],
+      required: true,
+    },
+    assignedToLabel: {
+      type: String,
+      enum: [
+        "support",
+        "technical",
+        "operational",
+        "recruitment",
+        "moderation",
+        "super_admin",
+        "product",
+      ],
+    },
+    assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: "Admin" },
+    status: {
+      type: String,
+      enum: ["open", "in_progress", "awaiting_user", "resolved", "closed"],
+      default: "open",
+    },
+    priority: {
+      type: String,
+      enum: ["low", "medium", "high", "urgent"],
+      default: "medium",
+    },
+    attachments: [{ type: String }],
+    messages: [
+      {
+        from: { type: String, enum: ["user", "admin"], required: true },
+        content: { type: String, required: true },
+        adminId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+        attachments: [String],
+        createdAt: { type: Date, default: Date.now },
+      },
+    ],
+    chatEnabled: { type: Boolean, default: false },
+    resolvedAt: Date,
+    closedAt: Date,
+  },
+  { timestamps: true }
+);
+
+supportTicketSchema.pre("save", function (next) {
+  if (this.isNew && !this.assignedToLabel) {
+    const categoryToLabel = {
+      support_understanding: "support",
+      technical_issue: "technical",
+      account_profile: "operational",
+      company_recruitment: "recruitment",
+      documents_verification: "moderation",
+      special_request: "super_admin",
+      feedback_suggestion: "product",
+    };
+    this.assignedToLabel = categoryToLabel[this.category] || "support";
+  }
+  next();
+});
+
+supportTicketSchema.index({ status: 1, createdAt: -1 });
+supportTicketSchema.index({ assignedToLabel: 1, status: 1 });
+
+export default mongoose.model("SupportTicket", supportTicketSchema);
+
+
+=== models\SystemSettings.js ===
+import mongoose from "mongoose";
+
+const systemSettingsSchema = new mongoose.Schema(
+  {
+    key: {
+      type: String,
+      required: true,
+      unique: true,
+      index: true,
+    },
+    value: {
+      type: mongoose.Schema.Types.Mixed,
+      required: true,
+    },
+    description: {
+      type: String,
+    },
+    updatedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+    updatedAt: {
+      type: Date,
+      default: Date.now,
+    },
+  },
+  { timestamps: true },
+);
+
+
+systemSettingsSchema.statics.getSetting = async function (
+  key,
+  defaultValue = null,
+) {
+  const setting = await this.findOne({ key });
+  return setting ? setting.value : defaultValue;
+};
+
+
+systemSettingsSchema.statics.setSetting = async function (
+  key,
+  value,
+  description = null,
+  updatedBy = null,
+) {
+  const update = { value, updatedAt: new Date() };
+  if (description) update.description = description;
+  if (updatedBy) update.updatedBy = updatedBy;
+
+  return this.findOneAndUpdate(
+    { key },
+    { $set: update, $setOnInsert: { key } },
+    { upsert: true, new: true },
+  );
+};
+
+
+systemSettingsSchema.statics.initializeDefaults = async function () {
+  const defaults = [
+    {
+      key: "email_verification_mode",
+      value: process.env.NODE_ENV === "production" ? "smtp" : "development",
+      description:
+        "Mode de vérification email: 'smtp' pour production, 'development' pour code statique 123456",
+    },
+    {
+      key: "skill_proposal_enabled",
+      value: true,
+      description: "Permet aux candidats de proposer de nouvelles compétences",
+    },
+    {
+      key: "max_cv_per_candidate",
+      value: 3,
+      description: "Nombre maximum de CV par candidat",
+    },
+    {
+      key: "verification_code_expiry_minutes",
+      value: 15,
+      description: "Durée de validité du code de vérification en minutes",
+    },
+  ];
+
+  for (const setting of defaults) {
+    const exists = await this.findOne({ key: setting.key });
+    if (!exists) {
+      await this.create(setting);
+    }
+  }
+};
+
+export default mongoose.model("SystemSettings", systemSettingsSchema);
+
+
+=== models\User.js ===
+import mongoose from "mongoose";
+
+const userSchema = new mongoose.Schema(
+  {
+    nom: { type: String },
+    email: { type: String, required: true, unique: true },
+    motDePasse: { type: String, required: true },
+    role: {
+      type: String,
+      enum: ["candidat", "recruteur", "admin"],
+      required: true,
+    },
+
+    emailVerified: {
+      type: Boolean,
+      default: false,
+    },
+
+    accountStatus: {
+      type: String,
+      enum: ["active", "suspended", "banned"],
+      default: "active",
+    },
+    suspensionReason: String,
+    suspendedUntil: Date,
+
+    derniereConnexion: Date,
+  },
+  { timestamps: true }
+);
+
+userSchema.index({ email: 1 });
+userSchema.index({ role: 1 });
+userSchema.index({ createdAt: -1 });
+userSchema.index({ accountStatus: 1 });
+
+userSchema.methods.canLogin = function () {
+  if (this.accountStatus === "banned") return false;
+  if (this.accountStatus === "suspended") {
+    if (this.suspendedUntil && new Date() > this.suspendedUntil) {
+      return true;
+    }
+    return false;
+  }
+  return true;
+};
+
+export default mongoose.model("User", userSchema);
+
+
+=== models\VerificationToken.js ===
+import mongoose from "mongoose";
+import crypto from "crypto";
+
+const verificationTokenSchema = new mongoose.Schema({
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    required: true,
+    index: true,
+  },
+  token: {
+    type: String,
+    required: true,
+  },
+  code: {
+    type: String,
+    required: true,
+  },
+  type: {
+    type: String,
+    enum: ["email_verification", "password_reset"],
+    default: "email_verification",
+  },
+  expiresAt: {
+    type: Date,
+    required: true,
+    index: { expireAfterSeconds: 0 }, 
+  },
+  attempts: {
+    type: Number,
+    default: 0,
+  },
+  maxAttempts: {
+    type: Number,
+    default: 5,
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now,
+  },
+});
+
+
+verificationTokenSchema.statics.generateCode = function () {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+};
+
+
+verificationTokenSchema.statics.generateToken = function () {
+  return crypto.randomBytes(32).toString("hex");
+};
+
+
+verificationTokenSchema.statics.createVerificationToken = async function (
+  userId,
+  type = "email_verification",
+  expiresInMinutes = 15,
+) {
+  
+  await this.deleteMany({ userId, type });
+
+  const code = this.generateCode();
+  const token = this.generateToken();
+
+  const verificationToken = await this.create({
+    userId,
+    token,
+    code,
+    type,
+    expiresAt: new Date(Date.now() + expiresInMinutes * 60 * 1000),
+  });
+
+  return { code, token, expiresAt: verificationToken.expiresAt };
+};
+
+
+verificationTokenSchema.statics.verifyCode = async function (
+  userId,
+  code,
+  type = "email_verification",
+) {
+  const verificationToken = await this.findOne({
+    userId,
+    type,
+    expiresAt: { $gt: new Date() },
+  });
+
+  if (!verificationToken) {
+    return {
+      valid: false,
+      error: "Code expiré ou invalide. Demandez un nouveau code.",
+    };
+  }
+
+  if (verificationToken.attempts >= verificationToken.maxAttempts) {
+    await verificationToken.deleteOne();
+    return {
+      valid: false,
+      error: "Trop de tentatives. Demandez un nouveau code.",
+    };
+  }
+
+  if (verificationToken.code !== code) {
+    verificationToken.attempts += 1;
+    await verificationToken.save();
+    const remaining =
+      verificationToken.maxAttempts - verificationToken.attempts;
+    return {
+      valid: false,
+      error: `Code incorrect. ${remaining} tentative(s) restante(s).`,
+      attemptsRemaining: remaining,
+    };
+  }
+
+  
+  await verificationToken.deleteOne();
+  return { valid: true };
+};
+
+export default mongoose.model("VerificationToken", verificationTokenSchema);
+
+
+=== routes\announcementRoutes.js ===
+import express from "express";
+import auth from "../middleware/auth.js";
+import {
+  getActiveAnnouncements,
+  dismissAnnouncement,
+} from "../controllers/announcementController.js";
+
+const router = express.Router();
+
+router.use(auth);
+
+router.get("/active", getActiveAnnouncements);
+
+router.post("/:announcementId/dismiss", dismissAnnouncement);
+
+export default router;
+
+
+=== routes\authRoutes.js ===
+import express from "express";
+import auth from "../middleware/auth.js";
+import {
+  authRateLimiter,
+  emailVerificationLimiter,
+} from "../middleware/security.js";
+import { validators } from "../middleware/validate.js";
+import {
+  register,
+  login,
+  verifyEmail,
+  resendConfirmationCode,
+  changeEmail,
+  getCompanies,
+} from "../controllers/authController.js";
+
+const router = express.Router();
+
+
+router.post("/register", authRateLimiter, validators.register, register);
+router.post("/login", authRateLimiter, validators.login, login);
+
+
+router.post(
+  "/verify-email",
+  auth,
+  emailVerificationLimiter,
+  validators.verifyEmail,
+  verifyEmail,
+);
+router.post(
+  "/resend-code",
+  auth,
+  emailVerificationLimiter,
+  resendConfirmationCode,
+);
+router.put("/change-email", auth, validators.changeEmail, changeEmail);
+
+
+router.get("/companies", getCompanies);
+
+export default router;
+
+
+=== routes\candidateRoutes.js ===
+import express from "express";
+import auth from "../middleware/auth.js";
+import { authRole } from "../middleware/roles.js";
+import { requireEmailVerification } from "../middleware/requireEmailVerification.js";
+import { uploadRateLimiter } from "../middleware/security.js";
+import { validators } from "../middleware/validate.js";
+import {
+  uploadCV,
+  uploadImage,
+  uploadAttachments,
+  handleMulterError,
+} from "../config/multer.js";
+
+import {
+  updateProfile,
+  uploadProfilePicture,
+  uploadCandidateCV,
+  deleteCV,
+  applyToOffer,
+  updateAccount,
+  getProfile,
+  addToFavorites,
+  removeFromFavorites,
+  getFavorites,
+  addSkill,
+  updateSkill,
+  deleteSkill,
+  addExperience,
+  updateExperience,
+  deleteExperience,
+  addEducation,
+  updateEducation,
+  deleteEducation,
+  getCandidateStats,
+  getActivityTimeline,
+  getRecommendedOffers,
+} from "../controllers/candidateController.js";
+
+import {
+  getMyApplications,
+  getApplicationDetail,
+  withdrawApplication,
+  cancelApplication,
+  checkApplicationStatus,
+} from "../controllers/candidateApplicationController.js";
+
+import {
+  getCandidateInterviews,
+  acceptInterview,
+  declineInterview,
+  proposeAlternativeDate,
+} from "../controllers/interviewController.js";
+
+import {
+  getCandidateConversations,
+  getConversationMessages,
+  sendMessageAsCandidate,
+} from "../controllers/conversationController.js";
+
+const router = express.Router();
+
+router.use(auth, authRole(["candidat"]));
+
+
+router.get("/profil", getProfile);
+router.put("/profil", validators.updateProfile, updateProfile);
+router.put("/compte", updateAccount);
+router.get("/stats", getCandidateStats);
+router.get("/activity", getActivityTimeline);
+
+
+router.post(
+  "/upload-photo",
+  uploadRateLimiter,
+  uploadImage.single("photo"),
+  handleMulterError,
+  uploadProfilePicture,
+);
+router.post(
+  "/upload-cv",
+  uploadRateLimiter,
+  uploadCV.single("cv"),
+  handleMulterError,
+  uploadCandidateCV,
+);
+router.delete("/delete-cv/:cvId", validators.mongoId("cvId"), deleteCV);
+
+
+router.post("/profil/skills", validators.addSkill, addSkill);
+router.put(
+  "/profil/skills/:skillId",
+  validators.mongoId("skillId"),
+  updateSkill,
+);
+router.delete(
+  "/profil/skills/:skillId",
+  validators.mongoId("skillId"),
+  deleteSkill,
+);
+
+
+router.post("/profil/experiences", validators.addExperience, addExperience);
+router.put(
+  "/profil/experiences/:experienceId",
+  validators.mongoId("experienceId"),
+  updateExperience,
+);
+router.delete(
+  "/profil/experiences/:experienceId",
+  validators.mongoId("experienceId"),
+  deleteExperience,
+);
+
+
+router.post("/profil/education", validators.addEducation, addEducation);
+router.put(
+  "/profil/education/:educationId",
+  validators.mongoId("educationId"),
+  updateEducation,
+);
+router.delete(
+  "/profil/education/:educationId",
+  validators.mongoId("educationId"),
+  deleteEducation,
+);
+
+
+router.get("/favorites", getFavorites);
+router.post(
+  "/favorites/:offerId",
+  validators.mongoId("offerId"),
+  addToFavorites,
+);
+router.delete(
+  "/favorites/:offerId",
+  validators.mongoId("offerId"),
+  removeFromFavorites,
+);
+
+
+router.get("/recommended-offers", getRecommendedOffers);
+
+
+router.post(
+  "/postuler",
+  requireEmailVerification,
+  validators.applyToOffer,
+  applyToOffer,
+);
+router.get(
+  "/applications/check/:offerId",
+  validators.mongoId("offerId"),
+  checkApplicationStatus,
+);
+router.get("/applications", validators.pagination, getMyApplications);
+router.get(
+  "/applications/:applicationId",
+  validators.mongoId("applicationId"),
+  getApplicationDetail,
+);
+router.delete(
+  "/applications/:applicationId",
+  validators.mongoId("applicationId"),
+  withdrawApplication,
+);
+router.delete(
+  "/applications/:applicationId/cancel",
+  validators.mongoId("applicationId"),
+  cancelApplication,
+);
+
+
+router.get("/interviews", getCandidateInterviews);
+router.put(
+  "/interviews/:interviewId/accept",
+  validators.mongoId("interviewId"),
+  acceptInterview,
+);
+router.put(
+  "/interviews/:interviewId/decline",
+  validators.mongoId("interviewId"),
+  declineInterview,
+);
+router.put(
+  "/interviews/:interviewId/propose-date",
+  validators.mongoId("interviewId"),
+  proposeAlternativeDate,
+);
+
+
+router.get("/conversations", getCandidateConversations);
+router.get(
+  "/conversations/:conversationId",
+  validators.mongoId("conversationId"),
+  getConversationMessages,
+);
+router.post(
+  "/conversations/:conversationId/messages",
+  validators.mongoId("conversationId"),
+  uploadAttachments.array("attachments", 3),
+  handleMulterError,
+  sendMessageAsCandidate,
+);
+
+export default router;
+
+
+=== routes\notificationRoutes.js ===
+import express from "express";
+import auth from "../middleware/auth.js";
+import {
+  getMyNotifications,
+  getUnreadCount,
+  markAsRead,
+} from "../controllers/notificationController.js";
+
+const router = express.Router();
+
+router.use(auth);
+
+router.get("/", getMyNotifications);
+router.get("/unread-count", getUnreadCount);
+router.put("/:id/read", markAsRead);
+
+export default router;
+
+
+=== routes\offerRoutes.js ===
+import express from "express";
+import {
+  getAllActiveOffers,
+  getOfferDetails,
+} from "../controllers/offerController.js";
+
+const router = express.Router();
+
+router.get("/", getAllActiveOffers);
+
+router.get("/:id", getOfferDetails);
+
+export default router;
+
+
+=== routes\skillRoutes.js ===
+import express from "express";
+import {
+  getSkills,
+  getSkillProposalStatus,
+} from "../controllers/skillController.js";
+import auth from "../middleware/auth.js";
+
+const router = express.Router();
+
+router.get("/", auth, getSkills);
+router.get("/proposal-status", auth, getSkillProposalStatus);
+
+export default router;
+
+
+=== routes\supportRoutes.js ===
+import express from "express";
+import auth from "../middleware/auth.js";
+import { validators } from "../middleware/validate.js";
+import { uploadRateLimiter } from "../middleware/security.js";
+import * as supportController from "../controllers/supportController.js";
+import { uploadAttachments, handleMulterError } from "../config/multer.js";
+
+const router = express.Router();
+
+router.use(auth);
+
+router.post(
+  "/tickets",
+  uploadRateLimiter,
+  uploadAttachments.array("attachments", 5),
+  handleMulterError,
+  validators.createTicket,
+  supportController.createTicket,
+);
+
+router.get("/tickets", supportController.getMyTickets);
+
+router.get(
+  "/tickets/:ticketId",
+  validators.mongoId("ticketId"),
+  supportController.getTicketDetails,
+);
+
+router.post(
+  "/tickets/:ticketId/reply",
+  uploadRateLimiter,
+  uploadAttachments.array("attachments", 3),
+  handleMulterError,
+  validators.mongoId("ticketId"),
+  validators.replyToTicket,
+  supportController.replyToTicket,
+);
+
+export default router;
+
+
+=== services\emailService.js ===
+import nodemailer from "nodemailer";
+import SystemSettings from "../models/SystemSettings.js";
+
+
+const createTransporter = () => {
+  return nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: parseInt(process.env.SMTP_PORT) || 587,
+    secure: process.env.SMTP_PORT === "465",
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS,
+    },
+  });
+};
+
+
+const templates = {
+  verificationCode: (code, userName) => ({
+    subject: "Confirmez votre adresse email",
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <style>
+          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: #4F46E5; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
+          .content { background: #f9fafb; padding: 30px; border-radius: 0 0 8px 8px; }
+          .code { font-size: 32px; font-weight: bold; color: #4F46E5; text-align: center; letter-spacing: 8px; padding: 20px; background: white; border-radius: 8px; margin: 20px 0; }
+          .footer { text-align: center; margin-top: 20px; color: #666; font-size: 12px; }
+          .warning { color: #dc2626; font-size: 14px; margin-top: 15px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1>Vérification de votre email</h1>
+          </div>
+          <div class="content">
+            <p>Bonjour${userName ? ` ${userName}` : ""},</p>
+            <p>Merci de vous être inscrit ! Voici votre code de vérification :</p>
+            <div class="code">${code}</div>
+            <p>Ce code expire dans <strong>15 minutes</strong>.</p>
+            <p class="warning">Si vous n'avez pas demandé ce code, ignorez cet email.</p>
+          </div>
+          <div class="footer">
+            <p>© ${new Date().getFullYear()} Plateforme de Recrutement</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `,
+    text: `Bonjour${userName ? ` ${userName}` : ""},\n\nVotre code de vérification est : ${code}\n\nCe code expire dans 15 minutes.\n\nSi vous n'avez pas demandé ce code, ignorez cet email.`,
+  }),
+
+  welcomeEmail: (userName) => ({
+    subject: "Bienvenue sur notre plateforme !",
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <style>
+          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: #10b981; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
+          .content { background: #f9fafb; padding: 30px; border-radius: 0 0 8px 8px; }
+          .button { display: inline-block; background: #4F46E5; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; margin-top: 15px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1>🎉 Email vérifié avec succès !</h1>
+          </div>
+          <div class="content">
+            <p>Bonjour ${userName || ""},</p>
+            <p>Votre adresse email a été vérifiée avec succès. Votre compte est maintenant pleinement actif !</p>
+            <p>Vous pouvez maintenant :</p>
+            <ul>
+              <li>Compléter votre profil</li>
+              <li>Télécharger votre CV</li>
+              <li>Postuler aux offres d'emploi</li>
+            </ul>
+            <p>Bonne recherche d'emploi !</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `,
+    text: `Bonjour ${userName || ""},\n\nVotre adresse email a été vérifiée avec succès. Votre compte est maintenant pleinement actif !\n\nBonne recherche d'emploi !`,
+  }),
+};
+
+
+export const sendEmail = async (to, templateName, templateData = {}) => {
+  const mode = await SystemSettings.getSetting(
+    "email_verification_mode",
+    "development",
+  );
+
+  if (mode === "development") {
+    
+    const template = templates[templateName]?.(
+      templateData.code,
+      templateData.userName,
+    );
+    console.log(`\n📧 [DEV MODE] Email à ${to}:`);
+    console.log(`   Sujet: ${template?.subject}`);
+    if (templateData.code) {
+      console.log(`   Code: ${templateData.code}`);
+    }
+    console.log("");
+    return { success: true, mode: "development" };
+  }
+
+  try {
+    const transporter = createTransporter();
+    const template = templates[templateName]?.(
+      templateData.code,
+      templateData.userName,
+    );
+
+    if (!template) {
+      throw new Error(`Template "${templateName}" not found`);
+    }
+
+    const result = await transporter.sendMail({
+      from: `"Plateforme Recrutement" <${process.env.SMTP_USER}>`,
+      to,
+      subject: template.subject,
+      html: template.html,
+      text: template.text,
+    });
+
+    console.log(`📧 Email envoyé à ${to}: ${result.messageId}`);
+    return { success: true, messageId: result.messageId, mode: "smtp" };
+  } catch (error) {
+    console.error(`❌ Erreur envoi email à ${to}:`, error.message);
+    throw error;
+  }
+};
+
+
+export const sendVerificationEmail = async (email, code, userName = null) => {
+  return sendEmail(email, "verificationCode", { code, userName });
+};
+
+
+export const sendWelcomeEmail = async (email, userName = null) => {
+  return sendEmail(email, "welcomeEmail", { userName });
+};
+
+
+export const verifySmtpConnection = async () => {
+  try {
+    const transporter = createTransporter();
+    await transporter.verify();
+    console.log("✅ SMTP connection verified");
+    return true;
+  } catch (error) {
+    console.error("❌ SMTP connection failed:", error.message);
+    return false;
+  }
+};
+
+export default {
+  sendEmail,
+  sendVerificationEmail,
+  sendWelcomeEmail,
+  verifySmtpConnection,
+};
+
+
+=== startup\setupFolders.js ===
+import fs from "fs";
+
+export default function setupFolders() {
+  const folders = [
+    "uploads",
+    "uploads/cv",
+    "uploads/images",
+    "uploads/attachments",
+    "uploads/documents",
+  ];
+
+  folders.forEach((dir) => {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+      console.log(`📁 Dossier créé : ${dir}`);
+    }
+  });
+}
+
+
+=== utils\profileCompletion.js ===
+export const calculateProfileCompletion = (candidate, user) => {
+  const checks = {
+    nom: !!user?.nom,
+    telephone: !!candidate?.telephone,
+    residence: !!candidate?.residence?.wilaya,
+
+    bio: !!candidate?.bio,
+    dateOfBirth: !!candidate?.dateOfBirth,
+    gender: !!candidate?.gender,
+    profilePicture: !!candidate?.profilePicture,
+
+    desiredPosition: !!candidate?.desiredPosition,
+    cv: candidate?.cvs?.length > 0,
+    skills: candidate?.skills?.length > 0,
+    experiences: candidate?.experiences?.length > 0,
+    education: candidate?.education?.length > 0,
+  };
+
+  const completed = Object.values(checks).filter(Boolean).length;
+  const total = Object.keys(checks).length;
+
+  const minimumRequiredForApplication = {
+    telephone: !!candidate?.telephone,
+    residence: !!candidate?.residence?.wilaya,
+    cv: candidate?.cvs?.length > 0,
+    skills: candidate?.skills?.length > 0,
+  };
+
+  const canApply = Object.values(minimumRequiredForApplication).every(Boolean);
+  const missingForApplication = Object.entries(minimumRequiredForApplication)
+    .filter(([_, v]) => !v)
+    .map(([k]) => {
+      const labels = {
+        telephone: "Numéro de téléphone",
+        residence: "Localisation (wilaya)",
+        cv: "CV",
+        skills: "Au moins une compétence",
+      };
+      return labels[k] || k;
+    });
+
+  return {
+    percentage: Math.round((completed / total) * 100),
+    missing: Object.entries(checks)
+      .filter(([_, v]) => !v)
+      .map(([k]) => k),
+    isComplete: completed === total,
+    canApply,
+    missingForApplication,
+  };
+};
+
+
+=== utils\statusMapping.js ===
+export const RECRUITER_TO_CANDIDATE_STATUS = {
+  nouvelle: "envoyee",
+  consultee: "en_cours",
+  preselection: "en_cours",
+  en_discussion: "en_cours",
+  entretien_planifie: "en_cours",
+  entretien_termine: "en_cours",
+  retenue: "retenue",
+  refusee: "non_retenue",
+};
+
+export const mapRecruiterToCandidate = (recruiterStatus) => {
+  return RECRUITER_TO_CANDIDATE_STATUS[recruiterStatus] || "en_cours";
+};
+
+
+export const NOTIFY_CANDIDATE_STATUSES = ["retenue", "refusee"];
+
+
+export const TERMINAL_STATUSES = {
+  candidate: ["retenue", "non_retenue", "retiree"],
+  recruiter: ["retenue", "refusee"],
+};
