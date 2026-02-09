@@ -32,17 +32,13 @@ try {
 
 app.use(
   cors({
-    origin:
-      process.env.NODE_ENV === "production"
-        ? process.env.FRONTEND_URL?.split(",")
-        : "*",
+    origin: "*",
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allowedHeaders: [
       "Content-Type",
       "Authorization",
       "ngrok-skip-browser-warning",
     ],
-    credentials: true,
   }),
 );
 
