@@ -333,7 +333,7 @@ export const updateOffer = async (req, res) => {
           existingAnem.disabledAt = undefined;
           await existingAnem.save();
         } else {
-          await createAnemOfferAssociation(
+          await createAnemOffer(
             offer._id,
             recruiter._id,
             recruiter.anem.registrationId,

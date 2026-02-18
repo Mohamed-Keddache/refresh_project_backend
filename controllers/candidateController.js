@@ -7,6 +7,7 @@ import Skill from "../models/Skills.js";
 import ProposedSkill from "../models/ProposedSkill.js";
 import SystemSettings from "../models/SystemSettings.js";
 import Notification from "../models/Notification.js";
+import CandidateAnemRegistration from "../models/CandidateAnemRegistration.js";
 import Interview from "../models/Interview.js";
 import {
   uploadCV as cloudinaryUploadCV,
@@ -17,13 +18,21 @@ import {
 } from "../config/cloudinary.js";
 import { calculateProfileCompletion } from "../utils/profileCompletion.js";
 
+import {
+  addSkillToCandidate as addSkill,
+  updateCandidateSkill as updateSkill,
+  deleteCandidateSkill as deleteSkill,
+  getSkillDetails,
+  submitSkillFeedback,
+} from "./skillController.js";
+
 // ============ PROFILE MANAGEMENT ============
 
 export const getProfile = async (req, res) => {
   try {
     const candidate = await Candidate.findOne({ userId: req.user.id })
       .populate("userId", "nom email emailVerified")
-      .populate("skills.skillId", "name category");
+      .populate("skills.officialSkillId", "name category");
 
     if (!candidate) {
       return res.status(404).json({ msg: "Profil introuvable." });
@@ -36,6 +45,11 @@ export const getProfile = async (req, res) => {
       profil: candidate,
       completion,
       emailVerified: user.emailVerified,
+      anem: {
+        status: candidate.anem?.status || "not_started",
+        anemId: candidate.anem?.anemId || null,
+        isRegistered: candidate.anem?.status === "registered",
+      },
     });
   } catch (err) {
     res.status(500).json({ msg: err.message });
@@ -257,123 +271,6 @@ export const deleteCV = async (req, res) => {
 };
 
 // ============ SKILLS MANAGEMENT ============
-
-export const addSkill = async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const { name, level } = req.body;
-
-    const candidate = await Candidate.findOne({ userId });
-    if (!candidate) {
-      return res.status(404).json({ msg: "Profil introuvable." });
-    }
-
-    const normalizedName = name.trim().toLowerCase();
-
-    // Check if candidate already has this skill
-    const existingSkill = candidate.skills.find(
-      (s) => s.name.toLowerCase() === normalizedName,
-    );
-    if (existingSkill) {
-      return res.status(400).json({ msg: "Vous avez déjà cette compétence." });
-    }
-
-    // Check if skill exists in official list
-    const officialSkill = await Skill.findOne({ name: normalizedName });
-
-    if (officialSkill) {
-      // Add official skill
-      candidate.skills.push({
-        name: officialSkill.name,
-        level: level || "beginner",
-        domain: officialSkill.category,
-        skillId: officialSkill._id,
-        isProposed: false,
-      });
-    } else {
-      // Check if skill proposals are enabled
-      const proposalEnabled = await SystemSettings.getSetting(
-        "skill_proposal_enabled",
-        true,
-      );
-
-      if (!proposalEnabled) {
-        return res.status(400).json({
-          msg: "Cette compétence n'existe pas dans notre liste. Veuillez en sélectionner une parmi les suggestions.",
-        });
-      }
-
-      // Create/update proposed skill
-      await ProposedSkill.proposeSkill(normalizedName, userId, candidate._id);
-
-      // Add skill to candidate profile with null domain
-      candidate.skills.push({
-        name: normalizedName,
-        level: level || "beginner",
-        domain: null,
-        skillId: null,
-        isProposed: true,
-      });
-    }
-
-    await candidate.save();
-
-    res.json({
-      msg: officialSkill
-        ? "Compétence ajoutée"
-        : "Compétence proposée et ajoutée à votre profil",
-      skills: candidate.skills,
-      wasProposed: !officialSkill,
-    });
-  } catch (err) {
-    res.status(500).json({ msg: err.message });
-  }
-};
-
-export const updateSkill = async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const { skillId } = req.params;
-    const { level } = req.body;
-
-    const candidate = await Candidate.findOne({ userId });
-    if (!candidate) {
-      return res.status(404).json({ msg: "Profil introuvable." });
-    }
-
-    const skill = candidate.skills.id(skillId);
-    if (!skill) {
-      return res.status(404).json({ msg: "Compétence introuvable." });
-    }
-
-    // Only allow updating level, not name
-    if (level) skill.level = level;
-
-    await candidate.save();
-    res.json({ msg: "Compétence mise à jour", skills: candidate.skills });
-  } catch (err) {
-    res.status(500).json({ msg: err.message });
-  }
-};
-
-export const deleteSkill = async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const { skillId } = req.params;
-
-    const candidate = await Candidate.findOne({ userId });
-    if (!candidate) {
-      return res.status(404).json({ msg: "Profil introuvable." });
-    }
-
-    candidate.skills.pull(skillId);
-    await candidate.save();
-
-    res.json({ msg: "Compétence supprimée", skills: candidate.skills });
-  } catch (err) {
-    res.status(500).json({ msg: err.message });
-  }
-};
 
 // ============ EXPERIENCE MANAGEMENT ============
 
@@ -960,6 +857,11 @@ export const getCandidateStats = async (req, res) => {
         response: responseRate,
         view: viewRate,
       },
+      anem: {
+        status: candidate.anem?.status || "not_started",
+        anemId: candidate.anem?.anemId || null,
+        isRegistered: candidate.anem?.status === "registered",
+      },
       completion: profileCompletion,
       suggestions,
       cvCount: candidate.cvs.length,
@@ -1082,10 +984,26 @@ export const getRecommendedOffers = async (req, res) => {
       _id: { $nin: appliedOfferIds },
     };
 
-    // Collect candidate data for matching
-    const candidateSkills = (candidate.skills || [])
-      .map((s) => s.name?.trim().toLowerCase())
-      .filter(Boolean);
+    const candidateSkills = [];
+
+    for (const skill of candidate.skills || []) {
+      if (!skill.isVisibleToRecruiters) continue;
+
+      // Add raw normalized text
+      if (skill.normalizedText) {
+        candidateSkills.push(skill.normalizedText);
+      }
+
+      // Add official name if mapped
+      if (skill.officialSkillName) {
+        candidateSkills.push(skill.officialSkillName.toLowerCase());
+      }
+
+      // Add domain for broader matching
+      if (skill.domain) {
+        candidateSkills.push(skill.domain.toLowerCase());
+      }
+    }
 
     const candidateWilaya = candidate.residence?.wilaya;
     const desiredPosition = candidate.desiredPosition?.toLowerCase();
@@ -1227,4 +1145,11 @@ export const getRecommendedOffers = async (req, res) => {
     console.error("Recommendation error:", err);
     res.status(500).json({ msg: err.message });
   }
+};
+export {
+  addSkill,
+  updateSkill,
+  deleteSkill,
+  getSkillDetails,
+  submitSkillFeedback,
 };

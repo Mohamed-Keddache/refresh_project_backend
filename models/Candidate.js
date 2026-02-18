@@ -1,3 +1,4 @@
+// models/Candidate.js
 import mongoose from "mongoose";
 
 const educationSchema = new mongoose.Schema({
@@ -18,18 +19,76 @@ const experienceSchema = new mongoose.Schema({
 });
 
 const skillSchema = new mongoose.Schema({
-  name: { type: String, required: true, trim: true, lowercase: true },
+  rawText: {
+    type: String,
+    required: true,
+    trim: true,
+  },
+  normalizedText: {
+    type: String,
+    required: true,
+    trim: true,
+    lowercase: true,
+  },
   level: {
     type: String,
-    enum: ["beginner", "intermediate", "expert"],
-    default: "beginner",
+    enum: ["beginner", "intermediate", "expert", "unset"],
+    default: "unset",
   },
-  // Domain can be null for proposed skills
-  domain: { type: String, default: null, trim: true },
-  // Reference to official skill if it exists
-  skillId: { type: mongoose.Schema.Types.ObjectId, ref: "Skill" },
-  // True if this was a custom proposed skill
-  isProposed: { type: Boolean, default: false },
+  officialSkillId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Skill",
+    default: null,
+  },
+  officialSkillName: {
+    type: String,
+    default: null,
+  },
+  domain: {
+    type: String,
+    default: null,
+    trim: true,
+  },
+  subDomain: {
+    type: String,
+    default: null,
+    trim: true,
+  },
+  clusterId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "SkillCluster",
+    default: null,
+  },
+  matchType: {
+    type: String,
+    enum: ["exact", "alias", "promoted", "unmatched"],
+    default: "unmatched",
+  },
+  isVisibleToRecruiters: {
+    type: Boolean,
+    default: true,
+  },
+  isFlagged: {
+    type: Boolean,
+    default: false,
+  },
+  flagReason: {
+    type: String,
+  },
+  addedAt: {
+    type: Date,
+    default: Date.now,
+  },
+  mappingHistory: [
+    {
+      previousOfficialId: { type: mongoose.Schema.Types.ObjectId },
+      previousOfficialName: { type: String },
+      newOfficialId: { type: mongoose.Schema.Types.ObjectId },
+      newOfficialName: { type: String },
+      reason: { type: String },
+      migratedAt: { type: Date, default: Date.now },
+    },
+  ],
 });
 
 const candidateSchema = new mongoose.Schema(
@@ -76,6 +135,33 @@ const candidateSchema = new mongoose.Schema(
         ],
       },
     ],
+    // ANEM section
+    anem: {
+      registrationId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "CandidateAnemRegistration",
+      },
+      status: {
+        type: String,
+        enum: [
+          "not_started",
+          "draft",
+          "pending",
+          "pending_verification",
+          "in_progress",
+          "registered",
+          "failed",
+          "rejected",
+        ],
+        default: "not_started",
+      },
+      anemId: { type: String },
+      registeredAt: { type: Date },
+      hasSeenAnemInfo: { type: Boolean, default: false },
+      declinedAnem: { type: Boolean, default: false },
+      declinedAt: { type: Date },
+      lastStatusUpdate: { type: Date },
+    },
 
     profilePicture: { type: String },
     telephone: { type: String },
@@ -106,10 +192,23 @@ const candidateSchema = new mongoose.Schema(
     skills: [skillSchema],
     experiences: [experienceSchema],
     education: [educationSchema],
+
+    skillTrustScore: {
+      type: Number,
+      default: 100,
+      min: 0,
+      max: 100,
+    },
   },
   { timestamps: true },
 );
+
 candidateSchema.index({ userId: 1 });
 candidateSchema.index({ "residence.wilaya": 1 });
 candidateSchema.index({ autoriserProposition: 1 });
+candidateSchema.index({ "skills.officialSkillId": 1 });
+candidateSchema.index({ "skills.normalizedText": 1 });
+candidateSchema.index({ "skills.isVisibleToRecruiters": 1 });
+candidateSchema.index({ "skills.domain": 1 });
+
 export default mongoose.model("Candidate", candidateSchema);

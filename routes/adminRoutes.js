@@ -2,6 +2,7 @@ import express from "express";
 import auth from "../middleware/auth.js";
 import { authRole } from "../middleware/roles.js";
 import Admin from "../models/Admin.js";
+
 import {
   getRecruiters,
   validateRecruiter,
@@ -47,11 +48,22 @@ import {
 import {
   getSkills,
   createSkill,
+  updateSkill,
   deleteSkill,
-  getProposedSkills,
-  approveProposedSkill,
-  rejectProposedSkill,
-  getProposedSkillsStats,
+  getTrendingClusters,
+  getDuplicateClusters,
+  getOrphanClusters,
+  getFlaggedClusters,
+  getClusterDetail,
+  promoteCluster,
+  dismissCluster,
+  flagCluster,
+  unflagCluster,
+  getSkillFeedback,
+  reviewSkillFeedback,
+  getSkillSystemStats,
+  getSkillSettings,
+  updateSkillSettings,
 } from "../controllers/skillController.js";
 
 import {
@@ -74,6 +86,8 @@ import {
   getEmailVerificationMode,
   toggleSkillProposal,
   getAllSettings,
+  getSettingsByCategory,
+  updateSettingsBulk,
 } from "../controllers/adminSettingsController.js";
 
 import { uploadAttachments } from "../config/multer.js";
@@ -86,13 +100,9 @@ const requirePermission = (permission) => async (req, res, next) => {
   try {
     const admin = await Admin.findOne({ userId: req.user.id });
 
-    if (!admin) {
-      return res.status(403).json({ msg: "Admin introuvable" });
-    }
-
-    if (admin.status !== "active") {
+    if (!admin) return res.status(403).json({ msg: "Admin introuvable" });
+    if (admin.status !== "active")
       return res.status(403).json({ msg: "Compte admin suspendu" });
-    }
 
     if (!admin.hasPermission(permission)) {
       return res.status(403).json({
@@ -108,9 +118,15 @@ const requirePermission = (permission) => async (req, res, next) => {
   }
 };
 
+////////////////////////////////////////////////////
+// STATS
+////////////////////////////////////////////////////
 router.get("/stats/global", requirePermission("viewStats"), getGlobalStats);
 router.get("/stats/trends", requirePermission("viewStats"), getTrends);
 
+////////////////////////////////////////////////////
+// RECRUTEURS
+////////////////////////////////////////////////////
 router.get(
   "/recruteurs",
   requirePermission("validateRecruiters"),
@@ -136,13 +152,15 @@ router.post(
   requirePermission("validateRecruiters"),
   requestMultipleValidationItems,
 );
-
 router.put(
   "/recruteurs/:id/cancel-request",
   requirePermission("validateRecruiters"),
   cancelValidationRequest,
 );
 
+////////////////////////////////////////////////////
+// USERS
+////////////////////////////////////////////////////
 router.get("/users", getAllUsers);
 router.put("/users/ban/:id", requirePermission("banUsers"), banUser);
 router.put("/users/unban/:id", requirePermission("banUsers"), unBanUser);
@@ -152,9 +170,11 @@ router.post(
   sendMessageToUser,
 );
 
+////////////////////////////////////////////////////
+// ADMINS
+////////////////////////////////////////////////////
 router.get("/admins", requirePermission("viewStats"), getAllAdmins);
 router.post("/admins", requirePermission("createAdmin"), createAdmin);
-router.delete("/admins/:id", requirePermission("deleteAdmin"), deleteAdmin);
 router.put(
   "/admins/:id/suspend",
   requirePermission("deleteAdmin"),
@@ -170,17 +190,32 @@ router.put(
   requirePermission("assignAdminLabels"),
   updateAdminLabel,
 );
+router.delete("/admins/:id", requirePermission("deleteAdmin"), deleteAdmin);
 
+////////////////////////////////////////////////////
+// ENTREPRISES (ORDER FIXED)
+////////////////////////////////////////////////////
+
+// Static routes
 router.get(
   "/entreprises/all",
   requirePermission("validateCompanies"),
   getAllCompanies,
 );
-
 router.get(
   "/entreprises/en-attente",
   requirePermission("validateCompanies"),
   getPendingCompanies,
+);
+router.post(
+  "/entreprises/create",
+  requirePermission("validateCompanies"),
+  createCompanyByAdmin,
+);
+router.post(
+  "/entreprises/assign-admin",
+  requirePermission("validateCompanies"),
+  assignCompanyAdmin,
 );
 router.put(
   "/entreprises/valider/:id",
@@ -192,38 +227,38 @@ router.put(
   requirePermission("validateCompanies"),
   rejectCompany,
 );
+router.delete(
+  "/entreprises/remove-admin/:recruiterId",
+  requirePermission("validateCompanies"),
+  removeCompanyAdmin,
+);
 
+// Nested param routes
+router.get(
+  "/entreprises/:companyId/recruiters",
+  requirePermission("validateCompanies"),
+  getCompanyRecruiters,
+);
+
+// Generic param routes LAST
 router.get(
   "/entreprises/:companyId",
   requirePermission("validateCompanies"),
   getCompanyDetailsAdmin,
 );
-
 router.put(
   "/entreprises/:id",
   requirePermission("validateCompanies"),
   updateCompanyByAdmin,
 );
 
+////////////////////////////////////////////////////
+// OFFRES (ORDER SAFE)
+////////////////////////////////////////////////////
 router.get(
   "/offres/en-attente",
   requirePermission("validateOffers"),
   getPendingOffers,
-);
-router.put(
-  "/offres/:id/approve",
-  requirePermission("validateOffers"),
-  approveOffer,
-);
-router.put(
-  "/offres/:id/reject",
-  requirePermission("validateOffers"),
-  rejectOffer,
-);
-router.delete(
-  "/offres/:id",
-  requirePermission("validateOffers"),
-  deleteOfferAdmin,
 );
 router.get(
   "/offres/manuelles",
@@ -236,10 +271,15 @@ router.post(
   proposeCandidateToOffer,
 );
 
-router.get(
-  "/offres/:id/details",
+router.put(
+  "/offres/:id/approve",
   requirePermission("validateOffers"),
-  getOfferDetailsAdmin,
+  approveOffer,
+);
+router.put(
+  "/offres/:id/reject",
+  requirePermission("validateOffers"),
+  rejectOffer,
 );
 router.put(
   "/offres/:id/update",
@@ -251,13 +291,29 @@ router.put(
   requirePermission("validateOffers"),
   toggleOfferVisibility,
 );
+router.get(
+  "/offres/:id/details",
+  requirePermission("validateOffers"),
+  getOfferDetailsAdmin,
+);
+router.delete(
+  "/offres/:id",
+  requirePermission("validateOffers"),
+  deleteOfferAdmin,
+);
 
+////////////////////////////////////////////////////
+// CANDIDATES
+////////////////////////////////////////////////////
 router.get(
   "/candidates/:id",
   requirePermission("viewStats"),
   getCandidateDetailsAdmin,
 );
 
+////////////////////////////////////////////////////
+// ANNOUNCEMENTS
+////////////////////////////////////////////////////
 router.get(
   "/announcements",
   requirePermission("manageAnnouncements"),
@@ -279,6 +335,9 @@ router.delete(
   deleteAnnouncement,
 );
 
+////////////////////////////////////////////////////
+// SUPPORT TICKETS
+////////////////////////////////////////////////////
 router.get(
   "/tickets",
   requirePermission("handleSupportTickets"),
@@ -306,63 +365,104 @@ router.put(
   closeTicket,
 );
 
+////////////////////////////////////////////////////
+// LOGS
+////////////////////////////////////////////////////
 router.get("/logs", requirePermission("viewLogs"), getAdminLogs);
 
-router.post(
-  "/entreprises/create",
-  requirePermission("validateCompanies"),
-  createCompanyByAdmin,
-);
-
-router.get(
-  "/entreprises/:companyId/recruiters",
-  requirePermission("validateCompanies"),
-  getCompanyRecruiters,
-);
-
-router.post(
-  "/entreprises/assign-admin",
-  requirePermission("validateCompanies"),
-  assignCompanyAdmin,
-);
-
-router.delete(
-  "/entreprises/remove-admin/:recruiterId",
-  requirePermission("validateCompanies"),
-  removeCompanyAdmin,
-);
-
-// System Settings
+////////////////////////////////////////////////////
+// SETTINGS
+////////////////////////////////////////////////////
 router.get("/settings", getAllSettings);
+router.get("/settings/category/:category", getSettingsByCategory);
 router.get("/settings/email-verification-mode", getEmailVerificationMode);
 router.post("/settings/email-verification-mode", toggleEmailVerificationMode);
 router.post("/settings/skill-proposal", toggleSkillProposal);
+router.put(
+  "/settings/bulk",
+  requirePermission("editAdminPermissions"),
+  updateSettingsBulk,
+);
 
-// Official skills management (admin can create/delete official skills)
+////////////////////////////////////////////////////
+// SKILLS (ALREADY CORRECT)
+////////////////////////////////////////////////////
+router.get(
+  "/skills/stats",
+  requirePermission("viewStats"),
+  getSkillSystemStats,
+);
+router.get(
+  "/skills/settings",
+  requirePermission("viewStats"),
+  getSkillSettings,
+);
+router.put(
+  "/skills/settings",
+  requirePermission("editAdminPermissions"),
+  updateSkillSettings,
+);
+
+router.get(
+  "/skills/clusters/trending",
+  requirePermission("validateOffers"),
+  getTrendingClusters,
+);
+router.get(
+  "/skills/clusters/duplicates",
+  requirePermission("validateOffers"),
+  getDuplicateClusters,
+);
+router.get(
+  "/skills/clusters/orphans",
+  requirePermission("validateOffers"),
+  getOrphanClusters,
+);
+router.get(
+  "/skills/clusters/flagged",
+  requirePermission("validateOffers"),
+  getFlaggedClusters,
+);
+router.get(
+  "/skills/clusters/:clusterId",
+  requirePermission("validateOffers"),
+  getClusterDetail,
+);
+router.post(
+  "/skills/clusters/:clusterId/promote",
+  requirePermission("validateOffers"),
+  promoteCluster,
+);
+router.post(
+  "/skills/clusters/:clusterId/dismiss",
+  requirePermission("validateOffers"),
+  dismissCluster,
+);
+router.post(
+  "/skills/clusters/:clusterId/flag",
+  requirePermission("validateOffers"),
+  flagCluster,
+);
+router.post(
+  "/skills/clusters/:clusterId/unflag",
+  requirePermission("validateOffers"),
+  unflagCluster,
+);
+
+router.get(
+  "/skills/feedback",
+  requirePermission("validateOffers"),
+  getSkillFeedback,
+);
+router.post(
+  "/skills/feedback/:feedbackId/review",
+  requirePermission("validateOffers"),
+  reviewSkillFeedback,
+);
+
 router.get("/skills", requirePermission("viewStats"), getSkills);
 router.post("/skills", requirePermission("validateOffers"), createSkill);
+router.put("/skills/:id", requirePermission("validateOffers"), updateSkill);
 router.delete("/skills/:id", requirePermission("validateOffers"), deleteSkill);
-
-// Proposed skills management (already partially added, ensure all are present)
-router.get(
-  "/skills/proposed",
-  requirePermission("validateOffers"),
-  getProposedSkills,
-);
-router.get(
-  "/skills/proposed/stats",
-  requirePermission("viewStats"),
-  getProposedSkillsStats,
-);
-router.post(
-  "/skills/proposed/:id/approve",
-  requirePermission("validateOffers"),
-  approveProposedSkill,
-);
-router.post(
-  "/skills/proposed/:id/reject",
-  requirePermission("validateOffers"),
-  rejectProposedSkill,
-);
 
 export default router;

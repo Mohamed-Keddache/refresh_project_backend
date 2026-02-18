@@ -10,6 +10,7 @@ import bcrypt from "bcryptjs";
 import SupportTicket from "../models/SupportTicket.js";
 import AdminLog, { logAdminAction } from "../models/AdminLog.js";
 import AnemRegistration from "../models/AnemRegistration.js";
+import CandidateAnemRegistration from "../models/CandidateAnemRegistration.js";
 
 export const getRecruiters = async (req, res) => {
   try {
@@ -695,6 +696,7 @@ export const getGlobalStats = async (req, res) => {
       pendingCompanies,
       openTickets,
       pendingAnem,
+      pendingCandidateAnem,
       recentAdminActions,
     ] = await Promise.all([
       User.countDocuments({ derniereConnexion: { $gt: fifteenMinutesAgo } }),
@@ -719,6 +721,10 @@ export const getGlobalStats = async (req, res) => {
       AnemRegistration.countDocuments({
         status: { $in: ["pending", "pending_verification"] },
       }),
+      // NEW:
+      CandidateAnemRegistration.countDocuments({
+        status: { $in: ["pending", "pending_verification"] },
+      }),
       AdminLog.find()
         .populate("adminId", "nom")
         .sort({ createdAt: -1 })
@@ -737,10 +743,18 @@ export const getGlobalStats = async (req, res) => {
 
     const pendingTasks = {
       recruiters: pendingRecruiters,
-      companies: 0,
+      companies: pendingCompanies,
       offers: pendingOffers,
       tickets: openTickets,
-      total: pendingRecruiters + pendingOffers + openTickets,
+      anemCandidates: pendingCandidateAnem,
+      anemRecruiters: pendingAnem,
+      total:
+        pendingRecruiters +
+        pendingCompanies +
+        pendingOffers +
+        openTickets +
+        pendingAnem +
+        pendingCandidateAnem,
     };
 
     res.json({

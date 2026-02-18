@@ -115,3 +115,61 @@ export const getAllSettings = async (req, res) => {
     res.status(500).json({ msg: err.message });
   }
 };
+
+/**
+ * GET /api/admin/settings/by-category/:category
+ */
+export const getSettingsByCategory = async (req, res) => {
+  try {
+    const { category } = req.params;
+    const validCategories = [
+      "general",
+      "email",
+      "skills",
+      "candidates",
+      "recruiters",
+      "security",
+    ];
+
+    if (!validCategories.includes(category)) {
+      return res.status(400).json({ msg: "Catégorie invalide." });
+    }
+
+    const settings = await SystemSettings.getSettingsByCategory(category);
+    res.json(settings);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+/**
+ * PUT /api/admin/settings/bulk
+ * Update multiple settings at once
+ */
+export const updateSettingsBulk = async (req, res) => {
+  try {
+    const { settings } = req.body;
+
+    if (!settings || typeof settings !== "object") {
+      return res.status(400).json({ msg: "Settings object requis." });
+    }
+
+    const results = [];
+    for (const [key, value] of Object.entries(settings)) {
+      const updated = await SystemSettings.setSetting(
+        key,
+        value,
+        null,
+        req.user.id,
+      );
+      results.push({ key, value: updated.value });
+    }
+
+    res.json({
+      msg: "Paramètres mis à jour",
+      updated: results,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};

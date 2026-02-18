@@ -107,6 +107,40 @@ export const validators = {
     body("level").optional().isIn(["beginner", "intermediate", "expert"]),
     handleValidationErrors,
   ],
+  addSkillV2: [
+    body("name")
+      .trim()
+      .notEmpty()
+      .withMessage("Nom requis")
+      .isLength({ min: 1, max: 100 })
+      .withMessage("Le nom doit faire entre 1 et 100 caractères"),
+    body("level")
+      .optional()
+      .isIn(["beginner", "intermediate", "expert", "unset"])
+      .withMessage("Niveau invalide"),
+    body("selectedSuggestionId")
+      .optional()
+      .isMongoId()
+      .withMessage("ID suggestion invalide"),
+    handleValidationErrors,
+  ],
+
+  skillFeedback: [
+    body("category")
+      .isIn([
+        "incorrect_mapping",
+        "wrong_domain",
+        "skill_merged_incorrectly",
+        "other",
+      ])
+      .withMessage("Catégorie invalide"),
+    body("comment")
+      .optional()
+      .trim()
+      .isLength({ max: 500 })
+      .withMessage("Commentaire trop long (max 500)"),
+    handleValidationErrors,
+  ],
 
   addExperience: [
     body("jobTitle")

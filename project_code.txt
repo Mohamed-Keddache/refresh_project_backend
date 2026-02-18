@@ -55,6 +55,7 @@ import announcementRoutes from "./routes/announcementRoutes.js";
 import recruiterRoutes from "./routes/recruiterRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
 import anemRoutes from "./routes/anemRoutes.js";
+import candidateAnemRoutes from "./routes/candidateAnemRoutes.js";
 
 const app = express();
 
@@ -66,17 +67,13 @@ try {
 
 app.use(
   cors({
-    origin:
-      process.env.NODE_ENV === "production"
-        ? process.env.FRONTEND_URL?.split(",")
-        : "*",
+    origin: "*",
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allowedHeaders: [
       "Content-Type",
       "Authorization",
       "ngrok-skip-browser-warning",
     ],
-    credentials: true,
   }),
 );
 
@@ -144,6 +141,7 @@ async function startServer() {
     app.use("/api/notifications", notificationRoutes);
     app.use("/api/support", supportRoutes);
     app.use("/api/announcements", announcementRoutes);
+    app.use("/api/candidate-anem", candidateAnemRoutes);
 
     app.use("/api/recruiters", recruiterRoutes);
     app.use("/api/admin", adminRoutes);
@@ -504,6 +502,7 @@ import bcrypt from "bcryptjs";
 import SupportTicket from "../models/SupportTicket.js";
 import AdminLog, { logAdminAction } from "../models/AdminLog.js";
 import AnemRegistration from "../models/AnemRegistration.js";
+import CandidateAnemRegistration from "../models/CandidateAnemRegistration.js";
 
 export const getRecruiters = async (req, res) => {
   try {
@@ -1189,6 +1188,7 @@ export const getGlobalStats = async (req, res) => {
       pendingCompanies,
       openTickets,
       pendingAnem,
+      pendingCandidateAnem,
       recentAdminActions,
     ] = await Promise.all([
       User.countDocuments({ derniereConnexion: { $gt: fifteenMinutesAgo } }),
@@ -1213,6 +1213,10 @@ export const getGlobalStats = async (req, res) => {
       AnemRegistration.countDocuments({
         status: { $in: ["pending", "pending_verification"] },
       }),
+      
+      CandidateAnemRegistration.countDocuments({
+        status: { $in: ["pending", "pending_verification"] },
+      }),
       AdminLog.find()
         .populate("adminId", "nom")
         .sort({ createdAt: -1 })
@@ -1234,7 +1238,13 @@ export const getGlobalStats = async (req, res) => {
       companies: 0,
       offers: pendingOffers,
       tickets: openTickets,
-      total: pendingRecruiters + pendingOffers + openTickets,
+      anemCandidates: pendingCandidateAnem, 
+      total:
+        pendingRecruiters +
+        pendingOffers +
+        openTickets +
+        pendingAnem +
+        pendingCandidateAnem,
     };
 
     res.json({
@@ -2316,6 +2326,59 @@ export const getAllSettings = async (req, res) => {
       .populate("updatedBy", "nom email");
 
     res.json(settings);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const getSettingsByCategory = async (req, res) => {
+  try {
+    const { category } = req.params;
+    const validCategories = [
+      "general",
+      "email",
+      "skills",
+      "candidates",
+      "recruiters",
+      "security",
+    ];
+
+    if (!validCategories.includes(category)) {
+      return res.status(400).json({ msg: "Catégorie invalide." });
+    }
+
+    const settings = await SystemSettings.getSettingsByCategory(category);
+    res.json(settings);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const updateSettingsBulk = async (req, res) => {
+  try {
+    const { settings } = req.body;
+
+    if (!settings || typeof settings !== "object") {
+      return res.status(400).json({ msg: "Settings object requis." });
+    }
+
+    const results = [];
+    for (const [key, value] of Object.entries(settings)) {
+      const updated = await SystemSettings.setSetting(
+        key,
+        value,
+        null,
+        req.user.id,
+      );
+      results.push({ key, value: updated.value });
+    }
+
+    res.json({
+      msg: "Paramètres mis à jour",
+      updated: results,
+    });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
@@ -5548,6 +5611,1662 @@ export default {
 };
 
 
+=== controllers\candidateAnemController.js ===
+import CandidateAnemRegistration from "../models/CandidateAnemRegistration.js";
+import Candidate from "../models/Candidate.js";
+import User from "../models/User.js";
+import Admin from "../models/Admin.js";
+import Notification from "../models/Notification.js";
+import { logAdminAction } from "../models/AdminLog.js";
+
+
+
+const syncCandidateAnemStatus = async (candidateId, registration) => {
+  const updateData = {
+    "anem.status": registration.status,
+    "anem.lastStatusUpdate": new Date(),
+    "anem.registrationId": registration._id,
+  };
+
+  if (registration.status === "registered" && registration.verifiedAnemId) {
+    updateData["anem.anemId"] = registration.verifiedAnemId;
+    updateData["anem.registeredAt"] = registration.verifiedAt || new Date();
+  }
+
+  await Candidate.findByIdAndUpdate(candidateId, updateData);
+};
+
+const notifyAdminsNewCandidateDemande = async (
+  registration,
+  candidateName,
+  type,
+) => {
+  const admins = await Admin.find({
+    status: "active",
+    $or: [{ label: "super_admin" }, { "permissions.validateRecruiters": true }],
+  }).populate("userId", "_id");
+
+  const message =
+    type === "self_declared"
+      ? `Nouvel ID ANEM candidat à vérifier de ${candidateName}`
+      : `Nouvelle demande d'inscription ANEM candidat de ${candidateName}`;
+
+  const notifPromises = admins.map((admin) =>
+    Notification.create({
+      userId: admin.userId._id,
+      message,
+      type: "info",
+    }),
+  );
+
+  await Promise.all(notifPromises);
+};
+
+
+
+export const getCandidateAnemStatus = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id });
+
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil candidat introuvable" });
+    }
+
+    let registration = null;
+    let latestPublicNote = null;
+
+    if (candidate.anem.registrationId) {
+      registration = await CandidateAnemRegistration.findById(
+        candidate.anem.registrationId,
+      )
+        .select("-auditLog")
+        .populate("adminNotes.createdBy", "nom")
+        .lean();
+
+      if (registration) {
+        const publicNotes = registration.adminNotes
+          ?.filter((n) => n.isPublic)
+          .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+        latestPublicNote = publicNotes?.[0] || null;
+      }
+    }
+
+    let sidebarView = "not_started";
+    let actionRequired = false;
+    let statusMessage = "";
+
+    switch (candidate.anem.status) {
+      case "not_started":
+        sidebarView = "intro";
+        statusMessage = "Vous n'êtes pas encore inscrit à l'ANEM";
+        break;
+      case "draft":
+        sidebarView = "continue_form";
+        actionRequired = true;
+        statusMessage = "Inscription en cours - Continuez votre formulaire";
+        break;
+      case "pending":
+        sidebarView = "pending";
+        statusMessage = "Votre demande est en attente de traitement";
+        break;
+      case "pending_verification":
+        sidebarView = "pending_verification";
+        statusMessage = "Votre ID ANEM est en cours de vérification";
+        break;
+      case "in_progress":
+        sidebarView = "in_progress";
+        statusMessage =
+          "Votre inscription est en cours de traitement par notre équipe";
+        break;
+      case "registered":
+        sidebarView = "registered";
+        statusMessage = `Vous êtes inscrit à l'ANEM (ID: ${candidate.anem.anemId})`;
+        break;
+      case "failed":
+        sidebarView = "failed";
+        actionRequired = true;
+        statusMessage = "Votre inscription a échoué - Vous pouvez réessayer";
+        break;
+      case "rejected":
+        sidebarView = "rejected";
+        actionRequired = true;
+        statusMessage =
+          "Votre ID ANEM a été rejeté - Vous pouvez soumettre un nouvel ID";
+        break;
+    }
+
+    res.json({
+      status: candidate.anem.status,
+      anemId: candidate.anem.anemId,
+      registeredAt: candidate.anem.registeredAt,
+      hasSeenAnemInfo: candidate.anem.hasSeenAnemInfo,
+      declinedAnem: candidate.anem.declinedAnem,
+
+      sidebarView,
+      actionRequired,
+      statusMessage,
+      latestPublicNote: latestPublicNote
+        ? {
+            content: latestPublicNote.content,
+            createdAt: latestPublicNote.createdAt,
+            adminName: latestPublicNote.createdBy?.nom,
+          }
+        : null,
+
+      registration: registration
+        ? {
+            _id: registration._id,
+            registrationType: registration.registrationType,
+            status: registration.status,
+            currentStep: registration.currentStep,
+            formCompleted: registration.formCompleted,
+            formSubmittedAt: registration.formSubmittedAt,
+            failureReason: registration.failureReason,
+            rejectionReason: registration.rejectionReason,
+            declaredAnemId: registration.declaredAnemId,
+            verifiedAnemId: registration.verifiedAnemId,
+            createdAt: registration.createdAt,
+            updatedAt: registration.updatedAt,
+            lastRejectedId:
+              registration.anemIdHistory?.find((h) => h.status === "rejected")
+                ?.anemId || null,
+          }
+        : null,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const markAnemInfoSeen = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOneAndUpdate(
+      { userId: req.user.id },
+      { "anem.hasSeenAnemInfo": true },
+      { new: true },
+    );
+
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil candidat introuvable" });
+    }
+
+    res.json({ msg: "Information ANEM marquée comme vue" });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const declineCandidateAnem = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOneAndUpdate(
+      { userId: req.user.id },
+      {
+        "anem.hasSeenAnemInfo": true,
+        "anem.declinedAnem": true,
+        "anem.declinedAt": new Date(),
+      },
+      { new: true },
+    );
+
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil candidat introuvable" });
+    }
+
+    res.json({
+      msg: "Vous avez choisi de ne pas vous inscrire à l'ANEM pour le moment",
+      declinedAnem: true,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const resetCandidateAnemDecline = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOneAndUpdate(
+      { userId: req.user.id },
+      {
+        "anem.declinedAnem": false,
+        "anem.declinedAt": null,
+      },
+      { new: true },
+    );
+
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil candidat introuvable" });
+    }
+
+    res.json({
+      msg: "Vous pouvez maintenant vous inscrire à l'ANEM",
+      declinedAnem: false,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const submitCandidateAnemId = async (req, res) => {
+  try {
+    const { anemId } = req.body;
+
+    if (!anemId || anemId.trim().length < 3) {
+      return res.status(400).json({ msg: "ID ANEM invalide" });
+    }
+
+    const candidate = await Candidate.findOne({ userId: req.user.id });
+    const user = await User.findById(req.user.id);
+
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil candidat introuvable" });
+    }
+
+    if (!user.emailVerified) {
+      return res.status(403).json({
+        msg: "Veuillez vérifier votre email avant de soumettre un ID ANEM",
+        code: "EMAIL_NOT_VERIFIED",
+      });
+    }
+
+    if (candidate.anem.status === "registered") {
+      return res.status(400).json({
+        msg: "Vous êtes déjà enregistré ANEM",
+        anemId: candidate.anem.anemId,
+      });
+    }
+
+    let registration = await CandidateAnemRegistration.findOne({
+      candidateId: candidate._id,
+    });
+
+    const trimmedId = anemId.trim().toUpperCase();
+
+    if (!registration) {
+      registration = new CandidateAnemRegistration({
+        candidateId: candidate._id,
+        userId: req.user.id,
+        registrationType: "self_declared",
+        declaredAnemId: trimmedId,
+        declaredAt: new Date(),
+        status: "pending_verification",
+        anemIdHistory: [
+          {
+            anemId: trimmedId,
+            submittedAt: new Date(),
+            status: "pending",
+          },
+        ],
+      });
+
+      registration.addAuditEntry(
+        "created",
+        req.user.id,
+        { newValue: { registrationType: "self_declared", anemId: trimmedId } },
+        req,
+      );
+    } else {
+      const previousId = registration.declaredAnemId;
+
+      const lastHistory =
+        registration.anemIdHistory[registration.anemIdHistory.length - 1];
+      if (
+        !lastHistory ||
+        lastHistory.anemId !== trimmedId ||
+        lastHistory.status === "rejected"
+      ) {
+        registration.anemIdHistory.push({
+          anemId: trimmedId,
+          submittedAt: new Date(),
+          status: "pending",
+        });
+      }
+
+      registration.registrationType = "self_declared";
+      registration.declaredAnemId = trimmedId;
+      registration.declaredAt = new Date();
+      registration.status = "pending_verification";
+      registration.rejectionReason = undefined;
+
+      registration.addAuditEntry(
+        "anem_id_updated",
+        req.user.id,
+        { previousValue: previousId, newValue: trimmedId },
+        req,
+      );
+    }
+
+    await registration.save();
+    await syncCandidateAnemStatus(candidate._id, registration);
+
+    await Candidate.findByIdAndUpdate(candidate._id, {
+      "anem.hasSeenAnemInfo": true,
+    });
+
+    await notifyAdminsNewCandidateDemande(
+      registration,
+      user.nom,
+      "self_declared",
+    );
+
+    res.status(201).json({
+      msg: "ID ANEM soumis pour vérification. Vous serez notifié du résultat.",
+      status: "pending_verification",
+      registrationId: registration._id,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const startCandidateRegistration = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id });
+    const user = await User.findById(req.user.id);
+
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil candidat introuvable" });
+    }
+
+    if (!user.emailVerified) {
+      return res.status(403).json({
+        msg: "Veuillez vérifier votre email avant de vous inscrire à l'ANEM",
+        code: "EMAIL_NOT_VERIFIED",
+      });
+    }
+
+    if (candidate.anem.status === "registered") {
+      return res.status(400).json({
+        msg: "Vous êtes déjà enregistré ANEM",
+        anemId: candidate.anem.anemId,
+      });
+    }
+
+    let registration = await CandidateAnemRegistration.findOne({
+      candidateId: candidate._id,
+    });
+
+    
+    const nameParts = user.nom ? user.nom.split(" ") : [];
+    const prenom = nameParts[0] || "";
+    const nom = nameParts.slice(1).join(" ") || "";
+
+    const prefillStep1 = {
+      civilite:
+        candidate.gender === "homme"
+          ? "monsieur"
+          : candidate.gender === "femme"
+            ? "madame"
+            : undefined,
+      nom: nom || undefined,
+      prenom: prenom || undefined,
+      dateNaissance: candidate.dateOfBirth || undefined,
+    };
+
+    const prefillStep2 = {
+      mobile: candidate.telephone || undefined,
+      wilayaResidence: candidate.residence?.wilaya || undefined,
+      communeResidence: candidate.residence?.commune || undefined,
+      adresse: candidate.residence?.address || undefined,
+    };
+
+    const prefillStep4 = {
+      email: user.email,
+    };
+
+    if (registration) {
+      if (["failed", "rejected"].includes(registration.status)) {
+        registration.registrationType = "site_registration";
+        registration.status = "draft";
+        registration.currentStep = 1;
+        registration.formCompleted = false;
+        registration.failureReason = undefined;
+        registration.rejectionReason = undefined;
+
+        registration.addAuditEntry(
+          "created",
+          req.user.id,
+          { newValue: { action: "restart_after_failure" } },
+          req,
+        );
+
+        await registration.save();
+      } else if (registration.registrationType === "self_declared") {
+        registration.registrationType = "site_registration";
+        registration.status = "draft";
+        registration.currentStep = 1;
+        registration.formCompleted = false;
+
+        
+        if (!registration.step1?.nom) {
+          registration.step1 = { ...registration.step1, ...prefillStep1 };
+        }
+        if (!registration.step2?.mobile) {
+          registration.step2 = { ...registration.step2, ...prefillStep2 };
+        }
+        if (!registration.step4?.email) {
+          registration.step4 = { ...registration.step4, ...prefillStep4 };
+        }
+
+        registration.addAuditEntry(
+          "created",
+          req.user.id,
+          { newValue: { action: "convert_to_site_registration" } },
+          req,
+        );
+
+        await registration.save();
+      }
+      
+    } else {
+      registration = new CandidateAnemRegistration({
+        candidateId: candidate._id,
+        userId: req.user.id,
+        registrationType: "site_registration",
+        status: "draft",
+        currentStep: 1,
+        step1: prefillStep1,
+        step2: prefillStep2,
+        step4: prefillStep4,
+      });
+
+      registration.addAuditEntry(
+        "created",
+        req.user.id,
+        { newValue: { registrationType: "site_registration" } },
+        req,
+      );
+
+      await registration.save();
+    }
+
+    await syncCandidateAnemStatus(candidate._id, registration);
+
+    await Candidate.findByIdAndUpdate(candidate._id, {
+      "anem.hasSeenAnemInfo": true,
+    });
+
+    res.json({
+      msg: "Inscription démarrée",
+      registration: {
+        _id: registration._id,
+        currentStep: registration.currentStep,
+        formCompleted: registration.formCompleted,
+        step1: registration.step1 || {},
+        step2: registration.step2 || {},
+        step3: registration.step3 || {},
+        step4: {
+          email: registration.step4?.email || user.email,
+          consentementRgpd: registration.step4?.consentementRgpd || false,
+        },
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const saveCandidateRegistrationStep = async (req, res) => {
+  try {
+    const { step, data } = req.body;
+
+    if (!step || step < 1 || step > 4) {
+      return res.status(400).json({ msg: "Étape invalide (1-4)" });
+    }
+
+    const candidate = await Candidate.findOne({ userId: req.user.id });
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil candidat introuvable" });
+    }
+
+    const registration = await CandidateAnemRegistration.findOne({
+      candidateId: candidate._id,
+      registrationType: "site_registration",
+      status: "draft",
+    });
+
+    if (!registration) {
+      return res.status(404).json({
+        msg: "Aucune inscription en cours. Veuillez recommencer.",
+        code: "NO_DRAFT_REGISTRATION",
+      });
+    }
+
+    const stepKey = `step${step}`;
+    registration[stepKey] = { ...registration[stepKey], ...data };
+
+    if (
+      step === 4 &&
+      data.consentementRgpd &&
+      !registration.step4?.consentementAt
+    ) {
+      registration.step4.consentementAt = new Date();
+    }
+
+    if (step >= registration.currentStep) {
+      registration.currentStep = step;
+    }
+
+    registration.addAuditEntry(
+      "step_saved",
+      req.user.id,
+      { newValue: { step } },
+      req,
+    );
+
+    await registration.save();
+
+    res.json({
+      msg: `Étape ${step} enregistrée`,
+      currentStep: registration.currentStep,
+      savedData: registration[stepKey],
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const submitCandidateRegistration = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id });
+    const user = await User.findById(req.user.id);
+
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil candidat introuvable" });
+    }
+
+    const registration = await CandidateAnemRegistration.findOne({
+      candidateId: candidate._id,
+      registrationType: "site_registration",
+      status: "draft",
+    });
+
+    if (!registration) {
+      return res.status(404).json({
+        msg: "Aucune inscription en cours trouvée",
+        code: "NO_DRAFT_REGISTRATION",
+      });
+    }
+
+    
+    const validation = {
+      step1: { valid: true, missing: [] },
+      step2: { valid: true, missing: [] },
+      step3: { valid: true, missing: [] },
+      step4: { valid: true, missing: [] },
+    };
+
+    
+    const step1Required = ["nom", "prenom", "dateNaissance", "wilayaNaissance"];
+    step1Required.forEach((field) => {
+      if (
+        !registration.step1?.[field] ||
+        registration.step1[field].toString().trim() === ""
+      ) {
+        validation.step1.valid = false;
+        validation.step1.missing.push(field);
+      }
+    });
+
+    
+    const step2Required = ["mobile", "wilayaResidence", "communeResidence"];
+    step2Required.forEach((field) => {
+      if (
+        !registration.step2?.[field] ||
+        registration.step2[field].toString().trim() === ""
+      ) {
+        validation.step2.valid = false;
+        validation.step2.missing.push(field);
+      }
+    });
+
+    
+    const step3Required = ["typePieceIdentite", "numeroPieceIdentite"];
+    step3Required.forEach((field) => {
+      if (
+        !registration.step3?.[field] ||
+        registration.step3[field].toString().trim() === ""
+      ) {
+        validation.step3.valid = false;
+        validation.step3.missing.push(field);
+      }
+    });
+
+    
+    if (!registration.step4?.email || registration.step4.email.trim() === "") {
+      validation.step4.valid = false;
+      validation.step4.missing.push("email");
+    }
+    if (!registration.step4?.consentementRgpd) {
+      validation.step4.valid = false;
+      validation.step4.missing.push("consentementRgpd");
+    }
+
+    const allValid = Object.values(validation).every((v) => v.valid);
+
+    if (!allValid) {
+      return res.status(400).json({
+        msg: "Veuillez compléter tous les champs obligatoires",
+        validation,
+      });
+    }
+
+    registration.formCompleted = true;
+    registration.formCompletedAt = new Date();
+    registration.formSubmittedAt = new Date();
+    registration.status = "pending";
+    registration.currentStep = 4;
+
+    registration.addAuditEntry(
+      "form_submitted",
+      req.user.id,
+      { newValue: { status: "pending" } },
+      req,
+    );
+
+    await registration.save();
+    await syncCandidateAnemStatus(candidate._id, registration);
+
+    await notifyAdminsNewCandidateDemande(
+      registration,
+      user.nom,
+      "site_registration",
+    );
+
+    res.json({
+      msg: "Votre demande d'inscription ANEM a été soumise avec succès. Vous serez notifié du résultat.",
+      status: "pending",
+      registrationId: registration._id,
+      submittedAt: registration.formSubmittedAt,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getCandidateRegistrationForm = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id });
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil candidat introuvable" });
+    }
+
+    const registration = await CandidateAnemRegistration.findOne({
+      candidateId: candidate._id,
+    })
+      .select("-auditLog")
+      .populate("adminNotes.createdBy", "nom");
+
+    if (!registration) {
+      return res.status(404).json({
+        msg: "Aucune inscription trouvée",
+        code: "NO_REGISTRATION",
+      });
+    }
+
+    const user = await User.findById(req.user.id);
+
+    res.json({
+      registration: {
+        _id: registration._id,
+        registrationType: registration.registrationType,
+        status: registration.status,
+        currentStep: registration.currentStep,
+        formCompleted: registration.formCompleted,
+        formSubmittedAt: registration.formSubmittedAt,
+
+        step1: registration.step1 || {},
+        step2: registration.step2 || {},
+        step3: registration.step3 || {},
+        step4: {
+          email: registration.step4?.email || user.email,
+          consentementRgpd: registration.step4?.consentementRgpd || false,
+          consentementAt: registration.step4?.consentementAt,
+        },
+
+        declaredAnemId: registration.declaredAnemId,
+        verifiedAnemId: registration.verifiedAnemId,
+
+        failureReason: registration.failureReason,
+        rejectionReason: registration.rejectionReason,
+
+        publicNotes: registration.adminNotes
+          ?.filter((n) => n.isPublic)
+          .map((n) => ({
+            content: n.content,
+            createdAt: n.createdAt,
+            adminName: n.createdBy?.nom,
+          }))
+          .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)),
+
+        anemIdHistory: registration.anemIdHistory?.map((h) => ({
+          anemId: h.anemId,
+          submittedAt: h.submittedAt,
+          status: h.status,
+          rejectionReason: h.rejectionReason,
+        })),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+
+export const getCandidateAnemDemandes = async (req, res) => {
+  try {
+    const {
+      status,
+      registrationType,
+      wilaya,
+      search,
+      assignedTo,
+      unassigned,
+      dateFrom,
+      dateTo,
+      sortBy = "createdAt",
+      sortOrder = "desc",
+      page = 1,
+      limit = 20,
+    } = req.query;
+
+    let query = { status: { $ne: "draft" } };
+
+    if (status) {
+      if (status === "new") {
+        query.status = { $in: ["pending", "pending_verification"] };
+      } else if (status === "active") {
+        query.status = {
+          $in: ["pending", "pending_verification", "in_progress"],
+        };
+      } else {
+        query.status = status;
+      }
+    }
+
+    if (registrationType) {
+      query.registrationType = registrationType;
+    }
+
+    if (wilaya) {
+      query["step2.wilayaResidence"] = { $regex: new RegExp(wilaya, "i") };
+    }
+
+    if (assignedTo) {
+      query.assignedTo = assignedTo;
+    }
+    if (unassigned === "true") {
+      query.assignedTo = { $exists: false };
+    }
+
+    if (dateFrom || dateTo) {
+      query.createdAt = {};
+      if (dateFrom) query.createdAt.$gte = new Date(dateFrom);
+      if (dateTo) {
+        const endDate = new Date(dateTo);
+        endDate.setHours(23, 59, 59, 999);
+        query.createdAt.$lte = endDate;
+      }
+    }
+
+    if (search) {
+      const searchRegex = { $regex: search, $options: "i" };
+      const matchingUsers = await User.find({
+        $or: [{ nom: searchRegex }, { email: searchRegex }],
+      }).select("_id");
+      const userIds = matchingUsers.map((u) => u._id);
+
+      query.$or = [
+        { userId: { $in: userIds } },
+        { "step1.nom": searchRegex },
+        { "step1.prenom": searchRegex },
+        { declaredAnemId: searchRegex },
+        { verifiedAnemId: searchRegex },
+      ];
+    }
+
+    const skip = (page - 1) * limit;
+    const sort = { [sortBy]: sortOrder === "desc" ? -1 : 1 };
+
+    const [demandes, total, statusCounts] = await Promise.all([
+      CandidateAnemRegistration.find(query)
+        .sort(sort)
+        .skip(skip)
+        .limit(parseInt(limit))
+        .populate("userId", "nom email")
+        .populate("candidateId", "telephone residence profilePicture")
+        .populate("assignedTo", "userId label")
+        .lean(),
+      CandidateAnemRegistration.countDocuments(query),
+      CandidateAnemRegistration.aggregate([
+        { $match: { status: { $ne: "draft" } } },
+        { $group: { _id: "$status", count: { $sum: 1 } } },
+      ]),
+    ]);
+
+    const enrichedDemandes = await Promise.all(
+      demandes.map(async (d) => {
+        let assignedAdminName = null;
+        if (d.assignedTo?.userId) {
+          const adminUser = await User.findById(d.assignedTo.userId).select(
+            "nom",
+          );
+          assignedAdminName = adminUser?.nom;
+        }
+
+        return {
+          _id: d._id,
+          registrationType: d.registrationType,
+          status: d.status,
+          currentStep: d.currentStep,
+          formCompleted: d.formCompleted,
+          formSubmittedAt: d.formSubmittedAt,
+          declaredAnemId: d.declaredAnemId,
+          verifiedAnemId: d.verifiedAnemId,
+
+          candidate: {
+            _id: d.candidateId?._id,
+            nom: d.userId?.nom,
+            email: d.userId?.email,
+            telephone: d.candidateId?.telephone,
+            profilePicture: d.candidateId?.profilePicture,
+          },
+
+          wilaya: d.step2?.wilayaResidence,
+          nomComplet: `${d.step1?.prenom || ""} ${d.step1?.nom || ""}`.trim(),
+
+          assignedTo: d.assignedTo
+            ? {
+                _id: d.assignedTo._id,
+                name: assignedAdminName,
+                label: d.assignedTo.label,
+              }
+            : null,
+          assignedAt: d.assignedAt,
+
+          pdfDownloadCount: d.pdfDownloads?.length || 0,
+          lastPdfDownload: d.pdfDownloads?.slice(-1)[0]?.downloadedAt,
+
+          failureReason: d.failureReason,
+          rejectionReason: d.rejectionReason,
+          createdAt: d.createdAt,
+          updatedAt: d.updatedAt,
+        };
+      }),
+    );
+
+    const countsMap = {};
+    statusCounts.forEach((s) => {
+      countsMap[s._id] = s.count;
+    });
+
+    res.json({
+      data: enrichedDemandes,
+      meta: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / limit),
+      },
+      statusCounts: countsMap,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getCandidateDemandeDetails = async (req, res) => {
+  try {
+    const { demandeId } = req.params;
+
+    const demande = await CandidateAnemRegistration.findById(demandeId)
+      .populate("userId", "nom email createdAt")
+      .populate(
+        "candidateId",
+        "telephone residence profilePicture gender dateOfBirth bio skills experiences education",
+      )
+      .populate("assignedTo", "userId label")
+      .populate("verifiedBy", "nom")
+      .populate("assignedBy", "nom")
+      .populate("adminNotes.createdBy", "nom")
+      .populate("auditLog.performedBy", "nom")
+      .populate("anemIdHistory.reviewedBy", "nom")
+      .populate("pdfDownloads.downloadedBy", "nom");
+
+    if (!demande) {
+      return res.status(404).json({ msg: "Demande introuvable" });
+    }
+
+    let assignedAdminName = null;
+    if (demande.assignedTo?.userId) {
+      const adminUser = await User.findById(demande.assignedTo.userId).select(
+        "nom",
+      );
+      assignedAdminName = adminUser?.nom;
+    }
+
+    await logAdminAction(
+      req.user.id,
+      "candidate_anem_demande_viewed",
+      { type: "candidate_anem_registration", id: demande._id },
+      {},
+      req,
+    );
+
+    res.json({
+      ...demande.toObject(),
+      assignedAdminName,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getCandidatePendingAnemIds = async (req, res) => {
+  try {
+    const {
+      page = 1,
+      limit = 20,
+      sortBy = "declaredAt",
+      sortOrder = "desc",
+    } = req.query;
+    const skip = (page - 1) * limit;
+    const sort = { [sortBy]: sortOrder === "desc" ? -1 : 1 };
+
+    const [demandes, total] = await Promise.all([
+      CandidateAnemRegistration.find({
+        registrationType: "self_declared",
+        status: "pending_verification",
+      })
+        .sort(sort)
+        .skip(skip)
+        .limit(parseInt(limit))
+        .populate("userId", "nom email")
+        .populate("candidateId", "telephone profilePicture")
+        .lean(),
+      CandidateAnemRegistration.countDocuments({
+        registrationType: "self_declared",
+        status: "pending_verification",
+      }),
+    ]);
+
+    const enriched = demandes.map((d) => ({
+      _id: d._id,
+      declaredAnemId: d.declaredAnemId,
+      declaredAt: d.declaredAt,
+      candidate: {
+        _id: d.candidateId?._id,
+        nom: d.userId?.nom,
+        email: d.userId?.email,
+        profilePicture: d.candidateId?.profilePicture,
+      },
+      previousSubmissions: d.anemIdHistory
+        ?.filter((h) => h.status === "rejected")
+        .map((h) => ({
+          anemId: h.anemId,
+          submittedAt: h.submittedAt,
+          rejectionReason: h.rejectionReason,
+        })),
+      createdAt: d.createdAt,
+    }));
+
+    res.json({
+      data: enriched,
+      meta: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / limit),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const assignCandidateDemande = async (req, res) => {
+  try {
+    const { demandeId } = req.params;
+    const { adminId } = req.body;
+
+    const demande = await CandidateAnemRegistration.findById(demandeId);
+    if (!demande) {
+      return res.status(404).json({ msg: "Demande introuvable" });
+    }
+
+    let targetAdminId = adminId;
+
+    if (!adminId) {
+      const selfAdmin = await Admin.findOne({ userId: req.user.id });
+      if (!selfAdmin) {
+        return res.status(400).json({ msg: "Admin ID requis" });
+      }
+      targetAdminId = selfAdmin._id;
+    }
+
+    const targetAdmin = await Admin.findById(targetAdminId).populate(
+      "userId",
+      "nom",
+    );
+    if (!targetAdmin) {
+      return res.status(404).json({ msg: "Admin cible introuvable" });
+    }
+
+    const previousAssigned = demande.assignedTo;
+
+    demande.assignedTo = targetAdminId;
+    demande.assignedAt = new Date();
+    demande.assignedBy = req.user.id;
+
+    demande.addAuditEntry(
+      "assigned",
+      req.user.id,
+      { previousValue: previousAssigned, newValue: targetAdminId },
+      req,
+    );
+
+    await demande.save();
+
+    await logAdminAction(
+      req.user.id,
+      "candidate_anem_demande_assigned",
+      { type: "candidate_anem_registration", id: demande._id },
+      { assignedTo: targetAdminId, adminName: targetAdmin.userId.nom },
+      req,
+    );
+
+    res.json({
+      msg: `Demande assignée à ${targetAdmin.userId.nom}`,
+      assignedTo: {
+        _id: targetAdmin._id,
+        name: targetAdmin.userId.nom,
+        label: targetAdmin.label,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const markCandidateDemandeInProgress = async (req, res) => {
+  try {
+    const { demandeId } = req.params;
+
+    const demande = await CandidateAnemRegistration.findById(demandeId);
+    if (!demande) {
+      return res.status(404).json({ msg: "Demande introuvable" });
+    }
+
+    if (!["pending", "pending_verification"].includes(demande.status)) {
+      return res.status(400).json({
+        msg: "Seules les demandes en attente peuvent être marquées en cours",
+        currentStatus: demande.status,
+      });
+    }
+
+    const previousStatus = demande.status;
+    demande.status = "in_progress";
+
+    if (!demande.assignedTo) {
+      const selfAdmin = await Admin.findOne({ userId: req.user.id });
+      if (selfAdmin) {
+        demande.assignedTo = selfAdmin._id;
+        demande.assignedAt = new Date();
+        demande.assignedBy = req.user.id;
+      }
+    }
+
+    demande.addAuditEntry(
+      "status_changed",
+      req.user.id,
+      { previousValue: previousStatus, newValue: "in_progress" },
+      req,
+    );
+
+    await demande.save();
+    await syncCandidateAnemStatus(demande.candidateId, demande);
+
+    await Notification.create({
+      userId: demande.userId,
+      message:
+        "Votre demande d'inscription ANEM est en cours de traitement par notre équipe.",
+      type: "info",
+    });
+
+    await logAdminAction(
+      req.user.id,
+      "candidate_anem_demande_in_progress",
+      { type: "candidate_anem_registration", id: demande._id },
+      { previousStatus },
+      req,
+    );
+
+    res.json({
+      msg: "Demande marquée en cours de traitement",
+      status: "in_progress",
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getCandidateAnemPdfData = async (req, res) => {
+  try {
+    const { demandeId } = req.params;
+
+    const demande = await CandidateAnemRegistration.findById(demandeId);
+    if (!demande) {
+      return res.status(404).json({ msg: "Demande introuvable" });
+    }
+
+    demande.pdfDownloads.push({
+      downloadedBy: req.user.id,
+      downloadedAt: new Date(),
+      ip: req.ip || req.connection?.remoteAddress,
+    });
+
+    demande.addAuditEntry("pdf_downloaded", req.user.id, {}, req);
+    await demande.save();
+
+    const pdfData = await demande.generatePdfData();
+
+    await logAdminAction(
+      req.user.id,
+      "candidate_anem_pdf_downloaded",
+      { type: "candidate_anem_registration", id: demande._id },
+      {},
+      req,
+    );
+
+    res.json(pdfData);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const approveCandidateAnemId = async (req, res) => {
+  try {
+    const { demandeId } = req.params;
+    const { comment } = req.body;
+
+    const demande = await CandidateAnemRegistration.findById(demandeId);
+    if (!demande) {
+      return res.status(404).json({ msg: "Demande introuvable" });
+    }
+
+    if (demande.status !== "pending_verification") {
+      return res.status(400).json({
+        msg: "Seuls les IDs en attente de vérification peuvent être approuvés",
+        currentStatus: demande.status,
+      });
+    }
+
+    const previousStatus = demande.status;
+    demande.status = "registered";
+    demande.verifiedAnemId = demande.declaredAnemId;
+    demande.verifiedAt = new Date();
+    demande.verifiedBy = req.user.id;
+
+    const lastHistory = demande.anemIdHistory[demande.anemIdHistory.length - 1];
+    if (lastHistory && lastHistory.status === "pending") {
+      lastHistory.status = "approved";
+      lastHistory.reviewedBy = req.user.id;
+      lastHistory.reviewedAt = new Date();
+      lastHistory.adminComment = comment;
+    }
+
+    if (comment) {
+      demande.adminNotes.push({
+        content: comment,
+        createdBy: req.user.id,
+        isPublic: true,
+      });
+    }
+
+    demande.addAuditEntry(
+      "status_changed",
+      req.user.id,
+      { previousValue: previousStatus, newValue: "registered" },
+      req,
+    );
+
+    await demande.save();
+    await syncCandidateAnemStatus(demande.candidateId, demande);
+
+    await Notification.create({
+      userId: demande.userId,
+      message: `Félicitations ! Votre ID ANEM (${demande.verifiedAnemId}) a été vérifié avec succès. Vous êtes maintenant inscrit à l'ANEM.`,
+      type: "validation",
+    });
+
+    await logAdminAction(
+      req.user.id,
+      "candidate_anem_id_approved",
+      { type: "candidate_anem_registration", id: demande._id },
+      { anemId: demande.verifiedAnemId },
+      req,
+    );
+
+    res.json({
+      msg: "ID ANEM approuvé avec succès",
+      status: "registered",
+      anemId: demande.verifiedAnemId,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const rejectCandidateAnemId = async (req, res) => {
+  try {
+    const { demandeId } = req.params;
+    const { reason, publicMessage } = req.body;
+
+    if (!reason || reason.trim().length === 0) {
+      return res.status(400).json({ msg: "Raison de rejet requise" });
+    }
+
+    const demande = await CandidateAnemRegistration.findById(demandeId);
+    if (!demande) {
+      return res.status(404).json({ msg: "Demande introuvable" });
+    }
+
+    if (demande.status !== "pending_verification") {
+      return res.status(400).json({
+        msg: "Seuls les IDs en attente de vérification peuvent être rejetés",
+        currentStatus: demande.status,
+      });
+    }
+
+    const previousStatus = demande.status;
+    demande.status = "rejected";
+    demande.rejectionReason = reason;
+
+    const lastHistory = demande.anemIdHistory[demande.anemIdHistory.length - 1];
+    if (lastHistory && lastHistory.status === "pending") {
+      lastHistory.status = "rejected";
+      lastHistory.reviewedBy = req.user.id;
+      lastHistory.reviewedAt = new Date();
+      lastHistory.rejectionReason = reason;
+    }
+
+    demande.adminNotes.push({
+      content: publicMessage || `ID ANEM rejeté: ${reason}`,
+      createdBy: req.user.id,
+      isPublic: true,
+    });
+
+    demande.addAuditEntry(
+      "status_changed",
+      req.user.id,
+      { previousValue: previousStatus, newValue: "rejected" },
+      req,
+    );
+
+    await demande.save();
+    await syncCandidateAnemStatus(demande.candidateId, demande);
+
+    await Notification.create({
+      userId: demande.userId,
+      message: `Votre ID ANEM n'a pas pu être vérifié. Raison: ${reason}. Vous pouvez soumettre un nouvel ID ou vous inscrire via notre formulaire.`,
+      type: "alerte",
+    });
+
+    await logAdminAction(
+      req.user.id,
+      "candidate_anem_id_rejected",
+      { type: "candidate_anem_registration", id: demande._id },
+      { reason, rejectedId: demande.declaredAnemId },
+      req,
+    );
+
+    res.json({
+      msg: "ID ANEM rejeté",
+      status: "rejected",
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const markCandidateRegistered = async (req, res) => {
+  try {
+    const { demandeId } = req.params;
+    const { anemId, message } = req.body;
+
+    if (!anemId || anemId.trim().length < 3) {
+      return res.status(400).json({ msg: "ID ANEM valide requis" });
+    }
+
+    const demande = await CandidateAnemRegistration.findById(demandeId);
+    if (!demande) {
+      return res.status(404).json({ msg: "Demande introuvable" });
+    }
+
+    if (!["pending", "in_progress"].includes(demande.status)) {
+      return res.status(400).json({
+        msg: "Seules les demandes en attente ou en cours peuvent être marquées comme enregistrées",
+        currentStatus: demande.status,
+      });
+    }
+
+    const previousStatus = demande.status;
+    const trimmedId = anemId.trim().toUpperCase();
+
+    demande.status = "registered";
+    demande.verifiedAnemId = trimmedId;
+    demande.verifiedAt = new Date();
+    demande.verifiedBy = req.user.id;
+
+    const publicMsg =
+      message || `Inscription ANEM réussie. Votre ID ANEM: ${trimmedId}`;
+    demande.adminNotes.push({
+      content: publicMsg,
+      createdBy: req.user.id,
+      isPublic: true,
+    });
+
+    demande.addAuditEntry(
+      "status_changed",
+      req.user.id,
+      {
+        previousValue: previousStatus,
+        newValue: "registered",
+        anemId: trimmedId,
+      },
+      req,
+    );
+
+    await demande.save();
+    await syncCandidateAnemStatus(demande.candidateId, demande);
+
+    await Notification.create({
+      userId: demande.userId,
+      message: `Félicitations ! Vous êtes maintenant enregistré auprès de l'ANEM. Votre ID ANEM: ${trimmedId}`,
+      type: "validation",
+    });
+
+    await logAdminAction(
+      req.user.id,
+      "candidate_anem_registration_success",
+      { type: "candidate_anem_registration", id: demande._id },
+      { anemId: trimmedId },
+      req,
+    );
+
+    res.json({
+      msg: "Inscription ANEM enregistrée avec succès",
+      status: "registered",
+      anemId: trimmedId,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const markCandidateAnemFailed = async (req, res) => {
+  try {
+    const { demandeId } = req.params;
+    const { reason, publicMessage } = req.body;
+
+    if (!reason || reason.trim().length === 0) {
+      return res.status(400).json({ msg: "Raison de l'échec requise" });
+    }
+
+    const demande = await CandidateAnemRegistration.findById(demandeId);
+    if (!demande) {
+      return res.status(404).json({ msg: "Demande introuvable" });
+    }
+
+    if (!["pending", "in_progress"].includes(demande.status)) {
+      return res.status(400).json({
+        msg: "Seules les demandes en attente ou en cours peuvent être marquées comme échouées",
+        currentStatus: demande.status,
+      });
+    }
+
+    const previousStatus = demande.status;
+    demande.status = "failed";
+    demande.failureReason = reason;
+
+    demande.adminNotes.push({
+      content: publicMessage || `Inscription échouée: ${reason}`,
+      createdBy: req.user.id,
+      isPublic: true,
+    });
+
+    demande.addAuditEntry(
+      "status_changed",
+      req.user.id,
+      { previousValue: previousStatus, newValue: "failed" },
+      req,
+    );
+
+    await demande.save();
+    await syncCandidateAnemStatus(demande.candidateId, demande);
+
+    await Notification.create({
+      userId: demande.userId,
+      message: `Nous n'avons pas pu finaliser votre inscription ANEM. Raison: ${reason}. Vous pouvez réessayer en soumettant une nouvelle demande.`,
+      type: "alerte",
+    });
+
+    await logAdminAction(
+      req.user.id,
+      "candidate_anem_registration_failed",
+      { type: "candidate_anem_registration", id: demande._id },
+      { reason },
+      req,
+    );
+
+    res.json({
+      msg: "Inscription marquée comme échouée",
+      status: "failed",
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const addCandidateAnemAdminNote = async (req, res) => {
+  try {
+    const { demandeId } = req.params;
+    const { note, isPublic = false } = req.body;
+
+    if (!note || note.trim().length === 0) {
+      return res.status(400).json({ msg: "Note requise" });
+    }
+
+    const demande = await CandidateAnemRegistration.findById(demandeId);
+    if (!demande) {
+      return res.status(404).json({ msg: "Demande introuvable" });
+    }
+
+    demande.adminNotes.push({
+      content: note.trim(),
+      createdBy: req.user.id,
+      isPublic: isPublic,
+    });
+
+    demande.addAuditEntry(
+      "note_added",
+      req.user.id,
+      { newValue: { note, isPublic } },
+      req,
+    );
+
+    await demande.save();
+
+    if (isPublic) {
+      await Notification.create({
+        userId: demande.userId,
+        message: `Mise à jour concernant votre demande ANEM: ${note.substring(0, 100)}${note.length > 100 ? "..." : ""}`,
+        type: "info",
+      });
+    }
+
+    await logAdminAction(
+      req.user.id,
+      "candidate_anem_note_added",
+      { type: "candidate_anem_registration", id: demande._id },
+      { isPublic },
+      req,
+    );
+
+    const user = await User.findById(req.user.id).select("nom");
+
+    res.json({
+      msg: "Note ajoutée",
+      note: {
+        content: note.trim(),
+        createdAt: new Date(),
+        createdBy: { nom: user.nom },
+        isPublic,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getCandidateAnemStats = async (req, res) => {
+  try {
+    const now = new Date();
+    const thirtyDaysAgo = new Date(now - 30 * 24 * 60 * 60 * 1000);
+    const sevenDaysAgo = new Date(now - 7 * 24 * 60 * 60 * 1000);
+
+    const [
+      statusCounts,
+      newDemandesThisWeek,
+      newDemandesThisMonth,
+      pendingOlderThan7Days,
+      registrationsByType,
+      processingTimes,
+    ] = await Promise.all([
+      CandidateAnemRegistration.aggregate([
+        { $match: { status: { $ne: "draft" } } },
+        { $group: { _id: "$status", count: { $sum: 1 } } },
+      ]),
+      CandidateAnemRegistration.countDocuments({
+        status: { $ne: "draft" },
+        createdAt: { $gte: sevenDaysAgo },
+      }),
+      CandidateAnemRegistration.countDocuments({
+        status: { $ne: "draft" },
+        createdAt: { $gte: thirtyDaysAgo },
+      }),
+      CandidateAnemRegistration.countDocuments({
+        status: { $in: ["pending", "pending_verification"] },
+        createdAt: { $lt: sevenDaysAgo },
+      }),
+      CandidateAnemRegistration.aggregate([
+        { $match: { status: { $ne: "draft" } } },
+        { $group: { _id: "$registrationType", count: { $sum: 1 } } },
+      ]),
+      CandidateAnemRegistration.aggregate([
+        {
+          $match: {
+            status: "registered",
+            verifiedAt: { $exists: true },
+            formSubmittedAt: { $exists: true },
+          },
+        },
+        {
+          $project: {
+            processingDays: {
+              $divide: [
+                { $subtract: ["$verifiedAt", "$formSubmittedAt"] },
+                1000 * 60 * 60 * 24,
+              ],
+            },
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            avgDays: { $avg: "$processingDays" },
+            minDays: { $min: "$processingDays" },
+            maxDays: { $max: "$processingDays" },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+    ]);
+
+    const countsMap = {};
+    statusCounts.forEach((s) => {
+      countsMap[s._id] = s.count;
+    });
+
+    const typeMap = {};
+    registrationsByType.forEach((t) => {
+      typeMap[t._id] = t.count;
+    });
+
+    const totalDemandes = Object.values(countsMap).reduce((a, b) => a + b, 0);
+    const successfulRegistrations = countsMap["registered"] || 0;
+    const successRate =
+      totalDemandes > 0
+        ? Math.round((successfulRegistrations / totalDemandes) * 100)
+        : 0;
+
+    res.json({
+      overview: {
+        total: totalDemandes,
+        pending:
+          (countsMap["pending"] || 0) +
+          (countsMap["pending_verification"] || 0),
+        inProgress: countsMap["in_progress"] || 0,
+        registered: countsMap["registered"] || 0,
+        failed: countsMap["failed"] || 0,
+        rejected: countsMap["rejected"] || 0,
+      },
+      trends: {
+        newThisWeek: newDemandesThisWeek,
+        newThisMonth: newDemandesThisMonth,
+        pendingOlderThan7Days,
+      },
+      byType: {
+        siteRegistration: typeMap["site_registration"] || 0,
+        selfDeclared: typeMap["self_declared"] || 0,
+      },
+      performance: {
+        successRate: `${successRate}%`,
+        avgProcessingDays: processingTimes[0]?.avgDays?.toFixed(1) || "N/A",
+        minProcessingDays: processingTimes[0]?.minDays?.toFixed(1) || "N/A",
+        maxProcessingDays: processingTimes[0]?.maxDays?.toFixed(1) || "N/A",
+        totalCompleted: processingTimes[0]?.count || 0,
+      },
+      statusCounts: countsMap,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getCandidateAnemNewCount = async (req, res) => {
+  try {
+    const [pendingCount, unassignedCount] = await Promise.all([
+      CandidateAnemRegistration.countDocuments({
+        status: { $in: ["pending", "pending_verification"] },
+      }),
+      CandidateAnemRegistration.countDocuments({
+        status: { $in: ["pending", "pending_verification"] },
+        assignedTo: { $exists: false },
+      }),
+    ]);
+
+    res.json({
+      total: pendingCount,
+      unassigned: unassignedCount,
+      hasNew: pendingCount > 0,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
 === controllers\candidateApplicationController.js ===
 import Application from "../models/Application.js";
 import Interview from "../models/Interview.js";
@@ -5958,6 +7677,7 @@ import Skill from "../models/Skills.js";
 import ProposedSkill from "../models/ProposedSkill.js";
 import SystemSettings from "../models/SystemSettings.js";
 import Notification from "../models/Notification.js";
+import CandidateAnemRegistration from "../models/CandidateAnemRegistration.js";
 import Interview from "../models/Interview.js";
 import {
   uploadCV as cloudinaryUploadCV,
@@ -5968,13 +7688,21 @@ import {
 } from "../config/cloudinary.js";
 import { calculateProfileCompletion } from "../utils/profileCompletion.js";
 
+import {
+  addSkillToCandidate as addSkill,
+  updateCandidateSkill as updateSkill,
+  deleteCandidateSkill as deleteSkill,
+  getSkillDetails,
+  submitSkillFeedback,
+} from "./skillController.js";
+
 
 
 export const getProfile = async (req, res) => {
   try {
     const candidate = await Candidate.findOne({ userId: req.user.id })
       .populate("userId", "nom email emailVerified")
-      .populate("skills.skillId", "name category");
+      .populate("skills.officialSkillId", "name category");
 
     if (!candidate) {
       return res.status(404).json({ msg: "Profil introuvable." });
@@ -5987,6 +7715,11 @@ export const getProfile = async (req, res) => {
       profil: candidate,
       completion,
       emailVerified: user.emailVerified,
+      anem: {
+        status: candidate.anem?.status || "not_started",
+        anemId: candidate.anem?.anemId || null,
+        isRegistered: candidate.anem?.status === "registered",
+      },
     });
   } catch (err) {
     res.status(500).json({ msg: err.message });
@@ -6208,123 +7941,6 @@ export const deleteCV = async (req, res) => {
 };
 
 
-
-export const addSkill = async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const { name, level } = req.body;
-
-    const candidate = await Candidate.findOne({ userId });
-    if (!candidate) {
-      return res.status(404).json({ msg: "Profil introuvable." });
-    }
-
-    const normalizedName = name.trim().toLowerCase();
-
-    
-    const existingSkill = candidate.skills.find(
-      (s) => s.name.toLowerCase() === normalizedName,
-    );
-    if (existingSkill) {
-      return res.status(400).json({ msg: "Vous avez déjà cette compétence." });
-    }
-
-    
-    const officialSkill = await Skill.findOne({ name: normalizedName });
-
-    if (officialSkill) {
-      
-      candidate.skills.push({
-        name: officialSkill.name,
-        level: level || "beginner",
-        domain: officialSkill.category,
-        skillId: officialSkill._id,
-        isProposed: false,
-      });
-    } else {
-      
-      const proposalEnabled = await SystemSettings.getSetting(
-        "skill_proposal_enabled",
-        true,
-      );
-
-      if (!proposalEnabled) {
-        return res.status(400).json({
-          msg: "Cette compétence n'existe pas dans notre liste. Veuillez en sélectionner une parmi les suggestions.",
-        });
-      }
-
-      
-      await ProposedSkill.proposeSkill(normalizedName, userId, candidate._id);
-
-      
-      candidate.skills.push({
-        name: normalizedName,
-        level: level || "beginner",
-        domain: null,
-        skillId: null,
-        isProposed: true,
-      });
-    }
-
-    await candidate.save();
-
-    res.json({
-      msg: officialSkill
-        ? "Compétence ajoutée"
-        : "Compétence proposée et ajoutée à votre profil",
-      skills: candidate.skills,
-      wasProposed: !officialSkill,
-    });
-  } catch (err) {
-    res.status(500).json({ msg: err.message });
-  }
-};
-
-export const updateSkill = async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const { skillId } = req.params;
-    const { level } = req.body;
-
-    const candidate = await Candidate.findOne({ userId });
-    if (!candidate) {
-      return res.status(404).json({ msg: "Profil introuvable." });
-    }
-
-    const skill = candidate.skills.id(skillId);
-    if (!skill) {
-      return res.status(404).json({ msg: "Compétence introuvable." });
-    }
-
-    
-    if (level) skill.level = level;
-
-    await candidate.save();
-    res.json({ msg: "Compétence mise à jour", skills: candidate.skills });
-  } catch (err) {
-    res.status(500).json({ msg: err.message });
-  }
-};
-
-export const deleteSkill = async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const { skillId } = req.params;
-
-    const candidate = await Candidate.findOne({ userId });
-    if (!candidate) {
-      return res.status(404).json({ msg: "Profil introuvable." });
-    }
-
-    candidate.skills.pull(skillId);
-    await candidate.save();
-
-    res.json({ msg: "Compétence supprimée", skills: candidate.skills });
-  } catch (err) {
-    res.status(500).json({ msg: err.message });
-  }
-};
 
 
 
@@ -6911,6 +8527,11 @@ export const getCandidateStats = async (req, res) => {
         response: responseRate,
         view: viewRate,
       },
+      anem: {
+        status: candidate.anem?.status || "not_started",
+        anemId: candidate.anem?.anemId || null,
+        isRegistered: candidate.anem?.status === "registered",
+      },
       completion: profileCompletion,
       suggestions,
       cvCount: candidate.cvs.length,
@@ -7033,10 +8654,26 @@ export const getRecommendedOffers = async (req, res) => {
       _id: { $nin: appliedOfferIds },
     };
 
-    
-    const candidateSkills = (candidate.skills || [])
-      .map((s) => s.name?.trim().toLowerCase())
-      .filter(Boolean);
+    const candidateSkills = [];
+
+    for (const skill of candidate.skills || []) {
+      if (!skill.isVisibleToRecruiters) continue;
+
+      
+      if (skill.normalizedText) {
+        candidateSkills.push(skill.normalizedText);
+      }
+
+      
+      if (skill.officialSkillName) {
+        candidateSkills.push(skill.officialSkillName.toLowerCase());
+      }
+
+      
+      if (skill.domain) {
+        candidateSkills.push(skill.domain.toLowerCase());
+      }
+    }
 
     const candidateWilaya = candidate.residence?.wilaya;
     const desiredPosition = candidate.desiredPosition?.toLowerCase();
@@ -7178,6 +8815,13 @@ export const getRecommendedOffers = async (req, res) => {
     console.error("Recommendation error:", err);
     res.status(500).json({ msg: err.message });
   }
+};
+export {
+  addSkill,
+  updateSkill,
+  deleteSkill,
+  getSkillDetails,
+  submitSkillFeedback,
 };
 
 
@@ -10213,28 +11857,165 @@ export const getCandidateFullProfile = async (req, res) => {
 
 === controllers\skillController.js ===
 import Skill from "../models/Skills.js";
+import SkillCluster from "../models/SkillCluster.js";
+import SkillFeedback from "../models/SkillFeedback.js";
 import ProposedSkill from "../models/ProposedSkill.js";
 import Candidate from "../models/Candidate.js";
+import User from "../models/User.js";
 import SystemSettings from "../models/SystemSettings.js";
+import { logAdminAction } from "../models/AdminLog.js";
+
+
+
+const ABUSE_PATTERNS = [
+  /\b(ceo of|king of|lord of|god of|master of)\b/i,
+  /\b(fuck|shit|ass|porn|xxx|dick|pussy|bitch)\b/i,
+  /(.)\1{4,}/i, 
+  /^.{0,1}$/i, 
+  /^.{100,}$/i, 
+];
+
+const detectAbuse = (text) => {
+  for (const pattern of ABUSE_PATTERNS) {
+    if (pattern.test(text)) {
+      return true;
+    }
+  }
+  return false;
+};
+
+
+
+const levenshtein = (a, b) => {
+  const matrix = Array.from({ length: a.length + 1 }, (_, i) =>
+    Array.from({ length: b.length + 1 }, (_, j) =>
+      i === 0 ? j : j === 0 ? i : 0,
+    ),
+  );
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      matrix[i][j] = Math.min(
+        matrix[i - 1][j] + 1,
+        matrix[i][j - 1] + 1,
+        matrix[i - 1][j - 1] + cost,
+      );
+    }
+  }
+  return matrix[a.length][b.length];
+};
+
+const similarity = (a, b) => {
+  const maxLen = Math.max(a.length, b.length);
+  if (maxLen === 0) return 1;
+  return 1 - levenshtein(a, b) / maxLen;
+};
+
+const findBestMatch = async (rawText, threshold = 0.6) => {
+  const normalized = rawText.trim().toLowerCase();
+
+  
+  const exactMatch = await Skill.findOne({
+    name: normalized,
+    isHidden: { $ne: true },
+  });
+  if (exactMatch) {
+    return { match: exactMatch, type: "exact", confidence: 1.0 };
+  }
+
+  
+  const aliasMatch = await Skill.findOne({
+    aliases: normalized,
+    isHidden: { $ne: true },
+  });
+  if (aliasMatch) {
+    return { match: aliasMatch, type: "alias", confidence: 0.95 };
+  }
+
+  
+  const prefix = normalized.substring(
+    0,
+    Math.max(2, Math.floor(normalized.length * 0.5)),
+  );
+  const candidates = await Skill.find({
+    $or: [
+      { name: { $regex: prefix, $options: "i" } },
+      { aliases: { $regex: prefix, $options: "i" } },
+    ],
+    isHidden: { $ne: true },
+  })
+    .limit(50)
+    .lean();
+
+  let bestScore = 0;
+  let bestCandidate = null;
+
+  for (const skill of candidates) {
+    const nameScore = similarity(normalized, skill.name);
+    let maxAliasScore = 0;
+    for (const alias of skill.aliases || []) {
+      const aliasScore = similarity(normalized, alias);
+      if (aliasScore > maxAliasScore) maxAliasScore = aliasScore;
+    }
+    const score = Math.max(nameScore, maxAliasScore);
+    if (score > bestScore) {
+      bestScore = score;
+      bestCandidate = skill;
+    }
+  }
+
+  if (bestScore >= threshold && bestCandidate) {
+    return {
+      match: bestCandidate,
+      type: bestScore >= 0.9 ? "alias" : "fuzzy",
+      confidence: bestScore,
+    };
+  }
+
+  return { match: null, type: "unmatched", confidence: 0 };
+};
+
+
+
+
 
 
 export const getSkills = async (req, res) => {
   try {
     const { search, category } = req.query;
-    let query = {};
+
+    const suggestionsEnabled = await SystemSettings.getSetting(
+      "skill_suggestions_enabled",
+      true,
+    );
+
+    if (!suggestionsEnabled && search) {
+      return res.json({ skills: [], categories: [] });
+    }
+
+    let query = { isHidden: { $ne: true } };
 
     if (search) {
-      query.name = { $regex: search, $options: "i" };
+      const escaped = search.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      query.$or = [
+        { name: { $regex: escaped, $options: "i" } },
+        { aliases: { $regex: escaped, $options: "i" } },
+      ];
     }
 
     if (category) {
       query.category = category;
     }
 
-    const skills = await Skill.find(query).sort({ name: 1 }).limit(50).lean();
+    const skills = await Skill.find(query)
+      .sort({ usageCount: -1, name: 1 })
+      .limit(50)
+      .select("name category subCategory aliases usageCount")
+      .lean();
 
-    
-    const categories = await Skill.distinct("category");
+    const categories = await Skill.distinct("category", {
+      isHidden: { $ne: true },
+    });
 
     res.json({
       skills,
@@ -10248,33 +12029,569 @@ export const getSkills = async (req, res) => {
 
 export const getSkillProposalStatus = async (req, res) => {
   try {
-    const enabled = await SystemSettings.getSetting(
+    const settings = await SystemSettings.getMultipleSettings([
       "skill_proposal_enabled",
-      true,
-    );
-    res.json({ enabled });
+      "skill_system_enabled",
+      "max_skills_per_candidate",
+      "skill_level_enabled",
+      "skill_suggestions_enabled",
+      "skill_feedback_enabled",
+    ]);
+
+    res.json({
+      systemEnabled: settings.skill_system_enabled ?? true,
+      proposalEnabled: settings.skill_proposal_enabled ?? true,
+      maxSkills: settings.max_skills_per_candidate ?? 6,
+      levelEnabled: settings.skill_level_enabled ?? true,
+      suggestionsEnabled: settings.skill_suggestions_enabled ?? true,
+      feedbackEnabled: settings.skill_feedback_enabled ?? true,
+    });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
 };
 
 
+export const suggestSkills = async (req, res) => {
+  try {
+    const { q } = req.query;
+
+    if (!q || q.trim().length < 2) {
+      return res.json({ suggestions: [] });
+    }
+
+    const suggestionsEnabled = await SystemSettings.getSetting(
+      "skill_suggestions_enabled",
+      true,
+    );
+
+    if (!suggestionsEnabled) {
+      return res.json({ suggestions: [] });
+    }
+
+    const threshold = await SystemSettings.getSetting(
+      "skill_suggestion_threshold",
+      0.6,
+    );
+
+    const normalized = q.trim().toLowerCase();
+    const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+    
+    const officialMatches = await Skill.find({
+      $or: [
+        { name: { $regex: escaped, $options: "i" } },
+        { aliases: { $regex: escaped, $options: "i" } },
+      ],
+      isHidden: { $ne: true },
+    })
+      .sort({ usageCount: -1 })
+      .limit(10)
+      .select("name category usageCount")
+      .lean();
+
+    
+    const suggestions = officialMatches.map((skill) => {
+      const score = similarity(normalized, skill.name);
+      let matchLevel = "close";
+      if (score >= 0.9) matchLevel = "strong";
+      if (score < threshold) matchLevel = "weak";
+
+      return {
+        _id: skill._id,
+        name: skill.name,
+        category: skill.category,
+        confidence: Math.round(score * 100) / 100,
+        matchLevel,
+      };
+    });
+
+    
+    const filtered = suggestions.filter((s) => s.confidence >= threshold);
+
+    
+    filtered.sort((a, b) => b.confidence - a.confidence);
+
+    res.json({
+      suggestions: filtered.slice(0, 5),
+      query: q.trim(),
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const addSkillToCandidate = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { name, level, selectedSuggestionId } = req.body;
+
+    if (!name || name.trim().length === 0) {
+      return res
+        .status(400)
+        .json({ msg: "Le nom de la compétence est requis." });
+    }
+
+    const systemEnabled = await SystemSettings.getSetting(
+      "skill_system_enabled",
+      true,
+    );
+    if (!systemEnabled) {
+      return res
+        .status(400)
+        .json({ msg: "Le système de compétences est actuellement désactivé." });
+    }
+
+    const candidate = await Candidate.findOne({ userId });
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil introuvable." });
+    }
+
+    const maxSkills = await SystemSettings.getSetting(
+      "max_skills_per_candidate",
+      6,
+    );
+    if (candidate.skills.length >= maxSkills) {
+      return res.status(400).json({
+        msg: `Vous ne pouvez pas ajouter plus de ${maxSkills} compétences.`,
+        maxSkills,
+      });
+    }
+
+    const rawText = name.trim();
+    const normalizedText = rawText.toLowerCase();
+
+    
+    const existingSkill = candidate.skills.find(
+      (s) => s.normalizedText === normalizedText,
+    );
+    if (existingSkill) {
+      return res.status(400).json({ msg: "Vous avez déjà cette compétence." });
+    }
+
+    
+    const abuseEnabled = await SystemSettings.getSetting(
+      "skill_abuse_detection_enabled",
+      true,
+    );
+    const isAbusive = abuseEnabled && detectAbuse(rawText);
+
+    
+    const skillEntry = {
+      rawText,
+      normalizedText,
+      level: level || "unset",
+      addedAt: new Date(),
+      isVisibleToRecruiters: !isAbusive,
+      isFlagged: isAbusive,
+      flagReason: isAbusive ? "auto_detected_abuse" : undefined,
+    };
+
+    
+    if (selectedSuggestionId) {
+      const officialSkill = await Skill.findById(selectedSuggestionId);
+      if (officialSkill && !officialSkill.isHidden) {
+        skillEntry.officialSkillId = officialSkill._id;
+        skillEntry.officialSkillName = officialSkill.name;
+        skillEntry.domain = officialSkill.category;
+        skillEntry.subDomain = officialSkill.subCategory;
+        skillEntry.matchType = "exact";
+
+        
+        await Skill.findByIdAndUpdate(officialSkill._id, {
+          $inc: { usageCount: 1 },
+        });
+      }
+    } else if (!isAbusive) {
+      
+      const proposalEnabled = await SystemSettings.getSetting(
+        "skill_proposal_enabled",
+        true,
+      );
+
+      const threshold = await SystemSettings.getSetting(
+        "skill_suggestion_threshold",
+        0.6,
+      );
+
+      const matchResult = await findBestMatch(normalizedText, threshold);
+
+      if (matchResult.match && matchResult.confidence >= 0.9) {
+        
+        skillEntry.officialSkillId = matchResult.match._id;
+        skillEntry.officialSkillName = matchResult.match.name;
+        skillEntry.domain = matchResult.match.category;
+        skillEntry.subDomain = matchResult.match.subCategory;
+        skillEntry.matchType = matchResult.type === "exact" ? "exact" : "alias";
+
+        await Skill.findByIdAndUpdate(matchResult.match._id, {
+          $inc: { usageCount: 1 },
+        });
+      } else {
+        
+        skillEntry.matchType = "unmatched";
+
+        if (!proposalEnabled) {
+          return res.status(400).json({
+            msg: "Cette compétence n'existe pas dans notre liste. Veuillez en sélectionner une parmi les suggestions.",
+          });
+        }
+      }
+    }
+
+    
+    if (!isAbusive) {
+      try {
+        const { cluster } = await SkillCluster.trackVariant(normalizedText);
+        skillEntry.clusterId = cluster._id;
+      } catch (clusterErr) {
+        console.error("Cluster tracking error (non-blocking):", clusterErr);
+      }
+    } else {
+      
+      try {
+        const { cluster } = await SkillCluster.trackVariant(normalizedText);
+        skillEntry.clusterId = cluster._id;
+        cluster.isFlagged = true;
+        cluster.flagCount = (cluster.flagCount || 0) + 1;
+        cluster.flagReasons.push({
+          reason: "auto_abuse_detection",
+          flaggedBy: "system",
+          flaggedAt: new Date(),
+        });
+        await cluster.save();
+      } catch (clusterErr) {
+        console.error("Cluster flagging error (non-blocking):", clusterErr);
+      }
+    }
+
+    candidate.skills.push(skillEntry);
+    await candidate.save();
+
+    const addedSkill = candidate.skills[candidate.skills.length - 1];
+
+    res.json({
+      msg: "Compétence ajoutée",
+      skill: {
+        _id: addedSkill._id,
+        rawText: addedSkill.rawText,
+        level: addedSkill.level,
+        officialSkillName: addedSkill.officialSkillName,
+        domain: addedSkill.domain,
+        subDomain: addedSkill.subDomain,
+        matchType: addedSkill.matchType,
+      },
+      totalSkills: candidate.skills.length,
+      maxSkills,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const updateCandidateSkill = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { skillId } = req.params;
+    const { level } = req.body;
+
+    const levelEnabled = await SystemSettings.getSetting(
+      "skill_level_enabled",
+      true,
+    );
+
+    const candidate = await Candidate.findOne({ userId });
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil introuvable." });
+    }
+
+    const skill = candidate.skills.id(skillId);
+    if (!skill) {
+      return res.status(404).json({ msg: "Compétence introuvable." });
+    }
+
+    if (level && levelEnabled) {
+      const validLevels = ["beginner", "intermediate", "expert", "unset"];
+      if (!validLevels.includes(level)) {
+        return res.status(400).json({ msg: "Niveau invalide." });
+      }
+      skill.level = level;
+    } else if (level && !levelEnabled) {
+      return res.status(400).json({
+        msg: "La définition du niveau de compétence est actuellement désactivée.",
+      });
+    }
+
+    await candidate.save();
+    res.json({ msg: "Compétence mise à jour", skill });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const deleteCandidateSkill = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { skillId } = req.params;
+
+    const candidate = await Candidate.findOne({ userId });
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil introuvable." });
+    }
+
+    const skill = candidate.skills.id(skillId);
+    if (!skill) {
+      return res.status(404).json({ msg: "Compétence introuvable." });
+    }
+
+    
+    if (skill.officialSkillId) {
+      await Skill.findByIdAndUpdate(skill.officialSkillId, {
+        $inc: { usageCount: -1 },
+      });
+    }
+
+    candidate.skills.pull(skillId);
+    await candidate.save();
+
+    res.json({ msg: "Compétence supprimée", skills: candidate.skills });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const getSkillDetails = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { skillId } = req.params;
+
+    const candidate = await Candidate.findOne({ userId });
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil introuvable." });
+    }
+
+    const skill = candidate.skills.id(skillId);
+    if (!skill) {
+      return res.status(404).json({ msg: "Compétence introuvable." });
+    }
+
+    const feedbackEnabled = await SystemSettings.getSetting(
+      "skill_feedback_enabled",
+      true,
+    );
+
+    let canSubmitFeedback = false;
+    if (feedbackEnabled && skill.officialSkillId) {
+      const maxPerSkill = await SystemSettings.getSetting(
+        "skill_feedback_max_per_skill",
+        1,
+      );
+      const activeFeedback = await SkillFeedback.countDocuments({
+        candidateSkillId: skill._id,
+        userId,
+        status: "pending",
+      });
+      canSubmitFeedback = activeFeedback < maxPerSkill;
+    }
+
+    res.json({
+      _id: skill._id,
+      rawText: skill.rawText,
+      level: skill.level,
+      officialSkillName: skill.officialSkillName,
+      domain: skill.domain,
+      subDomain: skill.subDomain,
+      matchType: skill.matchType,
+      addedAt: skill.addedAt,
+      mappingHistory: skill.mappingHistory,
+      canSubmitFeedback,
+      feedbackEnabled,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const submitSkillFeedback = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { skillId } = req.params;
+    const { category, comment } = req.body;
+
+    const feedbackEnabled = await SystemSettings.getSetting(
+      "skill_feedback_enabled",
+      true,
+    );
+    if (!feedbackEnabled) {
+      return res.status(400).json({
+        msg: "Le système de feedback de compétences est actuellement désactivé.",
+      });
+    }
+
+    const candidate = await Candidate.findOne({ userId });
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil introuvable." });
+    }
+
+    const skill = candidate.skills.id(skillId);
+    if (!skill) {
+      return res.status(404).json({ msg: "Compétence introuvable." });
+    }
+
+    if (!skill.officialSkillId) {
+      return res.status(400).json({
+        msg: "Aucun mapping officiel à signaler pour cette compétence.",
+      });
+    }
+
+    
+    const maxPerWeek = await SystemSettings.getSetting(
+      "skill_feedback_max_per_week",
+      3,
+    );
+    const oneWeekAgo = new Date();
+    oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
+    const weeklyCount = await SkillFeedback.countDocuments({
+      userId,
+      createdAt: { $gte: oneWeekAgo },
+    });
+    if (weeklyCount >= maxPerWeek) {
+      return res.status(429).json({
+        msg: `Vous avez atteint la limite de ${maxPerWeek} feedback(s) par semaine.`,
+      });
+    }
+
+    
+    const maxPerSkill = await SystemSettings.getSetting(
+      "skill_feedback_max_per_skill",
+      1,
+    );
+    const skillCount = await SkillFeedback.countDocuments({
+      candidateSkillId: skill._id,
+      userId,
+      status: "pending",
+    });
+    if (skillCount >= maxPerSkill) {
+      return res.status(400).json({
+        msg: "Vous avez déjà un feedback en attente pour cette compétence.",
+      });
+    }
+
+    const validCategories = [
+      "incorrect_mapping",
+      "wrong_domain",
+      "skill_merged_incorrectly",
+      "other",
+    ];
+    if (!category || !validCategories.includes(category)) {
+      return res.status(400).json({ msg: "Catégorie de feedback invalide." });
+    }
+
+    const feedback = await SkillFeedback.create({
+      userId,
+      candidateId: candidate._id,
+      candidateSkillId: skill._id,
+      rawSkillText: skill.rawText,
+      mappedToSkillId: skill.officialSkillId,
+      mappedToName: skill.officialSkillName,
+      category,
+      comment: comment?.substring(0, 500),
+    });
+
+    res.json({
+      msg: "Feedback soumis. Merci pour votre contribution.",
+      feedbackId: feedback._id,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+
+
+
+
 export const createSkill = async (req, res) => {
   try {
-    const { name, category } = req.body;
+    const { name, category, subCategory, description, aliases } = req.body;
     const normalizedName = name.trim().toLowerCase();
 
-    const exist = await Skill.findOne({ name: normalizedName });
+    const exist = await Skill.findOne({
+      $or: [{ name: normalizedName }, { aliases: normalizedName }],
+    });
     if (exist) {
-      return res.status(400).json({ msg: "Cette compétence existe déjà." });
+      return res.status(400).json({
+        msg: "Cette compétence existe déjà.",
+        existingSkill: exist.name,
+      });
     }
+
+    const normalizedAliases = (aliases || [])
+      .map((a) => a.trim().toLowerCase())
+      .filter(Boolean);
 
     const newSkill = await Skill.create({
       name: normalizedName,
       category: category?.trim() || null,
+      subCategory: subCategory?.trim() || null,
+      description: description?.trim() || null,
+      aliases: normalizedAliases,
     });
 
+    await logAdminAction(
+      req.user.id,
+      "skill_created",
+      { type: "skill", id: newSkill._id },
+      { name: normalizedName, category },
+      req,
+    );
+
     res.status(201).json(newSkill);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const updateSkill = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, category, subCategory, description, aliases, isHidden } =
+      req.body;
+
+    const updates = {};
+    if (name) updates.name = name.trim().toLowerCase();
+    if (category !== undefined) updates.category = category?.trim() || null;
+    if (subCategory !== undefined)
+      updates.subCategory = subCategory?.trim() || null;
+    if (description !== undefined)
+      updates.description = description?.trim() || null;
+    if (aliases)
+      updates.aliases = aliases
+        .map((a) => a.trim().toLowerCase())
+        .filter(Boolean);
+    if (isHidden !== undefined) updates.isHidden = isHidden;
+
+    const skill = await Skill.findByIdAndUpdate(id, updates, { new: true });
+    if (!skill) {
+      return res.status(404).json({ msg: "Compétence introuvable" });
+    }
+
+    await logAdminAction(
+      req.user.id,
+      "skill_updated",
+      { type: "skill", id: skill._id },
+      { updates },
+      req,
+    );
+
+    res.json({ msg: "Compétence mise à jour", skill });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
@@ -10287,6 +12604,15 @@ export const deleteSkill = async (req, res) => {
     if (!skill) {
       return res.status(404).json({ msg: "Compétence introuvable" });
     }
+
+    await logAdminAction(
+      req.user.id,
+      "skill_deleted",
+      { type: "skill", id: req.params.id },
+      { name: skill.name },
+      req,
+    );
+
     res.json({ msg: "Compétence supprimée" });
   } catch (err) {
     res.status(500).json({ msg: err.message });
@@ -10294,29 +12620,451 @@ export const deleteSkill = async (req, res) => {
 };
 
 
-export const getProposedSkills = async (req, res) => {
-  try {
-    const { status = "pending", page = 1, limit = 20 } = req.query;
-    const skip = (page - 1) * limit;
 
-    let query = {};
-    if (status !== "all") {
-      query.status = status;
+
+export const getTrendingClusters = async (req, res) => {
+  try {
+    const { days = 30, limit = 20 } = req.query;
+
+    const windowDays = await SystemSettings.getSetting(
+      "skill_trending_window_days",
+      parseInt(days),
+    );
+
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - windowDays);
+
+    const clusters = await SkillCluster.find({
+      status: "pending",
+      isFlagged: false,
+      createdAt: { $gte: startDate },
+    })
+      .sort({ totalUsageCount: -1 })
+      .limit(parseInt(limit))
+      .lean();
+
+    
+    const enriched = clusters.map((c) => {
+      const daysSinceCreation = Math.max(
+        1,
+        (Date.now() - new Date(c.createdAt).getTime()) / (1000 * 60 * 60 * 24),
+      );
+      const growthRate = c.totalUsageCount / daysSinceCreation;
+
+      return {
+        ...c,
+        growthRate: Math.round(growthRate * 100) / 100,
+        variantCount: c.variants?.length || 0,
+      };
+    });
+
+    enriched.sort((a, b) => b.growthRate - a.growthRate);
+
+    res.json({ data: enriched, windowDays });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const getDuplicateClusters = async (req, res) => {
+  try {
+    const { limit = 20 } = req.query;
+
+    const clusters = await SkillCluster.find({
+      status: "pending",
+      "variants.1": { $exists: true }, 
+    })
+      .sort({ totalUsageCount: -1 })
+      .limit(parseInt(limit))
+      .lean();
+
+    const enriched = clusters.map((c) => ({
+      ...c,
+      variantCount: c.variants?.length || 0,
+      variants: c.variants?.sort((a, b) => b.usageCount - a.usageCount),
+    }));
+
+    res.json({ data: enriched });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const getOrphanClusters = async (req, res) => {
+  try {
+    const { limit = 20, minUsage = 3 } = req.query;
+
+    const clusters = await SkillCluster.find({
+      status: "pending",
+      promotedToSkillId: { $exists: false },
+      isFlagged: false,
+      totalUsageCount: { $gte: parseInt(minUsage) },
+    })
+      .sort({ totalUsageCount: -1 })
+      .limit(parseInt(limit))
+      .lean();
+
+    res.json({ data: clusters });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const getFlaggedClusters = async (req, res) => {
+  try {
+    const { limit = 20 } = req.query;
+
+    const clusters = await SkillCluster.find({
+      isFlagged: true,
+    })
+      .sort({ flagCount: -1, createdAt: -1 })
+      .limit(parseInt(limit))
+      .lean();
+
+    res.json({ data: clusters });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const getClusterDetail = async (req, res) => {
+  try {
+    const { clusterId } = req.params;
+
+    const cluster = await SkillCluster.findById(clusterId)
+      .populate("promotedToSkillId", "name category")
+      .populate("promotedBy", "nom")
+      .populate("dismissedBy", "nom");
+
+    if (!cluster) {
+      return res.status(404).json({ msg: "Cluster introuvable" });
     }
 
-    const [proposedSkills, total] = await Promise.all([
-      ProposedSkill.find(query)
-        .sort({ proposalCount: -1, createdAt: -1 })
-        .skip(skip)
+    
+    const threshold = await SystemSettings.getSetting(
+      "skill_suggestion_threshold",
+      0.6,
+    );
+
+    const matchResult = await findBestMatch(cluster.canonicalName, threshold);
+
+    
+    const variantTexts = cluster.variants.map((v) => v.text);
+    const candidateCount = await Candidate.countDocuments({
+      "skills.normalizedText": { $in: variantTexts },
+    });
+
+    res.json({
+      cluster,
+      systemSuggestion: matchResult.match
+        ? {
+            name: matchResult.match.name,
+            category: matchResult.match.category,
+            confidence: matchResult.confidence,
+          }
+        : null,
+      candidateCount,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const promoteCluster = async (req, res) => {
+  try {
+    const { clusterId } = req.params;
+    const { name, domain, subDomain, description, aliasVariantTexts } =
+      req.body;
+
+    if (!name || !domain) {
+      return res.status(400).json({ msg: "Nom et domaine sont obligatoires." });
+    }
+
+    const cluster = await SkillCluster.findById(clusterId);
+    if (!cluster) {
+      return res.status(404).json({ msg: "Cluster introuvable" });
+    }
+
+    if (cluster.status === "promoted") {
+      return res.status(400).json({ msg: "Ce cluster a déjà été promu." });
+    }
+
+    const normalizedName = name.trim().toLowerCase();
+
+    
+    let officialSkill = await Skill.findOne({ name: normalizedName });
+
+    const selectedAliases = (aliasVariantTexts || [])
+      .map((a) => a.trim().toLowerCase())
+      .filter((a) => a !== normalizedName);
+
+    
+    const allVariantTexts = cluster.variants
+      .map((v) => v.text)
+      .filter((t) => t !== normalizedName);
+
+    const combinedAliases = [
+      ...new Set([...selectedAliases, ...allVariantTexts]),
+    ];
+
+    if (officialSkill) {
+      
+      const existingAliases = new Set(officialSkill.aliases || []);
+      combinedAliases.forEach((a) => existingAliases.add(a));
+      officialSkill.aliases = [...existingAliases];
+      if (!officialSkill.category && domain)
+        officialSkill.category = domain.trim();
+      if (!officialSkill.subCategory && subDomain)
+        officialSkill.subCategory = subDomain.trim();
+      officialSkill.isPromoted = true;
+      officialSkill.promotedFrom = cluster._id;
+      await officialSkill.save();
+    } else {
+      officialSkill = await Skill.create({
+        name: normalizedName,
+        category: domain.trim(),
+        subCategory: subDomain?.trim() || null,
+        description: description?.trim() || null,
+        aliases: combinedAliases,
+        isPromoted: true,
+        promotedFrom: cluster._id,
+      });
+    }
+
+    
+    cluster.status = "promoted";
+    cluster.promotedToSkillId = officialSkill._id;
+    cluster.promotedAt = new Date();
+    cluster.promotedBy = req.user.id;
+    await cluster.save();
+
+    
+    const autoMigrate = await SystemSettings.getSetting(
+      "skill_auto_migration_enabled",
+      true,
+    );
+
+    let migratedCount = 0;
+
+    if (autoMigrate) {
+      const variantTexts = cluster.variants.map((v) => v.text);
+      
+      const allTexts = [...new Set([...variantTexts, normalizedName])];
+
+      
+      const candidatesToUpdate = await Candidate.find({
+        "skills.normalizedText": { $in: allTexts },
+        "skills.matchType": { $in: ["unmatched", "fuzzy"] },
+      });
+
+      for (const candidate of candidatesToUpdate) {
+        let changed = false;
+        for (const skill of candidate.skills) {
+          if (
+            allTexts.includes(skill.normalizedText) &&
+            ["unmatched", "fuzzy"].includes(skill.matchType)
+          ) {
+            
+            skill.mappingHistory.push({
+              previousOfficialId: skill.officialSkillId,
+              previousOfficialName: skill.officialSkillName,
+              newOfficialId: officialSkill._id,
+              newOfficialName: officialSkill.name,
+              reason: "cluster_promotion",
+              migratedAt: new Date(),
+            });
+
+            skill.officialSkillId = officialSkill._id;
+            skill.officialSkillName = officialSkill.name;
+            skill.domain = officialSkill.category;
+            skill.subDomain = officialSkill.subCategory;
+            skill.matchType = "promoted";
+            
+            changed = true;
+          }
+        }
+        if (changed) {
+          await candidate.save();
+          migratedCount++;
+        }
+      }
+
+      
+      officialSkill.usageCount =
+        (officialSkill.usageCount || 0) + cluster.totalUsageCount;
+      await officialSkill.save();
+    }
+
+    await logAdminAction(
+      req.user.id,
+      "skill_cluster_promoted",
+      { type: "skill_cluster", id: cluster._id },
+      {
+        officialSkillId: officialSkill._id,
+        name: normalizedName,
+        domain,
+        aliasCount: combinedAliases.length,
+        migratedCandidates: migratedCount,
+      },
+      req,
+    );
+
+    res.json({
+      msg: "Compétence promue avec succès",
+      skill: officialSkill,
+      migratedCandidates: migratedCount,
+      aliasesAdded: combinedAliases.length,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const dismissCluster = async (req, res) => {
+  try {
+    const { clusterId } = req.params;
+    const { reason } = req.body;
+
+    const cluster = await SkillCluster.findById(clusterId);
+    if (!cluster) {
+      return res.status(404).json({ msg: "Cluster introuvable" });
+    }
+
+    cluster.status = "dismissed";
+    cluster.dismissedAt = new Date();
+    cluster.dismissedBy = req.user.id;
+    cluster.dismissReason = reason;
+    await cluster.save();
+
+    await logAdminAction(
+      req.user.id,
+      "skill_cluster_dismissed",
+      { type: "skill_cluster", id: cluster._id },
+      { reason },
+      req,
+    );
+
+    res.json({ msg: "Cluster rejeté" });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const flagCluster = async (req, res) => {
+  try {
+    const { clusterId } = req.params;
+    const { reason } = req.body;
+
+    const cluster = await SkillCluster.findById(clusterId);
+    if (!cluster) {
+      return res.status(404).json({ msg: "Cluster introuvable" });
+    }
+
+    cluster.isFlagged = true;
+    cluster.flagCount += 1;
+    cluster.flagReasons.push({
+      reason: reason || "admin_flagged",
+      flaggedBy: "admin",
+      flaggedAt: new Date(),
+    });
+    await cluster.save();
+
+    
+    const maxFlags = await SystemSettings.getSetting(
+      "skill_abuse_max_flags_before_hide",
+      3,
+    );
+
+    if (cluster.flagCount >= maxFlags) {
+      const variantTexts = cluster.variants.map((v) => v.text);
+      await Candidate.updateMany(
+        { "skills.normalizedText": { $in: variantTexts } },
+        { $set: { "skills.$[elem].isVisibleToRecruiters": false } },
+        { arrayFilters: [{ "elem.normalizedText": { $in: variantTexts } }] },
+      );
+    }
+
+    res.json({ msg: "Cluster signalé", flagCount: cluster.flagCount });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const unflagCluster = async (req, res) => {
+  try {
+    const { clusterId } = req.params;
+
+    const cluster = await SkillCluster.findById(clusterId);
+    if (!cluster) {
+      return res.status(404).json({ msg: "Cluster introuvable" });
+    }
+
+    cluster.isFlagged = false;
+    cluster.status = "pending";
+    await cluster.save();
+
+    
+    const variantTexts = cluster.variants.map((v) => v.text);
+    await Candidate.updateMany(
+      {
+        "skills.normalizedText": { $in: variantTexts },
+        "skills.flagReason": "auto_detected_abuse",
+      },
+      {
+        $set: {
+          "skills.$[elem].isVisibleToRecruiters": true,
+          "skills.$[elem].isFlagged": false,
+          "skills.$[elem].flagReason": null,
+        },
+      },
+      {
+        arrayFilters: [
+          {
+            "elem.normalizedText": { $in: variantTexts },
+            "elem.flagReason": "auto_detected_abuse",
+          },
+        ],
+      },
+    );
+
+    res.json({ msg: "Cluster débloqué" });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+
+
+export const getSkillFeedback = async (req, res) => {
+  try {
+    const { status = "pending", page = 1, limit = 20 } = req.query;
+
+    let query = {};
+    if (status !== "all") query.status = status;
+
+    const [feedbacks, total] = await Promise.all([
+      SkillFeedback.find(query)
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
         .limit(parseInt(limit))
-        .populate("proposedBy.userId", "nom email")
+        .populate("userId", "nom email")
+        .populate("mappedToSkillId", "name category")
         .populate("reviewedBy", "nom")
         .lean(),
-      ProposedSkill.countDocuments(query),
+      SkillFeedback.countDocuments(query),
     ]);
 
     res.json({
-      data: proposedSkills,
+      data: feedbacks,
       meta: {
         total,
         page: parseInt(page),
@@ -10330,128 +13078,209 @@ export const getProposedSkills = async (req, res) => {
 };
 
 
-export const approveProposedSkill = async (req, res) => {
+export const reviewSkillFeedback = async (req, res) => {
   try {
-    const { id } = req.params;
-    const { domain } = req.body;
+    const { feedbackId } = req.params;
+    const { action, note } = req.body;
 
-    const proposedSkill = await ProposedSkill.findById(id);
-    if (!proposedSkill) {
-      return res.status(404).json({ msg: "Compétence proposée introuvable" });
+    const validActions = [
+      "mapping_adjusted",
+      "mapping_removed",
+      "no_change",
+      "user_flagged",
+    ];
+    if (!action || !validActions.includes(action)) {
+      return res.status(400).json({ msg: "Action invalide." });
     }
 
-    if (proposedSkill.status !== "pending") {
-      return res
-        .status(400)
-        .json({ msg: "Cette compétence a déjà été traitée" });
+    const feedback = await SkillFeedback.findById(feedbackId);
+    if (!feedback) {
+      return res.status(404).json({ msg: "Feedback introuvable" });
+    }
+
+    feedback.status = action === "no_change" ? "rejected" : "accepted";
+    feedback.reviewedBy = req.user.id;
+    feedback.reviewedAt = new Date();
+    feedback.reviewNote = note;
+    feedback.actionTaken = action;
+    await feedback.save();
+
+    
+    if (action === "mapping_removed") {
+      const candidate = await Candidate.findById(feedback.candidateId);
+      if (candidate) {
+        const skill = candidate.skills.id(feedback.candidateSkillId);
+        if (skill) {
+          skill.mappingHistory.push({
+            previousOfficialId: skill.officialSkillId,
+            previousOfficialName: skill.officialSkillName,
+            newOfficialId: null,
+            newOfficialName: null,
+            reason: "feedback_accepted",
+            migratedAt: new Date(),
+          });
+          skill.officialSkillId = null;
+          skill.officialSkillName = null;
+          skill.domain = null;
+          skill.subDomain = null;
+          skill.matchType = "unmatched";
+          await candidate.save();
+        }
+      }
     }
 
     
-    let officialSkill = await Skill.findOne({ name: proposedSkill.label });
-
-    if (!officialSkill) {
-      
-      officialSkill = await Skill.create({
-        name: proposedSkill.label,
-        category: domain?.trim() || null,
-        wasProposed: true,
-        proposedSkillId: proposedSkill._id,
+    if (action === "user_flagged") {
+      await Candidate.findByIdAndUpdate(feedback.candidateId, {
+        $inc: { skillTrustScore: -10 },
       });
     }
 
-    
-    proposedSkill.status = "approved";
-    proposedSkill.domain = domain?.trim() || null;
-    proposedSkill.approvedSkillId = officialSkill._id;
-    proposedSkill.reviewedBy = req.user.id;
-    proposedSkill.reviewedAt = new Date();
-    await proposedSkill.save();
-
-    
-    const updateResult = await Candidate.updateMany(
-      {
-        "skills.name": proposedSkill.label,
-        "skills.domain": null,
-      },
-      {
-        $set: {
-          "skills.$[elem].domain": domain?.trim() || null,
-          "skills.$[elem].skillId": officialSkill._id,
-          "skills.$[elem].isProposed": false,
-        },
-      },
-      {
-        arrayFilters: [
-          { "elem.name": proposedSkill.label, "elem.domain": null },
-        ],
-      },
+    await logAdminAction(
+      req.user.id,
+      "skill_feedback_reviewed",
+      { type: "skill_feedback", id: feedback._id },
+      { action, note },
+      req,
     );
 
-    res.json({
-      msg: "Compétence approuvée et ajoutée à la liste officielle",
-      skill: officialSkill,
-      candidatesUpdated: updateResult.modifiedCount,
-    });
+    res.json({ msg: "Feedback traité", feedback });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
 };
 
 
-export const rejectProposedSkill = async (req, res) => {
+
+
+export const getSkillSystemStats = async (req, res) => {
   try {
-    const { id } = req.params;
-    const { reason } = req.body;
-
-    const proposedSkill = await ProposedSkill.findById(id);
-    if (!proposedSkill) {
-      return res.status(404).json({ msg: "Compétence proposée introuvable" });
-    }
-
-    proposedSkill.status = "rejected";
-    proposedSkill.reviewedBy = req.user.id;
-    proposedSkill.reviewedAt = new Date();
-    proposedSkill.reviewNote = reason;
-    await proposedSkill.save();
-
-    res.json({ msg: "Compétence proposée rejetée", proposedSkill });
-  } catch (err) {
-    res.status(500).json({ msg: err.message });
-  }
-};
-
-
-export const getProposedSkillsStats = async (req, res) => {
-  try {
-    const stats = await ProposedSkill.aggregate([
-      {
-        $group: {
-          _id: "$status",
-          count: { $sum: 1 },
+    const [
+      totalOfficialSkills,
+      totalClusters,
+      pendingClusters,
+      flaggedClusters,
+      promotedClusters,
+      pendingFeedback,
+      totalFeedback,
+      topSkills,
+      recentClusters,
+      categoryDistribution,
+    ] = await Promise.all([
+      Skill.countDocuments({ isHidden: { $ne: true } }),
+      SkillCluster.countDocuments(),
+      SkillCluster.countDocuments({ status: "pending", isFlagged: false }),
+      SkillCluster.countDocuments({ isFlagged: true }),
+      SkillCluster.countDocuments({ status: "promoted" }),
+      SkillFeedback.countDocuments({ status: "pending" }),
+      SkillFeedback.countDocuments(),
+      Skill.find({ isHidden: { $ne: true } })
+        .sort({ usageCount: -1 })
+        .limit(10)
+        .select("name category usageCount")
+        .lean(),
+      SkillCluster.find({ status: "pending" })
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .select("canonicalName totalUsageCount createdAt")
+        .lean(),
+      Skill.aggregate([
+        {
+          $match: {
+            isHidden: { $ne: true },
+            category: { $exists: true, $ne: null },
+          },
         },
-      },
+        { $group: { _id: "$category", count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+      ]),
     ]);
 
-    const statsMap = {
-      pending: 0,
-      approved: 0,
-      rejected: 0,
-      merged: 0,
-    };
-
-    stats.forEach((s) => {
-      statsMap[s._id] = s.count;
+    res.json({
+      officialSkills: totalOfficialSkills,
+      clusters: {
+        total: totalClusters,
+        pending: pendingClusters,
+        flagged: flaggedClusters,
+        promoted: promotedClusters,
+      },
+      feedback: {
+        pending: pendingFeedback,
+        total: totalFeedback,
+      },
+      topSkills,
+      recentClusters,
+      categoryDistribution,
     });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
 
-    const mostProposed = await ProposedSkill.find({ status: "pending" })
-      .sort({ proposalCount: -1 })
-      .limit(5)
-      .select("label proposalCount");
+
+
+
+export const getSkillSettings = async (req, res) => {
+  try {
+    const settings = await SystemSettings.getSettingsByCategory("skills");
+    res.json(settings);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+export const updateSkillSettings = async (req, res) => {
+  try {
+    const { settings } = req.body;
+
+    if (!settings || typeof settings !== "object") {
+      return res.status(400).json({ msg: "Settings object requis." });
+    }
+
+    const validSkillKeys = [
+      "skill_system_enabled",
+      "max_skills_per_candidate",
+      "skill_proposal_enabled",
+      "skill_suggestions_enabled",
+      "skill_suggestion_threshold",
+      "skill_level_enabled",
+      "skill_feedback_enabled",
+      "skill_feedback_max_per_week",
+      "skill_feedback_max_per_skill",
+      "skill_abuse_detection_enabled",
+      "skill_abuse_max_flags_before_hide",
+      "skill_auto_migration_enabled",
+      "skill_recruiter_search_expand_aliases",
+      "skill_trending_window_days",
+    ];
+
+    const updates = {};
+    for (const [key, value] of Object.entries(settings)) {
+      if (!validSkillKeys.includes(key)) {
+        return res.status(400).json({ msg: `Clé invalide: ${key}` });
+      }
+      updates[key] = value;
+    }
+
+    for (const [key, value] of Object.entries(updates)) {
+      await SystemSettings.setSetting(key, value, null, req.user.id);
+    }
+
+    await logAdminAction(
+      req.user.id,
+      "skill_settings_updated",
+      { type: "system_settings" },
+      { updates },
+      req,
+    );
+
+    const updatedSettings =
+      await SystemSettings.getSettingsByCategory("skills");
 
     res.json({
-      byStatus: statsMap,
-      total: Object.values(statsMap).reduce((a, b) => a + b, 0),
-      mostProposed,
+      msg: "Paramètres des compétences mis à jour",
+      settings: updatedSettings,
     });
   } catch (err) {
     res.status(500).json({ msg: err.message });
@@ -10459,14 +13288,37 @@ export const getProposedSkillsStats = async (req, res) => {
 };
 
 export default {
+  
   getSkills,
   getSkillProposalStatus,
+  suggestSkills,
+  
+  addSkillToCandidate,
+  updateCandidateSkill,
+  deleteCandidateSkill,
+  getSkillDetails,
+  submitSkillFeedback,
+  
   createSkill,
+  updateSkill,
   deleteSkill,
-  getProposedSkills,
-  approveProposedSkill,
-  rejectProposedSkill,
-  getProposedSkillsStats,
+  
+  getTrendingClusters,
+  getDuplicateClusters,
+  getOrphanClusters,
+  getFlaggedClusters,
+  getClusterDetail,
+  promoteCluster,
+  dismissCluster,
+  flagCluster,
+  unflagCluster,
+  
+  getSkillFeedback,
+  reviewSkillFeedback,
+  
+  getSkillSystemStats,
+  getSkillSettings,
+  updateSkillSettings,
 };
 
 
@@ -10980,6 +13832,40 @@ export const validators = {
     body("level").optional().isIn(["beginner", "intermediate", "expert"]),
     handleValidationErrors,
   ],
+  addSkillV2: [
+    body("name")
+      .trim()
+      .notEmpty()
+      .withMessage("Nom requis")
+      .isLength({ min: 1, max: 100 })
+      .withMessage("Le nom doit faire entre 1 et 100 caractères"),
+    body("level")
+      .optional()
+      .isIn(["beginner", "intermediate", "expert", "unset"])
+      .withMessage("Niveau invalide"),
+    body("selectedSuggestionId")
+      .optional()
+      .isMongoId()
+      .withMessage("ID suggestion invalide"),
+    handleValidationErrors,
+  ],
+
+  skillFeedback: [
+    body("category")
+      .isIn([
+        "incorrect_mapping",
+        "wrong_domain",
+        "skill_merged_incorrectly",
+        "other",
+      ])
+      .withMessage("Catégorie invalide"),
+    body("comment")
+      .optional()
+      .trim()
+      .isLength({ max: 500 })
+      .withMessage("Commentaire trop long (max 500)"),
+    handleValidationErrors,
+  ],
 
   addExperience: [
     body("jobTitle")
@@ -11197,7 +14083,6 @@ const adminLogSchema = new mongoose.Schema(
     action: {
       type: String,
       enum: [
-        
         "admin_created",
         "admin_deleted",
         "admin_suspended",
@@ -11235,7 +14120,6 @@ const adminLogSchema = new mongoose.Schema(
         "ticket_responded",
         "ticket_closed",
         "ticket_reassigned",
-        
         "anem_demande_viewed",
         "anem_demande_assigned",
         "anem_demande_in_progress",
@@ -11246,6 +14130,23 @@ const adminLogSchema = new mongoose.Schema(
         "anem_registration_failed",
         "anem_bulk_status_update",
         "anem_note_added",
+        
+        "skill_created",
+        "skill_updated",
+        "skill_deleted",
+        "skill_cluster_promoted",
+        "skill_cluster_dismissed",
+        "skill_feedback_reviewed",
+        "skill_settings_updated",
+        "candidate_anem_demande_viewed",
+        "candidate_anem_demande_assigned",
+        "candidate_anem_demande_in_progress",
+        "candidate_anem_pdf_downloaded",
+        "candidate_anem_id_approved",
+        "candidate_anem_id_rejected",
+        "candidate_anem_registration_success",
+        "candidate_anem_registration_failed",
+        "candidate_anem_note_added",
       ],
       required: true,
       index: true,
@@ -11262,6 +14163,11 @@ const adminLogSchema = new mongoose.Schema(
         "ticket",
         "admin",
         "anem_registration",
+        "candidate_anem_registration",
+        "skill",
+        "skill_cluster",
+        "skill_feedback",
+        "system_settings",
       ],
     },
     targetId: { type: mongoose.Schema.Types.ObjectId },
@@ -11872,18 +14778,76 @@ const experienceSchema = new mongoose.Schema({
 });
 
 const skillSchema = new mongoose.Schema({
-  name: { type: String, required: true, trim: true, lowercase: true },
+  rawText: {
+    type: String,
+    required: true,
+    trim: true,
+  },
+  normalizedText: {
+    type: String,
+    required: true,
+    trim: true,
+    lowercase: true,
+  },
   level: {
     type: String,
-    enum: ["beginner", "intermediate", "expert"],
-    default: "beginner",
+    enum: ["beginner", "intermediate", "expert", "unset"],
+    default: "unset",
   },
-  
-  domain: { type: String, default: null, trim: true },
-  
-  skillId: { type: mongoose.Schema.Types.ObjectId, ref: "Skill" },
-  
-  isProposed: { type: Boolean, default: false },
+  officialSkillId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Skill",
+    default: null,
+  },
+  officialSkillName: {
+    type: String,
+    default: null,
+  },
+  domain: {
+    type: String,
+    default: null,
+    trim: true,
+  },
+  subDomain: {
+    type: String,
+    default: null,
+    trim: true,
+  },
+  clusterId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "SkillCluster",
+    default: null,
+  },
+  matchType: {
+    type: String,
+    enum: ["exact", "alias", "promoted", "unmatched"],
+    default: "unmatched",
+  },
+  isVisibleToRecruiters: {
+    type: Boolean,
+    default: true,
+  },
+  isFlagged: {
+    type: Boolean,
+    default: false,
+  },
+  flagReason: {
+    type: String,
+  },
+  addedAt: {
+    type: Date,
+    default: Date.now,
+  },
+  mappingHistory: [
+    {
+      previousOfficialId: { type: mongoose.Schema.Types.ObjectId },
+      previousOfficialName: { type: String },
+      newOfficialId: { type: mongoose.Schema.Types.ObjectId },
+      newOfficialName: { type: String },
+      reason: { type: String },
+      migratedAt: { type: Date, default: Date.now },
+    },
+  ],
 });
 
 const candidateSchema = new mongoose.Schema(
@@ -11930,6 +14894,33 @@ const candidateSchema = new mongoose.Schema(
         ],
       },
     ],
+    
+    anem: {
+      registrationId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "CandidateAnemRegistration",
+      },
+      status: {
+        type: String,
+        enum: [
+          "not_started",
+          "draft",
+          "pending",
+          "pending_verification",
+          "in_progress",
+          "registered",
+          "failed",
+          "rejected",
+        ],
+        default: "not_started",
+      },
+      anemId: { type: String },
+      registeredAt: { type: Date },
+      hasSeenAnemInfo: { type: Boolean, default: false },
+      declinedAnem: { type: Boolean, default: false },
+      declinedAt: { type: Date },
+      lastStatusUpdate: { type: Date },
+    },
 
     profilePicture: { type: String },
     telephone: { type: String },
@@ -11960,13 +14951,374 @@ const candidateSchema = new mongoose.Schema(
     skills: [skillSchema],
     experiences: [experienceSchema],
     education: [educationSchema],
+
+    skillTrustScore: {
+      type: Number,
+      default: 100,
+      min: 0,
+      max: 100,
+    },
   },
   { timestamps: true },
 );
+
 candidateSchema.index({ userId: 1 });
 candidateSchema.index({ "residence.wilaya": 1 });
 candidateSchema.index({ autoriserProposition: 1 });
+candidateSchema.index({ "skills.officialSkillId": 1 });
+candidateSchema.index({ "skills.normalizedText": 1 });
+candidateSchema.index({ "skills.isVisibleToRecruiters": 1 });
+candidateSchema.index({ "skills.domain": 1 });
+
 export default mongoose.model("Candidate", candidateSchema);
+
+
+=== models\CandidateAnemRegistration.js ===
+import mongoose from "mongoose";
+
+const candidateAnemRegistrationSchema = new mongoose.Schema(
+  {
+    candidateId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Candidate",
+      required: true,
+    },
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+
+    
+    registrationType: {
+      type: String,
+      enum: ["self_declared", "site_registration"],
+      required: true,
+    },
+
+    
+    declaredAnemId: { type: String },
+    declaredAt: { type: Date },
+
+    
+    step1: {
+      civilite: {
+        type: String,
+        enum: ["monsieur", "madame"],
+      },
+      nom: { type: String },
+      prenom: { type: String },
+      estPresume: { type: Boolean, default: false },
+      numeroActeNaissance: { type: String },
+      dateNaissance: { type: Date },
+      paysNaissance: { type: String, default: "Algérie" },
+      wilayaNaissance: { type: String },
+      communeNaissance: { type: String },
+      situationFamiliale: {
+        type: String,
+        enum: ["celibataire", "marie", "divorce", "veuf"],
+      },
+      situationServiceNational: {
+        type: String,
+        enum: ["accompli", "exempte", "sursis", "non_concerne"],
+      },
+      nombreEnfantsCharge: { type: Number, default: 0 },
+    },
+
+    
+    step2: {
+      mobile: { type: String },
+      fax: { type: String },
+      wilayaResidence: { type: String },
+      communeResidence: { type: String },
+      quartierResidence: { type: String },
+      adresse: { type: String },
+      
+      nomArabe: { type: String },
+      prenomArabe: { type: String },
+      adresseArabe: { type: String },
+    },
+
+    
+    step3: {
+      typePieceIdentite: {
+        type: String,
+        enum: [
+          "carte_identite",
+          "passeport",
+          "permis_conduire",
+          "carte_sejour",
+        ],
+      },
+      numeroPieceIdentite: { type: String },
+      datePieceIdentite: { type: Date },
+      delivreePar: { type: String },
+      numeroSecuriteSociale: { type: String },
+      nombrePersonnesCharge: { type: Number, default: 0 },
+      niveauInstruction: {
+        type: String,
+        enum: [
+          "sans",
+          "primaire",
+          "moyen",
+          "secondaire",
+          "superieur",
+          "post_graduation",
+        ],
+      },
+      niveauQualification: {
+        type: String,
+        enum: [
+          "sans_qualification",
+          "ouvrier_specialise",
+          "ouvrier_qualifie",
+          "agent_maitrise",
+          "technicien",
+          "technicien_superieur",
+          "cadre",
+          "cadre_superieur",
+        ],
+      },
+      handicape: { type: Boolean, default: false },
+    },
+
+    
+    step4: {
+      email: { type: String },
+      consentementRgpd: { type: Boolean, default: false },
+      consentementAt: { type: Date },
+    },
+
+    
+    currentStep: {
+      type: Number,
+      default: 1,
+      min: 1,
+      max: 4,
+    },
+
+    formCompleted: { type: Boolean, default: false },
+    formCompletedAt: { type: Date },
+    formSubmittedAt: { type: Date },
+
+    
+    status: {
+      type: String,
+      enum: [
+        "draft",
+        "pending",
+        "pending_verification",
+        "in_progress",
+        "registered",
+        "failed",
+        "rejected",
+      ],
+      default: "draft",
+    },
+
+    
+    verifiedAnemId: { type: String },
+    verifiedAt: { type: Date },
+    verifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+
+    
+    failureReason: { type: String },
+    rejectionReason: { type: String },
+
+    
+    assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: "Admin" },
+    assignedAt: { type: Date },
+    assignedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+
+    
+    pdfDownloads: [
+      {
+        downloadedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+        downloadedAt: { type: Date, default: Date.now },
+        ip: { type: String },
+      },
+    ],
+
+    
+    adminNotes: [
+      {
+        content: { type: String, required: true },
+        createdBy: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "User",
+          required: true,
+        },
+        createdAt: { type: Date, default: Date.now },
+        isPublic: { type: Boolean, default: false },
+      },
+    ],
+
+    
+    auditLog: [
+      {
+        action: {
+          type: String,
+          enum: [
+            "created",
+            "step_saved",
+            "form_submitted",
+            "pdf_downloaded",
+            "assigned",
+            "status_changed",
+            "note_added",
+            "anem_id_submitted",
+            "anem_id_updated",
+          ],
+          required: true,
+        },
+        previousValue: { type: mongoose.Schema.Types.Mixed },
+        newValue: { type: mongoose.Schema.Types.Mixed },
+        performedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+        performedAt: { type: Date, default: Date.now },
+        ip: { type: String },
+        userAgent: { type: String },
+      },
+    ],
+
+    
+    anemIdHistory: [
+      {
+        anemId: { type: String, required: true },
+        submittedAt: { type: Date, default: Date.now },
+        status: {
+          type: String,
+          enum: ["pending", "approved", "rejected"],
+          default: "pending",
+        },
+        reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+        reviewedAt: { type: Date },
+        rejectionReason: { type: String },
+        adminComment: { type: String },
+      },
+    ],
+  },
+  { timestamps: true },
+);
+
+
+candidateAnemRegistrationSchema.index({ candidateId: 1 }, { unique: true });
+candidateAnemRegistrationSchema.index({ userId: 1 });
+candidateAnemRegistrationSchema.index({ status: 1 });
+candidateAnemRegistrationSchema.index({ status: 1, createdAt: -1 });
+candidateAnemRegistrationSchema.index({ assignedTo: 1, status: 1 });
+candidateAnemRegistrationSchema.index({ "step2.wilayaResidence": 1 });
+candidateAnemRegistrationSchema.index({ registrationType: 1, status: 1 });
+
+
+candidateAnemRegistrationSchema.methods.isRegistered = function () {
+  return this.status === "registered" && this.verifiedAnemId;
+};
+
+candidateAnemRegistrationSchema.methods.addAuditEntry = function (
+  action,
+  performedBy,
+  details = {},
+  req = null,
+) {
+  this.auditLog.push({
+    action,
+    previousValue: details.previousValue,
+    newValue: details.newValue,
+    performedBy,
+    performedAt: new Date(),
+    ip: req?.ip || req?.connection?.remoteAddress,
+    userAgent: req?.get?.("User-Agent") || req?.headers?.["user-agent"],
+  });
+};
+
+candidateAnemRegistrationSchema.methods.getPublicNotes = function () {
+  return this.adminNotes
+    .filter((note) => note.isPublic)
+    .sort((a, b) => b.createdAt - a.createdAt);
+};
+
+candidateAnemRegistrationSchema.methods.getLatestPublicNote = function () {
+  const publicNotes = this.getPublicNotes();
+  return publicNotes.length > 0 ? publicNotes[0] : null;
+};
+
+candidateAnemRegistrationSchema.virtual("effectiveAnemId").get(function () {
+  return this.verifiedAnemId || null;
+});
+
+candidateAnemRegistrationSchema.methods.generatePdfData = async function () {
+  await this.populate([
+    { path: "candidateId", select: "telephone residence profilePicture" },
+    { path: "userId", select: "nom email" },
+  ]);
+
+  return {
+    documentTitle: "Demande d'inscription ANEM - Demandeur d'emploi",
+    generatedAt: new Date().toISOString(),
+    registrationId: this._id.toString(),
+    submittedAt: this.formSubmittedAt || this.formCompletedAt,
+
+    demandeur: {
+      nom: this.userId?.nom,
+      email: this.userId?.email,
+    },
+
+    etatCivil: {
+      civilite: this.step1?.civilite,
+      nom: this.step1?.nom,
+      prenom: this.step1?.prenom,
+      estPresume: this.step1?.estPresume ? "Oui" : "Non",
+      numeroActeNaissance: this.step1?.numeroActeNaissance,
+      dateNaissance: this.step1?.dateNaissance,
+      paysNaissance: this.step1?.paysNaissance,
+      wilayaNaissance: this.step1?.wilayaNaissance,
+      communeNaissance: this.step1?.communeNaissance,
+      situationFamiliale: this.step1?.situationFamiliale,
+      situationServiceNational: this.step1?.situationServiceNational,
+      nombreEnfantsCharge: this.step1?.nombreEnfantsCharge,
+    },
+
+    contact: {
+      mobile: this.step2?.mobile,
+      fax: this.step2?.fax,
+      wilayaResidence: this.step2?.wilayaResidence,
+      communeResidence: this.step2?.communeResidence,
+      quartierResidence: this.step2?.quartierResidence,
+      adresse: this.step2?.adresse,
+      nomArabe: this.step2?.nomArabe,
+      prenomArabe: this.step2?.prenomArabe,
+      adresseArabe: this.step2?.adresseArabe,
+    },
+
+    autresInformations: {
+      typePieceIdentite: this.step3?.typePieceIdentite,
+      numeroPieceIdentite: this.step3?.numeroPieceIdentite,
+      datePieceIdentite: this.step3?.datePieceIdentite,
+      delivreePar: this.step3?.delivreePar,
+      numeroSecuriteSociale: this.step3?.numeroSecuriteSociale,
+      nombrePersonnesCharge: this.step3?.nombrePersonnesCharge,
+      niveauInstruction: this.step3?.niveauInstruction,
+      niveauQualification: this.step3?.niveauQualification,
+      handicape: this.step3?.handicape ? "Oui" : "Non",
+    },
+
+    compteEnLigne: {
+      email: this.step4?.email,
+      consentementRgpd: this.step4?.consentementRgpd
+        ? "Accepté"
+        : "Non accepté",
+      consentementAt: this.step4?.consentementAt,
+    },
+
+    legalReference:
+      "Loi 18-07 relative à la protection des données personnelles",
+  };
+};
+
+export default mongoose.model(
+  "CandidateAnemRegistration",
+  candidateAnemRegistrationSchema,
+);
 
 
 === models\Company.js ===
@@ -12585,6 +15937,194 @@ recruiterSchema.methods.updateAnemStatus = async function (
 export default mongoose.model("Recruiter", recruiterSchema);
 
 
+=== models\SkillCluster.js ===
+import mongoose from "mongoose";
+
+const skillClusterSchema = new mongoose.Schema(
+  {
+    canonicalName: {
+      type: String,
+      required: true,
+      trim: true,
+      lowercase: true,
+      unique: true,
+    },
+    variants: [
+      {
+        text: { type: String, required: true, trim: true, lowercase: true },
+        usageCount: { type: Number, default: 1 },
+        firstSeenAt: { type: Date, default: Date.now },
+        lastSeenAt: { type: Date, default: Date.now },
+      },
+    ],
+    suggestedDomain: { type: String, trim: true },
+    suggestedSubDomain: { type: String, trim: true },
+    suggestedCanonicalName: { type: String, trim: true },
+    confidenceScore: { type: Number, default: 0, min: 0, max: 1 },
+    totalUsageCount: { type: Number, default: 0 },
+    status: {
+      type: String,
+      enum: ["pending", "promoted", "dismissed", "flagged"],
+      default: "pending",
+    },
+    promotedToSkillId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Skill",
+    },
+    promotedAt: { type: Date },
+    promotedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    dismissedAt: { type: Date },
+    dismissedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    dismissReason: { type: String },
+    flagCount: { type: Number, default: 0 },
+    isFlagged: { type: Boolean, default: false },
+    flagReasons: [
+      {
+        reason: String,
+        flaggedBy: { type: String, enum: ["system", "user", "admin"] },
+        flaggedAt: { type: Date, default: Date.now },
+      },
+    ],
+  },
+  { timestamps: true },
+);
+
+skillClusterSchema.index({ status: 1, totalUsageCount: -1 });
+skillClusterSchema.index({ canonicalName: 1 });
+skillClusterSchema.index({ "variants.text": 1 });
+skillClusterSchema.index({ isFlagged: 1, flagCount: -1 });
+skillClusterSchema.index({ createdAt: -1 });
+skillClusterSchema.index({ totalUsageCount: -1 });
+
+skillClusterSchema.statics.trackVariant = async function (rawText) {
+  const normalized = rawText.trim().toLowerCase();
+
+  let cluster = await this.findOne({ "variants.text": normalized });
+
+  if (cluster) {
+    const variant = cluster.variants.find((v) => v.text === normalized);
+    if (variant) {
+      variant.usageCount += 1;
+      variant.lastSeenAt = new Date();
+    }
+    cluster.totalUsageCount += 1;
+    await cluster.save();
+    return { cluster, isNew: false };
+  }
+
+  cluster = await this.findOne({ canonicalName: normalized });
+
+  if (cluster) {
+    cluster.variants.push({
+      text: normalized,
+      usageCount: 1,
+      firstSeenAt: new Date(),
+      lastSeenAt: new Date(),
+    });
+    cluster.totalUsageCount += 1;
+    await cluster.save();
+    return { cluster, isNew: false };
+  }
+
+  cluster = await this.create({
+    canonicalName: normalized,
+    variants: [
+      {
+        text: normalized,
+        usageCount: 1,
+        firstSeenAt: new Date(),
+        lastSeenAt: new Date(),
+      },
+    ],
+    totalUsageCount: 1,
+  });
+
+  return { cluster, isNew: true };
+};
+
+const SkillCluster = mongoose.model("SkillCluster", skillClusterSchema);
+
+export default SkillCluster;
+
+
+=== models\SkillFeedback.js ===
+import mongoose from "mongoose";
+
+const skillFeedbackSchema = new mongoose.Schema(
+  {
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+    candidateId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Candidate",
+      required: true,
+    },
+    candidateSkillId: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: true,
+    },
+    rawSkillText: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+    mappedToSkillId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Skill",
+    },
+    mappedToName: {
+      type: String,
+      trim: true,
+    },
+    category: {
+      type: String,
+      enum: [
+        "incorrect_mapping",
+        "wrong_domain",
+        "skill_merged_incorrectly",
+        "other",
+      ],
+      required: true,
+    },
+    comment: {
+      type: String,
+      maxLength: 500,
+    },
+    status: {
+      type: String,
+      enum: ["pending", "reviewed", "accepted", "rejected"],
+      default: "pending",
+    },
+    reviewedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+    reviewedAt: { type: Date },
+    reviewNote: { type: String },
+    actionTaken: {
+      type: String,
+      enum: [
+        "mapping_adjusted",
+        "mapping_removed",
+        "no_change",
+        "user_flagged",
+      ],
+    },
+  },
+  { timestamps: true },
+);
+
+skillFeedbackSchema.index({ userId: 1, createdAt: -1 });
+skillFeedbackSchema.index({ candidateSkillId: 1, status: 1 });
+skillFeedbackSchema.index({ status: 1, createdAt: -1 });
+skillFeedbackSchema.index({ mappedToSkillId: 1 });
+
+export default mongoose.model("SkillFeedback", skillFeedbackSchema);
+
+
 === models\Skills.js ===
 import mongoose from "mongoose";
 
@@ -12603,7 +16143,29 @@ const skillSchema = new mongoose.Schema(
       trim: true,
       index: true,
     },
-    
+    subCategory: {
+      type: String,
+      trim: true,
+    },
+    description: {
+      type: String,
+      maxLength: 500,
+    },
+    aliases: [
+      {
+        type: String,
+        trim: true,
+        lowercase: true,
+      },
+    ],
+    isPromoted: {
+      type: Boolean,
+      default: false,
+    },
+    promotedFrom: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "SkillCluster",
+    },
     wasProposed: {
       type: Boolean,
       default: false,
@@ -12612,11 +16174,46 @@ const skillSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "ProposedSkill",
     },
+    usageCount: {
+      type: Number,
+      default: 0,
+    },
+    isHidden: {
+      type: Boolean,
+      default: false,
+    },
   },
   { timestamps: true },
 );
 
-skillSchema.index({ name: "text", category: "text" });
+skillSchema.index({ name: "text", aliases: "text", category: "text" });
+skillSchema.index({ aliases: 1 });
+skillSchema.index({ usageCount: -1 });
+skillSchema.index({ isHidden: 1 });
+
+skillSchema.statics.findByNameOrAlias = async function (query) {
+  const normalized = query.trim().toLowerCase();
+  return this.findOne({
+    $or: [{ name: normalized }, { aliases: normalized }],
+    isHidden: { $ne: true },
+  });
+};
+
+skillSchema.statics.searchSimilar = async function (query, limit = 10) {
+  const normalized = query.trim().toLowerCase();
+  const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  return this.find({
+    $or: [
+      { name: { $regex: escaped, $options: "i" } },
+      { aliases: { $regex: escaped, $options: "i" } },
+    ],
+    isHidden: { $ne: true },
+  })
+    .sort({ usageCount: -1 })
+    .limit(limit)
+    .lean();
+};
 
 export default mongoose.model("Skill", skillSchema);
 
@@ -12727,6 +16324,18 @@ const systemSettingsSchema = new mongoose.Schema(
     description: {
       type: String,
     },
+    category: {
+      type: String,
+      enum: [
+        "general",
+        "email",
+        "skills",
+        "candidates",
+        "recruiters",
+        "security",
+      ],
+      default: "general",
+    },
     updatedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -12739,7 +16348,6 @@ const systemSettingsSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-
 systemSettingsSchema.statics.getSetting = async function (
   key,
   defaultValue = null,
@@ -12747,7 +16355,6 @@ systemSettingsSchema.statics.getSetting = async function (
   const setting = await this.findOne({ key });
   return setting ? setting.value : defaultValue;
 };
-
 
 systemSettingsSchema.statics.setSetting = async function (
   key,
@@ -12766,29 +16373,140 @@ systemSettingsSchema.statics.setSetting = async function (
   );
 };
 
+systemSettingsSchema.statics.getMultipleSettings = async function (keys) {
+  const settings = await this.find({ key: { $in: keys } });
+  const map = {};
+  settings.forEach((s) => {
+    map[s.key] = s.value;
+  });
+  return map;
+};
+
+systemSettingsSchema.statics.getSettingsByCategory = async function (category) {
+  return this.find({ category }).select("-__v").lean();
+};
 
 systemSettingsSchema.statics.initializeDefaults = async function () {
   const defaults = [
+    
     {
       key: "email_verification_mode",
       value: process.env.NODE_ENV === "production" ? "smtp" : "development",
       description:
         "Mode de vérification email: 'smtp' pour production, 'development' pour code statique 123456",
-    },
-    {
-      key: "skill_proposal_enabled",
-      value: true,
-      description: "Permet aux candidats de proposer de nouvelles compétences",
-    },
-    {
-      key: "max_cv_per_candidate",
-      value: 3,
-      description: "Nombre maximum de CV par candidat",
+      category: "email",
     },
     {
       key: "verification_code_expiry_minutes",
       value: 15,
       description: "Durée de validité du code de vérification en minutes",
+      category: "email",
+    },
+
+    
+    {
+      key: "max_cv_per_candidate",
+      value: 3,
+      description: "Nombre maximum de CV par candidat",
+      category: "candidates",
+    },
+
+    
+    {
+      key: "skill_system_enabled",
+      value: true,
+      description: "Active ou désactive tout le système de compétences",
+      category: "skills",
+    },
+    {
+      key: "max_skills_per_candidate",
+      value: 6,
+      description: "Nombre maximum de compétences par candidat",
+      category: "skills",
+    },
+    {
+      key: "skill_proposal_enabled",
+      value: true,
+      description:
+        "Permet aux candidats d'ajouter des compétences en texte libre (non officielles)",
+      category: "skills",
+    },
+    {
+      key: "skill_suggestions_enabled",
+      value: true,
+      description:
+        "Active les suggestions de compétences similaires lors de la saisie",
+      category: "skills",
+    },
+    {
+      key: "skill_suggestion_threshold",
+      value: 0.6,
+      description:
+        "Seuil de confiance (0-1) pour afficher des suggestions de compétences similaires",
+      category: "skills",
+    },
+    {
+      key: "skill_level_enabled",
+      value: true,
+      description:
+        "Permet aux candidats de définir un niveau pour chaque compétence",
+      category: "skills",
+    },
+    {
+      key: "skill_feedback_enabled",
+      value: true,
+      description:
+        "Permet aux candidats de signaler un mapping incorrect de compétence",
+      category: "skills",
+    },
+    {
+      key: "skill_feedback_max_per_week",
+      value: 3,
+      description:
+        "Nombre maximum de feedbacks de compétences par candidat par semaine",
+      category: "skills",
+    },
+    {
+      key: "skill_feedback_max_per_skill",
+      value: 1,
+      description:
+        "Nombre maximum de feedbacks actifs par compétence par candidat",
+      category: "skills",
+    },
+    {
+      key: "skill_abuse_detection_enabled",
+      value: true,
+      description:
+        "Active la détection automatique de compétences abusives/spam",
+      category: "skills",
+    },
+    {
+      key: "skill_abuse_max_flags_before_hide",
+      value: 3,
+      description:
+        "Nombre de signalements avant de masquer une compétence des recruteurs",
+      category: "skills",
+    },
+    {
+      key: "skill_auto_migration_enabled",
+      value: true,
+      description:
+        "Migration automatique des compétences utilisateur vers les officielles après promotion",
+      category: "skills",
+    },
+    {
+      key: "skill_recruiter_search_expand_aliases",
+      value: true,
+      description:
+        "La recherche recruteur inclut les alias et variantes historiques",
+      category: "skills",
+    },
+    {
+      key: "skill_trending_window_days",
+      value: 30,
+      description:
+        "Fenêtre en jours pour le calcul des compétences tendance (admin dashboard)",
+      category: "skills",
     },
   ];
 
@@ -12832,7 +16550,7 @@ const userSchema = new mongoose.Schema(
 
     derniereConnexion: Date,
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 userSchema.index({ email: 1 });
@@ -13195,11 +16913,25 @@ import {
 import {
   getSkills,
   createSkill,
+  updateSkill,
   deleteSkill,
-  getProposedSkills,
-  approveProposedSkill,
-  rejectProposedSkill,
-  getProposedSkillsStats,
+  
+  getTrendingClusters,
+  getDuplicateClusters,
+  getOrphanClusters,
+  getFlaggedClusters,
+  getClusterDetail,
+  promoteCluster,
+  dismissCluster,
+  flagCluster,
+  unflagCluster,
+  
+  getSkillFeedback,
+  reviewSkillFeedback,
+  
+  getSkillSystemStats,
+  getSkillSettings,
+  updateSkillSettings,
 } from "../controllers/skillController.js";
 
 import {
@@ -13222,6 +16954,8 @@ import {
   getEmailVerificationMode,
   toggleSkillProposal,
   getAllSettings,
+  getSettingsByCategory,
+  updateSettingsBulk,
 } from "../controllers/adminSettingsController.js";
 
 import { uploadAttachments } from "../config/multer.js";
@@ -13482,36 +17216,101 @@ router.delete(
 
 
 router.get("/settings", getAllSettings);
+router.get("/settings/category/:category", getSettingsByCategory);
+router.put(
+  "/settings/bulk",
+  requirePermission("editAdminPermissions"),
+  updateSettingsBulk,
+);
 router.get("/settings/email-verification-mode", getEmailVerificationMode);
 router.post("/settings/email-verification-mode", toggleEmailVerificationMode);
 router.post("/settings/skill-proposal", toggleSkillProposal);
 
 
+
+
+
+
+router.get(
+  "/skills/stats",
+  requirePermission("viewStats"),
+  getSkillSystemStats,
+);
+router.get(
+  "/skills/settings",
+  requirePermission("viewStats"),
+  getSkillSettings,
+);
+router.put(
+  "/skills/settings",
+  requirePermission("editAdminPermissions"),
+  updateSkillSettings,
+);
+
+
+router.get(
+  "/skills/clusters/trending",
+  requirePermission("validateOffers"),
+  getTrendingClusters,
+);
+router.get(
+  "/skills/clusters/duplicates",
+  requirePermission("validateOffers"),
+  getDuplicateClusters,
+);
+router.get(
+  "/skills/clusters/orphans",
+  requirePermission("validateOffers"),
+  getOrphanClusters,
+);
+router.get(
+  "/skills/clusters/flagged",
+  requirePermission("validateOffers"),
+  getFlaggedClusters,
+);
+router.get(
+  "/skills/clusters/:clusterId",
+  requirePermission("validateOffers"),
+  getClusterDetail,
+);
+router.post(
+  "/skills/clusters/:clusterId/promote",
+  requirePermission("validateOffers"),
+  promoteCluster,
+);
+router.post(
+  "/skills/clusters/:clusterId/dismiss",
+  requirePermission("validateOffers"),
+  dismissCluster,
+);
+router.post(
+  "/skills/clusters/:clusterId/flag",
+  requirePermission("validateOffers"),
+  flagCluster,
+);
+router.post(
+  "/skills/clusters/:clusterId/unflag",
+  requirePermission("validateOffers"),
+  unflagCluster,
+);
+
+
+router.get(
+  "/skills/feedback",
+  requirePermission("validateOffers"),
+  getSkillFeedback,
+);
+router.post(
+  "/skills/feedback/:feedbackId/review",
+  requirePermission("validateOffers"),
+  reviewSkillFeedback,
+);
+
+
 router.get("/skills", requirePermission("viewStats"), getSkills);
 router.post("/skills", requirePermission("validateOffers"), createSkill);
+router.put("/skills/:id", requirePermission("validateOffers"), updateSkill);
 router.delete("/skills/:id", requirePermission("validateOffers"), deleteSkill);
-
-
-router.get(
-  "/skills/proposed",
-  requirePermission("validateOffers"),
-  getProposedSkills,
-);
-router.get(
-  "/skills/proposed/stats",
-  requirePermission("viewStats"),
-  getProposedSkillsStats,
-);
-router.post(
-  "/skills/proposed/:id/approve",
-  requirePermission("validateOffers"),
-  approveProposedSkill,
-);
-router.post(
-  "/skills/proposed/:id/reject",
-  requirePermission("validateOffers"),
-  rejectProposedSkill,
-);
 
 export default router;
 
@@ -13895,6 +17694,231 @@ router.get("/companies", getCompanies);
 export default router;
 
 
+=== routes\candidateAnemRoutes.js ===
+import express from "express";
+import auth from "../middleware/auth.js";
+import { authRole } from "../middleware/roles.js";
+import Admin from "../models/Admin.js";
+
+
+import {
+  getCandidateAnemStatus,
+  markAnemInfoSeen,
+  declineCandidateAnem,
+  resetCandidateAnemDecline,
+  submitCandidateAnemId,
+  startCandidateRegistration,
+  saveCandidateRegistrationStep,
+  submitCandidateRegistration,
+  getCandidateRegistrationForm,
+  
+  getCandidateAnemDemandes,
+  getCandidateDemandeDetails,
+  getCandidatePendingAnemIds,
+  assignCandidateDemande,
+  markCandidateDemandeInProgress,
+  getCandidateAnemPdfData,
+  approveCandidateAnemId,
+  rejectCandidateAnemId,
+  markCandidateRegistered,
+  markCandidateAnemFailed,
+  addCandidateAnemAdminNote,
+  getCandidateAnemStats,
+  getCandidateAnemNewCount,
+} from "../controllers/candidateAnemController.js";
+
+const router = express.Router();
+
+
+
+router.get("/status", auth, authRole(["candidat"]), getCandidateAnemStatus);
+router.post("/info-seen", auth, authRole(["candidat"]), markAnemInfoSeen);
+router.post("/decline", auth, authRole(["candidat"]), declineCandidateAnem);
+router.post(
+  "/reset-decline",
+  auth,
+  authRole(["candidat"]),
+  resetCandidateAnemDecline,
+);
+
+
+router.post("/submit-id", auth, authRole(["candidat"]), submitCandidateAnemId);
+
+
+router.post(
+  "/start-registration",
+  auth,
+  authRole(["candidat"]),
+  startCandidateRegistration,
+);
+router.post(
+  "/save-step",
+  auth,
+  authRole(["candidat"]),
+  saveCandidateRegistrationStep,
+);
+router.post(
+  "/submit-registration",
+  auth,
+  authRole(["candidat"]),
+  submitCandidateRegistration,
+);
+router.get(
+  "/registration-form",
+  auth,
+  authRole(["candidat"]),
+  getCandidateRegistrationForm,
+);
+
+
+
+const requireCandidateAnemPermission = async (req, res, next) => {
+  try {
+    const admin = await Admin.findOne({ userId: req.user.id });
+
+    if (!admin) {
+      return res.status(403).json({ msg: "Admin introuvable" });
+    }
+
+    if (admin.status !== "active") {
+      return res.status(403).json({ msg: "Compte admin suspendu" });
+    }
+
+    const hasPermission =
+      admin.label === "super_admin" ||
+      admin.permissions.validateRecruiters ||
+      admin.permissions.validateCompanies;
+
+    if (!hasPermission) {
+      return res.status(403).json({
+        msg: "Permission requise pour gérer les demandes ANEM candidats",
+        code: "PERMISSION_DENIED",
+      });
+    }
+
+    req.admin = admin;
+    next();
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+router.get(
+  "/admin/stats",
+  auth,
+  authRole(["admin"]),
+  requireCandidateAnemPermission,
+  getCandidateAnemStats,
+);
+
+router.get(
+  "/admin/demandes/count",
+  auth,
+  authRole(["admin"]),
+  requireCandidateAnemPermission,
+  getCandidateAnemNewCount,
+);
+
+
+router.get(
+  "/admin/demandes",
+  auth,
+  authRole(["admin"]),
+  requireCandidateAnemPermission,
+  getCandidateAnemDemandes,
+);
+
+router.get(
+  "/admin/demandes/:demandeId",
+  auth,
+  authRole(["admin"]),
+  requireCandidateAnemPermission,
+  getCandidateDemandeDetails,
+);
+
+
+router.get(
+  "/admin/pending-ids",
+  auth,
+  authRole(["admin"]),
+  requireCandidateAnemPermission,
+  getCandidatePendingAnemIds,
+);
+
+
+router.post(
+  "/admin/demandes/:demandeId/assign",
+  auth,
+  authRole(["admin"]),
+  requireCandidateAnemPermission,
+  assignCandidateDemande,
+);
+
+
+router.post(
+  "/admin/demandes/:demandeId/in-progress",
+  auth,
+  authRole(["admin"]),
+  requireCandidateAnemPermission,
+  markCandidateDemandeInProgress,
+);
+
+
+router.get(
+  "/admin/demandes/:demandeId/pdf-data",
+  auth,
+  authRole(["admin"]),
+  requireCandidateAnemPermission,
+  getCandidateAnemPdfData,
+);
+
+
+router.post(
+  "/admin/demandes/:demandeId/approve-id",
+  auth,
+  authRole(["admin"]),
+  requireCandidateAnemPermission,
+  approveCandidateAnemId,
+);
+
+router.post(
+  "/admin/demandes/:demandeId/reject-id",
+  auth,
+  authRole(["admin"]),
+  requireCandidateAnemPermission,
+  rejectCandidateAnemId,
+);
+
+
+router.post(
+  "/admin/demandes/:demandeId/register",
+  auth,
+  authRole(["admin"]),
+  requireCandidateAnemPermission,
+  markCandidateRegistered,
+);
+
+router.post(
+  "/admin/demandes/:demandeId/fail",
+  auth,
+  authRole(["admin"]),
+  requireCandidateAnemPermission,
+  markCandidateAnemFailed,
+);
+
+
+router.post(
+  "/admin/demandes/:demandeId/note",
+  auth,
+  authRole(["admin"]),
+  requireCandidateAnemPermission,
+  addCandidateAnemAdminNote,
+);
+
+export default router;
+
+
 === routes\candidateRoutes.js ===
 import express from "express";
 import auth from "../middleware/auth.js";
@@ -13933,6 +17957,11 @@ import {
   getActivityTimeline,
   getRecommendedOffers,
 } from "../controllers/candidateController.js";
+
+import {
+  getSkillDetails,
+  submitSkillFeedback,
+} from "../controllers/skillController.js";
 
 import {
   getMyApplications,
@@ -13994,6 +18023,17 @@ router.delete(
   "/profil/skills/:skillId",
   validators.mongoId("skillId"),
   deleteSkill,
+);
+
+router.get(
+  "/profil/skills/:skillId/details",
+  validators.mongoId("skillId"),
+  getSkillDetails,
+);
+router.post(
+  "/profil/skills/:skillId/feedback",
+  validators.mongoId("skillId"),
+  submitSkillFeedback,
 );
 
 
@@ -14278,12 +18318,14 @@ import express from "express";
 import {
   getSkills,
   getSkillProposalStatus,
+  suggestSkills,
 } from "../controllers/skillController.js";
 import auth from "../middleware/auth.js";
 
 const router = express.Router();
 
 router.get("/", auth, getSkills);
+router.get("/suggest", auth, suggestSkills);
 router.get("/proposal-status", auth, getSkillProposalStatus);
 
 export default router;

@@ -213,7 +213,7 @@ export const withdrawApplication = async (req, res) => {
       return res.status(404).json({ msg: "Candidature introuvable" });
 
     // Vérifier si on peut retirer
-    const terminalStatuses = ["retiree", "cancelled", "refusee"]; // On peut retirer une candidature "retenue" si on refuse l'offre
+    const terminalStatuses = ["retiree", "cancelled", "non_retenue", "retenue"]; // On peut retirer une candidature "retenue" si on refuse l'offre
     if (terminalStatuses.includes(application.candidateStatus)) {
       return res
         .status(400)

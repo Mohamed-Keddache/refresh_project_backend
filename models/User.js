@@ -26,7 +26,7 @@ const userSchema = new mongoose.Schema(
 
     derniereConnexion: Date,
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 userSchema.index({ email: 1 });

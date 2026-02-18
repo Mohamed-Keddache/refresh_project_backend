@@ -37,6 +37,11 @@ import {
 } from "../controllers/candidateController.js";
 
 import {
+  getSkillDetails,
+  submitSkillFeedback,
+} from "../controllers/skillController.js";
+
+import {
   getMyApplications,
   getApplicationDetail,
   withdrawApplication,
@@ -96,6 +101,17 @@ router.delete(
   "/profil/skills/:skillId",
   validators.mongoId("skillId"),
   deleteSkill,
+);
+
+router.get(
+  "/profil/skills/:skillId/details",
+  validators.mongoId("skillId"),
+  getSkillDetails,
+);
+router.post(
+  "/profil/skills/:skillId/feedback",
+  validators.mongoId("skillId"),
+  submitSkillFeedback,
 );
 
 // Experience

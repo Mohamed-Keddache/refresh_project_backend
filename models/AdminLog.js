@@ -1,4 +1,4 @@
-// === models/AdminLog.js ===
+// models/AdminLog.js
 import mongoose from "mongoose";
 
 const adminLogSchema = new mongoose.Schema(
@@ -12,7 +12,6 @@ const adminLogSchema = new mongoose.Schema(
     action: {
       type: String,
       enum: [
-        // Existing actions
         "admin_created",
         "admin_deleted",
         "admin_suspended",
@@ -50,7 +49,6 @@ const adminLogSchema = new mongoose.Schema(
         "ticket_responded",
         "ticket_closed",
         "ticket_reassigned",
-        // ANEM actions
         "anem_demande_viewed",
         "anem_demande_assigned",
         "anem_demande_in_progress",
@@ -61,6 +59,23 @@ const adminLogSchema = new mongoose.Schema(
         "anem_registration_failed",
         "anem_bulk_status_update",
         "anem_note_added",
+        // Skill system actions
+        "skill_created",
+        "skill_updated",
+        "skill_deleted",
+        "skill_cluster_promoted",
+        "skill_cluster_dismissed",
+        "skill_feedback_reviewed",
+        "skill_settings_updated",
+        "candidate_anem_demande_viewed",
+        "candidate_anem_demande_assigned",
+        "candidate_anem_demande_in_progress",
+        "candidate_anem_pdf_downloaded",
+        "candidate_anem_id_approved",
+        "candidate_anem_id_rejected",
+        "candidate_anem_registration_success",
+        "candidate_anem_registration_failed",
+        "candidate_anem_note_added",
       ],
       required: true,
       index: true,
@@ -77,6 +92,11 @@ const adminLogSchema = new mongoose.Schema(
         "ticket",
         "admin",
         "anem_registration",
+        "candidate_anem_registration",
+        "skill",
+        "skill_cluster",
+        "skill_feedback",
+        "system_settings",
       ],
     },
     targetId: { type: mongoose.Schema.Types.ObjectId },

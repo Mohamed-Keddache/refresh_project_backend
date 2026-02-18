@@ -21,6 +21,7 @@ import announcementRoutes from "./routes/announcementRoutes.js";
 import recruiterRoutes from "./routes/recruiterRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
 import anemRoutes from "./routes/anemRoutes.js";
+import candidateAnemRoutes from "./routes/candidateAnemRoutes.js";
 
 const app = express();
 
@@ -50,13 +51,6 @@ if (process.env.NODE_ENV !== "test") {
 }
 
 app.use("/uploads", express.static("uploads"));
-
-app.use((err, req, res, next) => {
-  if (err instanceof SyntaxError && err.status === 400 && "body" in err) {
-    return res.status(400).json({ msg: "JSON invalide" });
-  }
-  next(err);
-});
 
 async function startServer() {
   try {
@@ -106,6 +100,7 @@ async function startServer() {
     app.use("/api/notifications", notificationRoutes);
     app.use("/api/support", supportRoutes);
     app.use("/api/announcements", announcementRoutes);
+    app.use("/api/candidate-anem", candidateAnemRoutes);
 
     app.use("/api/recruiters", recruiterRoutes);
     app.use("/api/admin", adminRoutes);
@@ -161,6 +156,10 @@ async function startServer() {
     // Error handler
     app.use((err, req, res, next) => {
       console.error("❌ Erreur serveur:", err);
+
+      if (err instanceof SyntaxError && err.status === 400 && "body" in err) {
+        return res.status(400).json({ msg: "JSON invalide" });
+      }
 
       const message =
         process.env.NODE_ENV === "production"

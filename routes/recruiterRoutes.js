@@ -86,13 +86,15 @@ router.get("/company/team", getCompanyTeam);
 
 // 1. Candidatures (Gestion avancée)
 router.get("/offers/:offerId/applications", getOfferApplications); // Nouvelle version riche
-//router.get("/applications", getAllApplications);
+//router.get("/applications", getAllApplications); legacy
+router.get("/applications/advanced", getAllApplicationsAdvanced);
 router.put("/applications/:applicationId/seen", markAsSeen);
 router.put("/applications/:applicationId/status", updateRecruiterStatus); // Nouvelle méthode (workflow complet)
 router.put("/applications/:applicationId/star", toggleStarred);
 router.put("/applications/:applicationId/notes", updateNotes);
 
 // 2. Entretiens (Modèle Interview)
+router.get("/interviews/grouped", getRecruiterInterviewsGrouped);
 router.get("/interviews", getRecruiterInterviews);
 router.post("/applications/:applicationId/interviews", proposeInterview);
 router.put(
@@ -118,14 +120,8 @@ router.get("/my-offers-stats", getMyOffersWithStats);
 // Marquer toutes les candidatures d'une offre comme vues
 router.put("/offers/:offerId/mark-all-seen", markAllOfferApplicationsAsSeen);
 
-// Candidatures avancées avec filtres
-router.get("/applications/advanced", getAllApplicationsAdvanced);
-
 // Détail d'une conversation (messages)
 router.get("/conversations/:conversationId", getRecruiterConversationMessages);
 //router.get("/conversations/:conversationId", getRecruiterConversationDetail);
-
-// Interviews groupées
-router.get("/interviews/grouped", getRecruiterInterviewsGrouped);
 
 export default router;
