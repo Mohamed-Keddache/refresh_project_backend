@@ -15,17 +15,22 @@
     "bcryptjs": "2.4.3",
     "cloudinary": "^2.9.0",
     "cors": "2.8.5",
-    "dotenv": "16.4.5",
-    "express": "4.21.2",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
     "express-mongo-sanitize": "^2.2.0",
     "express-rate-limit": "^8.2.1",
+    "express-session": "^1.19.0",
     "express-validator": "^7.3.1",
+    "google-auth-library": "^10.5.0",
     "helmet": "^8.1.0",
     "jsonwebtoken": "9.0.2",
     "mongoose": "8.9.5",
     "morgan": "1.10.1",
     "multer": "1.4.5-lts.1",
     "nodemailer": "^7.0.13",
+    "passport": "^0.7.0",
+    "passport-facebook": "^3.0.0",
+    "passport-google-oauth20": "^2.0.0",
     "validator": "^13.15.26"
   }
 }
@@ -37,12 +42,16 @@ dotenv.config();
 import express from "express";
 import cors from "cors";
 import morgan from "morgan";
+import passport from "passport"; 
 import connectDB from "./config/db.js";
 import setupFolders from "./startup/setupFolders.js";
 import { seedAdmin } from "./startup/seedAdmin.js";
 import { setupSecurity } from "./middleware/security.js";
 import SystemSettings from "./models/SystemSettings.js";
 import { verifySmtpConnection } from "./services/emailService.js";
+
+
+import "./config/passport.js";
 
 import authRoutes from "./routes/authRoutes.js";
 import candidateRoutes from "./routes/candidateRoutes.js";
@@ -80,28 +89,33 @@ app.use(
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
+
+app.use(passport.initialize());
+
 if (process.env.NODE_ENV !== "test") {
   app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
 }
 
 app.use("/uploads", express.static("uploads"));
 
-app.use((err, req, res, next) => {
-  if (err instanceof SyntaxError && err.status === 400 && "body" in err) {
-    return res.status(400).json({ msg: "JSON invalide" });
-  }
-  next(err);
-});
 
 async function startServer() {
   try {
-    
     console.log("🔧 Environment check:");
     console.log("   NODE_ENV:", process.env.NODE_ENV || "development");
     console.log("   SMTP_HOST:", process.env.SMTP_HOST || "NOT SET");
     console.log("   SMTP_PORT:", process.env.SMTP_PORT || "NOT SET");
     console.log("   SMTP_USER:", process.env.SMTP_USER || "NOT SET");
     console.log("   SMTP_PASS:", process.env.SMTP_PASS ? "SET" : "NOT SET");
+    
+    console.log(
+      "   GOOGLE_CLIENT_ID:",
+      process.env.GOOGLE_CLIENT_ID ? "SET" : "NOT SET",
+    );
+    console.log(
+      "   FACEBOOK_APP_ID:",
+      process.env.FACEBOOK_APP_ID ? "SET" : "NOT SET",
+    );
 
     await connectDB();
     setupFolders();
@@ -111,7 +125,6 @@ async function startServer() {
     await SystemSettings.initializeDefaults();
     console.log("⚙️ Paramètres système initialisés");
 
-    
     const emailMode = await SystemSettings.getSetting(
       "email_verification_mode",
       "development",
@@ -126,14 +139,11 @@ async function startServer() {
       } else {
         console.warn("⚠️ SMTP connection failed - emails may not be sent");
         console.warn("   Falling back to development mode for safety");
-        
-        
       }
     } else {
       console.log("📧 Development mode: Use code 123456 for verification");
     }
 
-    
     app.use("/api/auth", authRoutes);
     app.use("/api/skills", skillRoutes);
     app.use("/api/offers", offerRoutes);
@@ -147,7 +157,6 @@ async function startServer() {
     app.use("/api/admin", adminRoutes);
     app.use("/api/anem", anemRoutes);
 
-    
     app.get("/", (req, res) =>
       res.json({
         status: "ok",
@@ -164,7 +173,6 @@ async function startServer() {
       }),
     );
 
-    
     if (process.env.NODE_ENV !== "production") {
       app.get("/debug/smtp", async (req, res) => {
         try {
@@ -189,14 +197,16 @@ async function startServer() {
       });
     }
 
-    
     app.use((req, res) => {
       res.status(404).json({ msg: "Route non trouvée" });
     });
 
-    
     app.use((err, req, res, next) => {
       console.error("❌ Erreur serveur:", err);
+
+      if (err instanceof SyntaxError && err.status === 400 && "body" in err) {
+        return res.status(400).json({ msg: "JSON invalide" });
+      }
 
       const message =
         process.env.NODE_ENV === "production"
@@ -487,6 +497,191 @@ export const handleMulterError = (err, req, res, next) => {
 };
 
 export default { uploadCV, uploadImage, uploadAttachments, handleMulterError };
+
+
+=== config\passport.js ===
+import passport from "passport";
+import { Strategy as GoogleStrategy } from "passport-google-oauth20";
+import { Strategy as FacebookStrategy } from "passport-facebook";
+import User from "../models/User.js";
+import Candidate from "../models/Candidate.js";
+
+passport.serializeUser((user, done) => {
+  done(null, user._id);
+});
+
+passport.deserializeUser(async (id, done) => {
+  try {
+    const user = await User.findById(id);
+    done(null, user);
+  } catch (err) {
+    done(err, null);
+  }
+});
+
+
+if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
+  passport.use(
+    new GoogleStrategy(
+      {
+        clientID: process.env.GOOGLE_CLIENT_ID,
+        clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+        callbackURL: `${process.env.BACKEND_URL || "http:
+        scope: ["profile", "email"],
+      },
+      async (accessToken, refreshToken, profile, done) => {
+        try {
+          const result = await handleOAuthUser(profile, "google");
+          done(null, result);
+        } catch (err) {
+          done(err, null);
+        }
+      },
+    ),
+  );
+  console.log("✅ Google OAuth strategy configured");
+} else {
+  console.warn(
+    "⚠️ Google OAuth not configured (missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET)",
+  );
+}
+
+
+if (process.env.FACEBOOK_APP_ID && process.env.FACEBOOK_APP_SECRET) {
+  passport.use(
+    new FacebookStrategy(
+      {
+        clientID: process.env.FACEBOOK_APP_ID,
+        clientSecret: process.env.FACEBOOK_APP_SECRET,
+        callbackURL: `${process.env.BACKEND_URL || "http:
+        profileFields: ["id", "emails", "name", "displayName", "photos"],
+      },
+      async (accessToken, refreshToken, profile, done) => {
+        try {
+          const result = await handleOAuthUser(profile, "facebook");
+          done(null, result);
+        } catch (err) {
+          done(err, null);
+        }
+      },
+    ),
+  );
+  console.log("✅ Facebook OAuth strategy configured");
+} else {
+  console.warn(
+    "⚠️ Facebook OAuth not configured (missing FACEBOOK_APP_ID or FACEBOOK_APP_SECRET)",
+  );
+}
+
+
+async function handleOAuthUser(profile, provider) {
+  const email =
+    profile.emails && profile.emails.length > 0
+      ? profile.emails[0].value.toLowerCase()
+      : null;
+
+  if (!email) {
+    throw new Error(
+      `Aucun email fourni par ${provider}. Veuillez autoriser l'accès à votre email.`,
+    );
+  }
+
+  const displayName =
+    profile.displayName ||
+    `${profile.name?.givenName || ""} ${profile.name?.familyName || ""}`.trim() ||
+    email.split("@")[0];
+
+  const profilePicture =
+    profile.photos && profile.photos.length > 0
+      ? profile.photos[0].value
+      : null;
+
+  
+  let user = await User.findOne({ email });
+
+  if (user) {
+    
+    let updated = false;
+
+    if (!user.oauthProviders) {
+      user.oauthProviders = [];
+    }
+
+    const existingProvider = user.oauthProviders.find(
+      (p) => p.provider === provider,
+    );
+
+    if (!existingProvider) {
+      user.oauthProviders.push({
+        provider,
+        providerId: profile.id,
+        linkedAt: new Date(),
+      });
+      updated = true;
+    }
+
+    
+    if (!user.emailVerified) {
+      user.emailVerified = true;
+      updated = true;
+    }
+
+    if (updated) {
+      await user.save();
+    }
+
+    
+    if (!user.canLogin()) {
+      const error = new Error("ACCOUNT_RESTRICTED");
+      error.accountStatus = user.accountStatus;
+      error.suspensionReason = user.suspensionReason;
+      error.suspendedUntil = user.suspendedUntil;
+      throw error;
+    }
+
+    user.derniereConnexion = new Date();
+    await user.save();
+
+    return { user, isNew: false };
+  }
+
+  
+  
+  const crypto = await import("crypto");
+  const randomPassword = crypto.randomBytes(32).toString("hex");
+  const bcrypt = await import("bcryptjs");
+  const hashedPassword = await bcrypt.default.hash(randomPassword, 12);
+
+  user = await User.create({
+    nom: displayName,
+    email,
+    motDePasse: hashedPassword,
+    role: "candidat", 
+    emailVerified: true, 
+    accountStatus: "active",
+    oauthProviders: [
+      {
+        provider,
+        providerId: profile.id,
+        linkedAt: new Date(),
+      },
+    ],
+    derniereConnexion: new Date(),
+  });
+
+  
+  const candidateData = { userId: user._id };
+
+  if (profilePicture) {
+    candidateData.profilePicture = profilePicture;
+  }
+
+  await Candidate.create(candidateData);
+
+  return { user, isNew: true, profilePicture };
+}
+
+export default passport;
 
 
 === controllers\adminController.js ===
@@ -1235,12 +1430,14 @@ export const getGlobalStats = async (req, res) => {
 
     const pendingTasks = {
       recruiters: pendingRecruiters,
-      companies: 0,
+      companies: pendingCompanies,
       offers: pendingOffers,
       tickets: openTickets,
-      anemCandidates: pendingCandidateAnem, 
+      anemCandidates: pendingCandidateAnem,
+      anemRecruiters: pendingAnem,
       total:
         pendingRecruiters +
+        pendingCompanies +
         pendingOffers +
         openTickets +
         pendingAnem +
@@ -2167,9 +2364,26 @@ export const updateOfferByAdmin = async (req, res) => {
   try {
     const { id } = req.params;
 
+    
+    const allowedFields = [
+      "titre",
+      "description",
+      "requirements",
+      "domaine",
+      "type",
+      "salaryMin",
+      "salaryMax",
+      "experienceLevel",
+      "skills",
+      "wilaya",
+      "visibility",
+    ];
+    const updates = Object.fromEntries(
+      Object.entries(req.body).filter(([k]) => allowedFields.includes(k)),
+    );
     const offer = await Offer.findByIdAndUpdate(
       id,
-      { $set: req.body },
+      { $set: updates },
       { new: true },
     );
 
@@ -7482,7 +7696,7 @@ export const withdrawApplication = async (req, res) => {
       return res.status(404).json({ msg: "Candidature introuvable" });
 
     
-    const terminalStatuses = ["retiree", "cancelled", "refusee"]; 
+    const terminalStatuses = ["retiree", "cancelled", "non_retenue", "retenue"]; 
     if (terminalStatuses.includes(application.candidateStatus)) {
       return res
         .status(400)
@@ -9828,11 +10042,12 @@ import Notification from "../models/Notification.js";
 
 export const getMyNotifications = async (req, res) => {
   try {
-    const notifications = await Notification.find({ userId: req.user.id }).sort(
-      {
-        date: -1,
-      }
-    );
+    
+    const { page = 1, limit = 20 } = req.query;
+    const notifications = await Notification.find({ userId: req.user.id })
+      .sort({ date: -1 })
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit));
     res.json(notifications);
   } catch (err) {
     res.status(500).json({ msg: err.message });
@@ -9856,7 +10071,7 @@ export const markAsRead = async (req, res) => {
     const notification = await Notification.findOneAndUpdate(
       { _id: req.params.id, userId: req.user.id },
       { lu: true },
-      { new: true }
+      { new: true },
     );
 
     if (!notification)
@@ -9866,6 +10081,548 @@ export const markAsRead = async (req, res) => {
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
+};
+
+
+=== controllers\oauthController.js ===
+import jwt from "jsonwebtoken";
+import { OAuth2Client } from "google-auth-library";
+import User from "../models/User.js";
+import Candidate from "../models/Candidate.js";
+import Recruiter from "../models/Recruiter.js";
+
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+
+
+const generateToken = (user) => {
+  return jwt.sign(
+    {
+      id: user._id,
+      role: user.role,
+      emailVerified: user.emailVerified,
+    },
+    process.env.JWT_SECRET,
+    { expiresIn: "1d" },
+  );
+};
+
+
+const buildUserResponse = async (user, isNew = false) => {
+  const token = generateToken(user);
+
+  const response = {
+    token,
+    user: {
+      id: user._id,
+      nom: user.nom,
+      email: user.email,
+      role: user.role,
+      emailVerified: user.emailVerified,
+    },
+    isNewUser: isNew,
+  };
+
+  
+  if (user.role === "recruteur") {
+    const recruiter = await Recruiter.findOne({ userId: user._id });
+    if (recruiter) {
+      response.recruiterStatus = recruiter.status;
+      response.limitedAccess = recruiter.status !== "validated";
+    }
+  }
+
+  return response;
+};
+
+
+
+
+
+export const googleTokenLogin = async (req, res) => {
+  try {
+    const { credential, role } = req.body;
+
+    if (!credential) {
+      return res.status(400).json({ msg: "Token Google manquant." });
+    }
+
+    
+    let ticket;
+    try {
+      ticket = await googleClient.verifyIdToken({
+        idToken: credential,
+        audience: process.env.GOOGLE_CLIENT_ID,
+      });
+    } catch (verifyError) {
+      console.error("Google token verification failed:", verifyError.message);
+      return res.status(401).json({ msg: "Token Google invalide ou expiré." });
+    }
+
+    const payload = ticket.getPayload();
+
+    if (!payload.email) {
+      return res
+        .status(400)
+        .json({ msg: "Aucun email trouvé dans le compte Google." });
+    }
+
+    if (!payload.email_verified) {
+      return res.status(400).json({ msg: "L'email Google n'est pas vérifié." });
+    }
+
+    const email = payload.email.toLowerCase();
+    const nom =
+      payload.name ||
+      `${payload.given_name || ""} ${payload.family_name || ""}`.trim();
+    const profilePicture = payload.picture || null;
+
+    
+    let user = await User.findOne({ email });
+    let isNew = false;
+
+    if (user) {
+      
+      if (!user.canLogin()) {
+        if (user.accountStatus === "banned") {
+          return res.status(403).json({
+            msg: "Votre compte a été banni.",
+            code: "ACCOUNT_BANNED",
+          });
+        }
+        if (user.accountStatus === "suspended") {
+          return res.status(403).json({
+            msg: `Votre compte est suspendu${
+              user.suspendedUntil
+                ? ` jusqu'au ${user.suspendedUntil.toLocaleDateString("fr-FR")}`
+                : ""
+            }.`,
+            code: "ACCOUNT_SUSPENDED",
+          });
+        }
+      }
+
+      
+      if (!user.oauthProviders) {
+        user.oauthProviders = [];
+      }
+
+      const hasGoogle = user.oauthProviders.some(
+        (p) => p.provider === "google",
+      );
+      if (!hasGoogle) {
+        user.oauthProviders.push({
+          provider: "google",
+          providerId: payload.sub,
+          linkedAt: new Date(),
+        });
+      }
+
+      if (!user.emailVerified) {
+        user.emailVerified = true;
+      }
+
+      user.derniereConnexion = new Date();
+      await user.save();
+    } else {
+      
+      isNew = true;
+
+      const selectedRole = role === "recruteur" ? "recruteur" : "candidat";
+
+      
+      const crypto = await import("crypto");
+      const bcrypt = await import("bcryptjs");
+      const randomPassword = crypto.randomBytes(32).toString("hex");
+      const hashedPassword = await bcrypt.default.hash(randomPassword, 12);
+
+      user = await User.create({
+        nom,
+        email,
+        motDePasse: hashedPassword,
+        role: selectedRole,
+        emailVerified: true,
+        accountStatus: "active",
+        oauthProviders: [
+          {
+            provider: "google",
+            providerId: payload.sub,
+            linkedAt: new Date(),
+          },
+        ],
+        derniereConnexion: new Date(),
+      });
+
+      
+      if (selectedRole === "candidat") {
+        await Candidate.create({
+          userId: user._id,
+          ...(profilePicture && { profilePicture }),
+        });
+      }
+      
+      
+    }
+
+    const response = await buildUserResponse(user, isNew);
+
+    
+    if (isNew) {
+      response.msg = "Compte créé avec succès via Google ! 🎉";
+      response.needsProfileCompletion = true;
+
+      if (user.role === "recruteur") {
+        response.needsCompanySelection = true;
+        response.msg =
+          "Compte créé via Google ! Veuillez sélectionner votre entreprise.";
+      }
+    } else {
+      response.msg = "Connexion réussie via Google ✅";
+    }
+
+    res.json(response);
+  } catch (err) {
+    console.error("Google token login error:", err);
+    res.status(500).json({ msg: "Erreur lors de la connexion avec Google." });
+  }
+};
+
+
+
+
+
+export const oauthCallbackHandler = (provider) => {
+  return async (req, res) => {
+    try {
+      const FRONTEND_URL = process.env.FRONTEND_URL || "http:
+
+      if (!req.user) {
+        return res.redirect(
+          `${FRONTEND_URL}/auth/oauth-error?error=authentication_failed`,
+        );
+      }
+
+      const { user, isNew } = req.user;
+
+      
+      if (!user.canLogin()) {
+        return res.redirect(
+          `${FRONTEND_URL}/auth/oauth-error?error=account_restricted&status=${user.accountStatus}`,
+        );
+      }
+
+      const token = generateToken(user);
+
+      
+      const params = new URLSearchParams({
+        token,
+        isNew: isNew ? "true" : "false",
+        provider,
+      });
+
+      if (isNew && user.role === "recruteur") {
+        params.set("needsCompany", "true");
+      }
+
+      res.redirect(`${FRONTEND_URL}/auth/oauth-callback?${params.toString()}`);
+    } catch (err) {
+      console.error(`${provider} OAuth callback error:`, err);
+      const FRONTEND_URL = process.env.FRONTEND_URL || "http:
+
+      if (err.message === "ACCOUNT_RESTRICTED") {
+        return res.redirect(
+          `${FRONTEND_URL}/auth/oauth-error?error=account_restricted&status=${err.accountStatus}`,
+        );
+      }
+
+      res.redirect(`${FRONTEND_URL}/auth/oauth-error?error=server_error`);
+    }
+  };
+};
+
+
+
+
+export const facebookTokenLogin = async (req, res) => {
+  try {
+    const { accessToken, role } = req.body;
+
+    if (!accessToken) {
+      return res.status(400).json({ msg: "Token Facebook manquant." });
+    }
+
+    
+    let fbResponse;
+    try {
+      const fbUrl = `https:
+      const response = await fetch(fbUrl);
+      fbResponse = await response.json();
+
+      if (fbResponse.error) {
+        console.error("Facebook token error:", fbResponse.error);
+        return res.status(401).json({ msg: "Token Facebook invalide." });
+      }
+    } catch (fbError) {
+      console.error("Facebook API error:", fbError);
+      return res.status(401).json({ msg: "Erreur de vérification Facebook." });
+    }
+
+    if (!fbResponse.email) {
+      return res.status(400).json({
+        msg: "Aucun email trouvé. Veuillez autoriser l'accès à votre email Facebook.",
+      });
+    }
+
+    const email = fbResponse.email.toLowerCase();
+    const nom = fbResponse.name || email.split("@")[0];
+    const profilePicture = fbResponse.picture?.data?.url || null;
+
+    
+    let user = await User.findOne({ email });
+    let isNew = false;
+
+    if (user) {
+      
+      if (!user.canLogin()) {
+        if (user.accountStatus === "banned") {
+          return res.status(403).json({
+            msg: "Votre compte a été banni.",
+            code: "ACCOUNT_BANNED",
+          });
+        }
+        if (user.accountStatus === "suspended") {
+          return res.status(403).json({
+            msg: `Votre compte est suspendu.`,
+            code: "ACCOUNT_SUSPENDED",
+          });
+        }
+      }
+
+      if (!user.oauthProviders) {
+        user.oauthProviders = [];
+      }
+
+      const hasFacebook = user.oauthProviders.some(
+        (p) => p.provider === "facebook",
+      );
+      if (!hasFacebook) {
+        user.oauthProviders.push({
+          provider: "facebook",
+          providerId: fbResponse.id,
+          linkedAt: new Date(),
+        });
+      }
+
+      if (!user.emailVerified) {
+        user.emailVerified = true;
+      }
+
+      user.derniereConnexion = new Date();
+      await user.save();
+    } else {
+      
+      isNew = true;
+
+      const selectedRole = role === "recruteur" ? "recruteur" : "candidat";
+
+      const crypto = await import("crypto");
+      const bcrypt = await import("bcryptjs");
+      const randomPassword = crypto.randomBytes(32).toString("hex");
+      const hashedPassword = await bcrypt.default.hash(randomPassword, 12);
+
+      user = await User.create({
+        nom,
+        email,
+        motDePasse: hashedPassword,
+        role: selectedRole,
+        emailVerified: true,
+        accountStatus: "active",
+        oauthProviders: [
+          {
+            provider: "facebook",
+            providerId: fbResponse.id,
+            linkedAt: new Date(),
+          },
+        ],
+        derniereConnexion: new Date(),
+      });
+
+      if (selectedRole === "candidat") {
+        await Candidate.create({
+          userId: user._id,
+          ...(profilePicture && { profilePicture }),
+        });
+      }
+    }
+
+    const response = await buildUserResponse(user, isNew);
+
+    if (isNew) {
+      response.msg = "Compte créé avec succès via Facebook ! 🎉";
+      response.needsProfileCompletion = true;
+
+      if (user.role === "recruteur") {
+        response.needsCompanySelection = true;
+      }
+    } else {
+      response.msg = "Connexion réussie via Facebook ✅";
+    }
+
+    res.json(response);
+  } catch (err) {
+    console.error("Facebook token login error:", err);
+    res.status(500).json({ msg: "Erreur lors de la connexion avec Facebook." });
+  }
+};
+
+
+
+
+export const completeOAuthRecruiterSetup = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { companyId, nouveauNomEntreprise, nouveauSiteWeb, position } =
+      req.body;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ msg: "Utilisateur introuvable." });
+    }
+
+    if (user.role !== "recruteur") {
+      return res
+        .status(400)
+        .json({ msg: "Cette action est réservée aux recruteurs." });
+    }
+
+    
+    const existingRecruiter = await Recruiter.findOne({ userId });
+    if (existingRecruiter) {
+      return res.status(400).json({ msg: "Profil recruteur déjà configuré." });
+    }
+
+    const Company = (await import("../models/Company.js")).default;
+
+    let finalCompanyId;
+
+    if (companyId) {
+      const comp = await Company.findById(companyId);
+      if (!comp) {
+        return res.status(400).json({ msg: "Entreprise introuvable." });
+      }
+      finalCompanyId = comp._id;
+    } else if (nouveauNomEntreprise) {
+      const newComp = await Company.create({
+        name: nouveauNomEntreprise,
+        website: nouveauSiteWeb || "",
+        status: "pending",
+      });
+      finalCompanyId = newComp._id;
+    } else {
+      return res.status(400).json({
+        msg: "Vous devez sélectionner ou créer une entreprise.",
+      });
+    }
+
+    await Recruiter.create({
+      userId: user._id,
+      companyId: finalCompanyId,
+      position: position || "Recruteur",
+      status: "pending_validation",
+      isAdmin: !companyId, 
+    });
+
+    const token = generateToken(user);
+
+    res.json({
+      msg: "Profil recruteur configuré avec succès ! En attente de validation.",
+      token,
+      user: {
+        id: user._id,
+        nom: user.nom,
+        email: user.email,
+        role: user.role,
+        emailVerified: user.emailVerified,
+      },
+      recruiterStatus: "pending_validation",
+    });
+  } catch (err) {
+    console.error("Complete recruiter setup error:", err);
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+
+
+export const getLinkedProviders = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select("oauthProviders");
+
+    if (!user) {
+      return res.status(404).json({ msg: "Utilisateur introuvable." });
+    }
+
+    const providers = (user.oauthProviders || []).map((p) => ({
+      provider: p.provider,
+      linkedAt: p.linkedAt,
+    }));
+
+    res.json({
+      providers,
+      hasPassword: !user.oauthProviders || user.oauthProviders.length === 0,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
+
+
+export const unlinkProvider = async (req, res) => {
+  try {
+    const { provider } = req.params;
+    const userId = req.user.id;
+
+    if (!["google", "facebook"].includes(provider)) {
+      return res.status(400).json({ msg: "Fournisseur invalide." });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ msg: "Utilisateur introuvable." });
+    }
+
+    const providerCount = user.oauthProviders?.length || 0;
+
+    
+    
+    if (providerCount <= 1) {
+      
+      
+      return res.status(400).json({
+        msg: "Impossible de dissocier le dernier fournisseur. Définissez d'abord un mot de passe.",
+      });
+    }
+
+    user.oauthProviders = user.oauthProviders.filter(
+      (p) => p.provider !== provider,
+    );
+    await user.save();
+
+    res.json({ msg: `${provider} dissocié avec succès.` });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export default {
+  googleTokenLogin,
+  facebookTokenLogin,
+  oauthCallbackHandler,
+  completeOAuthRecruiterSetup,
+  getLinkedProviders,
+  unlinkProvider,
 };
 
 
@@ -11271,7 +12028,7 @@ export const updateOffer = async (req, res) => {
           existingAnem.disabledAt = undefined;
           await existingAnem.save();
         } else {
-          await createAnemOfferAssociation(
+          await createAnemOffer(
             offer._id,
             recruiter._id,
             recruiter.anem.registrationId,
@@ -13504,7 +14261,12 @@ export const requireActiveAdmin = async (req, res, next) => {
 import jwt from "jsonwebtoken";
 
 export default function auth(req, res, next) {
-  const token = req.header("Authorization");
+  
+  const authHeader = req.header("Authorization");
+  const token = authHeader?.startsWith("Bearer ")
+    ? authHeader.slice(7)
+    : authHeader;
+  if (!token) return res.status(401).json({ msg: "Pas de token fourni" });
   if (!token) return res.status(401).json({ msg: "Pas de token fourni" });
 
   try {
@@ -16524,6 +17286,25 @@ export default mongoose.model("SystemSettings", systemSettingsSchema);
 === models\User.js ===
 import mongoose from "mongoose";
 
+const oauthProviderSchema = new mongoose.Schema(
+  {
+    provider: {
+      type: String,
+      enum: ["google", "facebook"],
+      required: true,
+    },
+    providerId: {
+      type: String,
+      required: true,
+    },
+    linkedAt: {
+      type: Date,
+      default: Date.now,
+    },
+  },
+  { _id: false },
+);
+
 const userSchema = new mongoose.Schema(
   {
     nom: { type: String },
@@ -16549,6 +17330,9 @@ const userSchema = new mongoose.Schema(
     suspendedUntil: Date,
 
     derniereConnexion: Date,
+
+    
+    oauthProviders: [oauthProviderSchema],
   },
   { timestamps: true },
 );
@@ -16557,6 +17341,10 @@ userSchema.index({ email: 1 });
 userSchema.index({ role: 1 });
 userSchema.index({ createdAt: -1 });
 userSchema.index({ accountStatus: 1 });
+userSchema.index({
+  "oauthProviders.provider": 1,
+  "oauthProviders.providerId": 1,
+});
 
 userSchema.methods.canLogin = function () {
   if (this.accountStatus === "banned") return false;
@@ -16567,6 +17355,17 @@ userSchema.methods.canLogin = function () {
     return false;
   }
   return true;
+};
+
+userSchema.methods.hasOAuthProvider = function (provider) {
+  return this.oauthProviders?.some((p) => p.provider === provider) || false;
+};
+
+userSchema.methods.hasPassword = function () {
+  
+  
+  
+  return !this.oauthProviders || this.oauthProviders.length === 0;
 };
 
 export default mongoose.model("User", userSchema);
@@ -16868,6 +17667,7 @@ import express from "express";
 import auth from "../middleware/auth.js";
 import { authRole } from "../middleware/roles.js";
 import Admin from "../models/Admin.js";
+
 import {
   getRecruiters,
   validateRecruiter,
@@ -16915,7 +17715,6 @@ import {
   createSkill,
   updateSkill,
   deleteSkill,
-  
   getTrendingClusters,
   getDuplicateClusters,
   getOrphanClusters,
@@ -16925,10 +17724,8 @@ import {
   dismissCluster,
   flagCluster,
   unflagCluster,
-  
   getSkillFeedback,
   reviewSkillFeedback,
-  
   getSkillSystemStats,
   getSkillSettings,
   updateSkillSettings,
@@ -16968,13 +17765,9 @@ const requirePermission = (permission) => async (req, res, next) => {
   try {
     const admin = await Admin.findOne({ userId: req.user.id });
 
-    if (!admin) {
-      return res.status(403).json({ msg: "Admin introuvable" });
-    }
-
-    if (admin.status !== "active") {
+    if (!admin) return res.status(403).json({ msg: "Admin introuvable" });
+    if (admin.status !== "active")
       return res.status(403).json({ msg: "Compte admin suspendu" });
-    }
 
     if (!admin.hasPermission(permission)) {
       return res.status(403).json({
@@ -16990,8 +17783,14 @@ const requirePermission = (permission) => async (req, res, next) => {
   }
 };
 
+
+
+
 router.get("/stats/global", requirePermission("viewStats"), getGlobalStats);
 router.get("/stats/trends", requirePermission("viewStats"), getTrends);
+
+
+
 
 router.get(
   "/recruteurs",
@@ -17018,12 +17817,14 @@ router.post(
   requirePermission("validateRecruiters"),
   requestMultipleValidationItems,
 );
-
 router.put(
   "/recruteurs/:id/cancel-request",
   requirePermission("validateRecruiters"),
   cancelValidationRequest,
 );
+
+
+
 
 router.get("/users", getAllUsers);
 router.put("/users/ban/:id", requirePermission("banUsers"), banUser);
@@ -17034,9 +17835,11 @@ router.post(
   sendMessageToUser,
 );
 
+
+
+
 router.get("/admins", requirePermission("viewStats"), getAllAdmins);
 router.post("/admins", requirePermission("createAdmin"), createAdmin);
-router.delete("/admins/:id", requirePermission("deleteAdmin"), deleteAdmin);
 router.put(
   "/admins/:id/suspend",
   requirePermission("deleteAdmin"),
@@ -17052,17 +17855,32 @@ router.put(
   requirePermission("assignAdminLabels"),
   updateAdminLabel,
 );
+router.delete("/admins/:id", requirePermission("deleteAdmin"), deleteAdmin);
+
+
+
+
+
 
 router.get(
   "/entreprises/all",
   requirePermission("validateCompanies"),
   getAllCompanies,
 );
-
 router.get(
   "/entreprises/en-attente",
   requirePermission("validateCompanies"),
   getPendingCompanies,
+);
+router.post(
+  "/entreprises/create",
+  requirePermission("validateCompanies"),
+  createCompanyByAdmin,
+);
+router.post(
+  "/entreprises/assign-admin",
+  requirePermission("validateCompanies"),
+  assignCompanyAdmin,
 );
 router.put(
   "/entreprises/valider/:id",
@@ -17074,38 +17892,38 @@ router.put(
   requirePermission("validateCompanies"),
   rejectCompany,
 );
+router.delete(
+  "/entreprises/remove-admin/:recruiterId",
+  requirePermission("validateCompanies"),
+  removeCompanyAdmin,
+);
+
+
+router.get(
+  "/entreprises/:companyId/recruiters",
+  requirePermission("validateCompanies"),
+  getCompanyRecruiters,
+);
+
 
 router.get(
   "/entreprises/:companyId",
   requirePermission("validateCompanies"),
   getCompanyDetailsAdmin,
 );
-
 router.put(
   "/entreprises/:id",
   requirePermission("validateCompanies"),
   updateCompanyByAdmin,
 );
 
+
+
+
 router.get(
   "/offres/en-attente",
   requirePermission("validateOffers"),
   getPendingOffers,
-);
-router.put(
-  "/offres/:id/approve",
-  requirePermission("validateOffers"),
-  approveOffer,
-);
-router.put(
-  "/offres/:id/reject",
-  requirePermission("validateOffers"),
-  rejectOffer,
-);
-router.delete(
-  "/offres/:id",
-  requirePermission("validateOffers"),
-  deleteOfferAdmin,
 );
 router.get(
   "/offres/manuelles",
@@ -17118,10 +17936,15 @@ router.post(
   proposeCandidateToOffer,
 );
 
-router.get(
-  "/offres/:id/details",
+router.put(
+  "/offres/:id/approve",
   requirePermission("validateOffers"),
-  getOfferDetailsAdmin,
+  approveOffer,
+);
+router.put(
+  "/offres/:id/reject",
+  requirePermission("validateOffers"),
+  rejectOffer,
 );
 router.put(
   "/offres/:id/update",
@@ -17133,12 +17956,28 @@ router.put(
   requirePermission("validateOffers"),
   toggleOfferVisibility,
 );
+router.get(
+  "/offres/:id/details",
+  requirePermission("validateOffers"),
+  getOfferDetailsAdmin,
+);
+router.delete(
+  "/offres/:id",
+  requirePermission("validateOffers"),
+  deleteOfferAdmin,
+);
+
+
+
 
 router.get(
   "/candidates/:id",
   requirePermission("viewStats"),
   getCandidateDetailsAdmin,
 );
+
+
+
 
 router.get(
   "/announcements",
@@ -17160,6 +17999,9 @@ router.delete(
   requirePermission("manageAnnouncements"),
   deleteAnnouncement,
 );
+
+
+
 
 router.get(
   "/tickets",
@@ -17188,45 +18030,24 @@ router.put(
   closeTicket,
 );
 
+
+
+
 router.get("/logs", requirePermission("viewLogs"), getAdminLogs);
 
-router.post(
-  "/entreprises/create",
-  requirePermission("validateCompanies"),
-  createCompanyByAdmin,
-);
 
-router.get(
-  "/entreprises/:companyId/recruiters",
-  requirePermission("validateCompanies"),
-  getCompanyRecruiters,
-);
-
-router.post(
-  "/entreprises/assign-admin",
-  requirePermission("validateCompanies"),
-  assignCompanyAdmin,
-);
-
-router.delete(
-  "/entreprises/remove-admin/:recruiterId",
-  requirePermission("validateCompanies"),
-  removeCompanyAdmin,
-);
 
 
 router.get("/settings", getAllSettings);
 router.get("/settings/category/:category", getSettingsByCategory);
+router.get("/settings/email-verification-mode", getEmailVerificationMode);
+router.post("/settings/email-verification-mode", toggleEmailVerificationMode);
+router.post("/settings/skill-proposal", toggleSkillProposal);
 router.put(
   "/settings/bulk",
   requirePermission("editAdminPermissions"),
   updateSettingsBulk,
 );
-router.get("/settings/email-verification-mode", getEmailVerificationMode);
-router.post("/settings/email-verification-mode", toggleEmailVerificationMode);
-router.post("/settings/skill-proposal", toggleSkillProposal);
-
-
 
 
 
@@ -17246,7 +18067,6 @@ router.put(
   requirePermission("editAdminPermissions"),
   updateSkillSettings,
 );
-
 
 router.get(
   "/skills/clusters/trending",
@@ -17294,7 +18114,6 @@ router.post(
   unflagCluster,
 );
 
-
 router.get(
   "/skills/feedback",
   requirePermission("validateOffers"),
@@ -17305,7 +18124,6 @@ router.post(
   requirePermission("validateOffers"),
   reviewSkillFeedback,
 );
-
 
 router.get("/skills", requirePermission("viewStats"), getSkills);
 router.post("/skills", requirePermission("validateOffers"), createSkill);
@@ -17622,6 +18440,7 @@ export default router;
 
 === routes\authRoutes.js ===
 import express from "express";
+import passport from "passport";
 import auth from "../middleware/auth.js";
 import {
   authRateLimiter,
@@ -17644,6 +18463,14 @@ import {
   resetPassword,
   checkResetToken,
 } from "../controllers/passwordResetController.js";
+import {
+  googleTokenLogin,
+  facebookTokenLogin,
+  oauthCallbackHandler,
+  completeOAuthRecruiterSetup,
+  getLinkedProviders,
+  unlinkProvider,
+} from "../controllers/oauthController.js";
 
 const router = express.Router();
 
@@ -17690,6 +18517,61 @@ router.get("/check-reset-token/:token", checkResetToken);
 
 
 router.get("/companies", getCompanies);
+
+
+
+
+
+
+router.post("/google/token", authRateLimiter, googleTokenLogin);
+
+
+router.post("/facebook/token", authRateLimiter, facebookTokenLogin);
+
+
+router.get(
+  "/google",
+  passport.authenticate("google", {
+    scope: ["profile", "email"],
+    session: false,
+  }),
+);
+
+router.get(
+  "/google/callback",
+  passport.authenticate("google", {
+    session: false,
+    failureRedirect: `${process.env.FRONTEND_URL || "http:
+  }),
+  oauthCallbackHandler("google"),
+);
+
+
+router.get(
+  "/facebook",
+  passport.authenticate("facebook", {
+    scope: ["email"],
+    session: false,
+  }),
+);
+
+router.get(
+  "/facebook/callback",
+  passport.authenticate("facebook", {
+    session: false,
+    failureRedirect: `${process.env.FRONTEND_URL || "http:
+  }),
+  oauthCallbackHandler("facebook"),
+);
+
+
+router.post(
+  "/oauth/complete-recruiter-setup",
+  auth,
+  completeOAuthRecruiterSetup,
+);
+router.get("/oauth/linked-providers", auth, getLinkedProviders);
+router.delete("/oauth/unlink/:provider", auth, unlinkProvider);
 
 export default router;
 
@@ -18269,12 +19151,14 @@ router.get("/company/team", getCompanyTeam);
 
 router.get("/offers/:offerId/applications", getOfferApplications); 
 
+router.get("/applications/advanced", getAllApplicationsAdvanced);
 router.put("/applications/:applicationId/seen", markAsSeen);
 router.put("/applications/:applicationId/status", updateRecruiterStatus); 
 router.put("/applications/:applicationId/star", toggleStarred);
 router.put("/applications/:applicationId/notes", updateNotes);
 
 
+router.get("/interviews/grouped", getRecruiterInterviewsGrouped);
 router.get("/interviews", getRecruiterInterviews);
 router.post("/applications/:applicationId/interviews", proposeInterview);
 router.put(
@@ -18301,14 +19185,8 @@ router.get("/my-offers-stats", getMyOffersWithStats);
 router.put("/offers/:offerId/mark-all-seen", markAllOfferApplicationsAsSeen);
 
 
-router.get("/applications/advanced", getAllApplicationsAdvanced);
-
-
 router.get("/conversations/:conversationId", getRecruiterConversationMessages);
 
-
-
-router.get("/interviews/grouped", getRecruiterInterviewsGrouped);
 
 export default router;
 
@@ -18733,7 +19611,15 @@ export const seedAdmin = async () => {
       return;
     }
 
-    const hash = await bcrypt.hash("admin", 10);
+    
+    const adminPassword = process.env.ADMIN_DEFAULT_PASSWORD;
+    if (!adminPassword) {
+      console.error(
+        "❌ ADMIN_DEFAULT_PASSWORD not set in environment. Skipping admin seed for security.",
+      );
+      return;
+    }
+    const hash = await bcrypt.hash(adminPassword, 12);
 
     const user = await User.create({
       nom: "Super Admin",

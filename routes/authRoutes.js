@@ -1,5 +1,5 @@
-// === routes/authRoutes.js ===
 import express from "express";
+import passport from "passport";
 import auth from "../middleware/auth.js";
 import {
   authRateLimiter,
@@ -22,14 +22,22 @@ import {
   resetPassword,
   checkResetToken,
 } from "../controllers/passwordResetController.js";
+import {
+  googleTokenLogin,
+  facebookTokenLogin,
+  oauthCallbackHandler,
+  completeOAuthRecruiterSetup,
+  getLinkedProviders,
+  unlinkProvider,
+} from "../controllers/oauthController.js";
 
 const router = express.Router();
 
-// Registration & Login
+// ─── Standard Auth ──────────────────────────────────────────────────
 router.post("/register", authRateLimiter, validators.register, register);
 router.post("/login", authRateLimiter, validators.login, login);
 
-// Email verification
+// ─── Email verification ─────────────────────────────────────────────
 router.post(
   "/verify-email",
   auth,
@@ -45,7 +53,7 @@ router.post(
 );
 router.put("/change-email", auth, validators.changeEmail, changeEmail);
 
-// Password reset (Forgot password)
+// ─── Password reset ─────────────────────────────────────────────────
 router.post(
   "/forgot-password",
   passwordResetLimiter,
@@ -66,7 +74,62 @@ router.post(
 );
 router.get("/check-reset-token/:token", checkResetToken);
 
-// Public
+// ─── Companies (for registration) ──────────────────────────────────
 router.get("/companies", getCompanies);
+
+// ═══════════════════════════════════════════════════════════════════════
+//  OAUTH ROUTES
+// ═══════════════════════════════════════════════════════════════════════
+
+// ─── Google: Token-based (recommended for SPA / React) ──────────────
+router.post("/google/token", authRateLimiter, googleTokenLogin);
+
+// ─── Facebook: Token-based (recommended for SPA / React) ────────────
+router.post("/facebook/token", authRateLimiter, facebookTokenLogin);
+
+// ─── Google: Redirect-based (traditional OAuth flow) ────────────────
+router.get(
+  "/google",
+  passport.authenticate("google", {
+    scope: ["profile", "email"],
+    session: false,
+  }),
+);
+
+router.get(
+  "/google/callback",
+  passport.authenticate("google", {
+    session: false,
+    failureRedirect: `${process.env.FRONTEND_URL || "http://localhost:3000"}/auth/oauth-error?error=google_failed`,
+  }),
+  oauthCallbackHandler("google"),
+);
+
+// ─── Facebook: Redirect-based (traditional OAuth flow) ──────────────
+router.get(
+  "/facebook",
+  passport.authenticate("facebook", {
+    scope: ["email"],
+    session: false,
+  }),
+);
+
+router.get(
+  "/facebook/callback",
+  passport.authenticate("facebook", {
+    session: false,
+    failureRedirect: `${process.env.FRONTEND_URL || "http://localhost:3000"}/auth/oauth-error?error=facebook_failed`,
+  }),
+  oauthCallbackHandler("facebook"),
+);
+
+// ─── OAuth account management ───────────────────────────────────────
+router.post(
+  "/oauth/complete-recruiter-setup",
+  auth,
+  completeOAuthRecruiterSetup,
+);
+router.get("/oauth/linked-providers", auth, getLinkedProviders);
+router.delete("/oauth/unlink/:provider", auth, unlinkProvider);
 
 export default router;

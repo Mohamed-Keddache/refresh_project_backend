@@ -51,7 +51,6 @@ const skillClusterSchema = new mongoose.Schema(
 );
 
 skillClusterSchema.index({ status: 1, totalUsageCount: -1 });
-skillClusterSchema.index({ canonicalName: 1 });
 skillClusterSchema.index({ "variants.text": 1 });
 skillClusterSchema.index({ isFlagged: 1, flagCount: -1 });
 skillClusterSchema.index({ createdAt: -1 });

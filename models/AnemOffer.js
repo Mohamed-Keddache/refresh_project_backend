@@ -37,7 +37,6 @@ const anemOfferSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-anemOfferSchema.index({ offerId: 1 });
 anemOfferSchema.index({ recruiterId: 1 });
 anemOfferSchema.index({ anemEnabled: 1 });
 anemOfferSchema.index({ recruiterId: 1, anemEnabled: 1 });

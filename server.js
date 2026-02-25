@@ -1,14 +1,16 @@
-import dotenv from "dotenv";
-dotenv.config();
+import "dotenv/config"; // Replaced dotenv.config() with the import version to handle ES Module hoisting
 import express from "express";
 import cors from "cors";
 import morgan from "morgan";
+import passport from "passport";
 import connectDB from "./config/db.js";
 import setupFolders from "./startup/setupFolders.js";
 import { seedAdmin } from "./startup/seedAdmin.js";
 import { setupSecurity } from "./middleware/security.js";
 import SystemSettings from "./models/SystemSettings.js";
 import { verifySmtpConnection } from "./services/emailService.js";
+
+import "./config/passport.js";
 
 import authRoutes from "./routes/authRoutes.js";
 import candidateRoutes from "./routes/candidateRoutes.js";
@@ -46,6 +48,8 @@ app.use(
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
+app.use(passport.initialize());
+
 if (process.env.NODE_ENV !== "test") {
   app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
 }
@@ -54,13 +58,21 @@ app.use("/uploads", express.static("uploads"));
 
 async function startServer() {
   try {
-    // Log environment variables at startup (without sensitive data)
     console.log("🔧 Environment check:");
     console.log("   NODE_ENV:", process.env.NODE_ENV || "development");
     console.log("   SMTP_HOST:", process.env.SMTP_HOST || "NOT SET");
     console.log("   SMTP_PORT:", process.env.SMTP_PORT || "NOT SET");
     console.log("   SMTP_USER:", process.env.SMTP_USER || "NOT SET");
     console.log("   SMTP_PASS:", process.env.SMTP_PASS ? "SET" : "NOT SET");
+
+    console.log(
+      "   GOOGLE_CLIENT_ID:",
+      process.env.GOOGLE_CLIENT_ID ? "SET" : "NOT SET",
+    );
+    console.log(
+      "   FACEBOOK_APP_ID:",
+      process.env.FACEBOOK_APP_ID ? "SET" : "NOT SET",
+    );
 
     await connectDB();
     setupFolders();
@@ -70,7 +82,6 @@ async function startServer() {
     await SystemSettings.initializeDefaults();
     console.log("⚙️ Paramètres système initialisés");
 
-    // Check SMTP connection if mode is smtp
     const emailMode = await SystemSettings.getSetting(
       "email_verification_mode",
       "development",
@@ -85,14 +96,11 @@ async function startServer() {
       } else {
         console.warn("⚠️ SMTP connection failed - emails may not be sent");
         console.warn("   Falling back to development mode for safety");
-        // Optionally auto-switch to development mode
-        // await SystemSettings.setSetting("email_verification_mode", "development");
       }
     } else {
       console.log("📧 Development mode: Use code 123456 for verification");
     }
 
-    // Routes
     app.use("/api/auth", authRoutes);
     app.use("/api/skills", skillRoutes);
     app.use("/api/offers", offerRoutes);
@@ -106,7 +114,6 @@ async function startServer() {
     app.use("/api/admin", adminRoutes);
     app.use("/api/anem", anemRoutes);
 
-    // Health endpoints
     app.get("/", (req, res) =>
       res.json({
         status: "ok",
@@ -123,7 +130,6 @@ async function startServer() {
       }),
     );
 
-    // Debug endpoint for email testing (remove in production)
     if (process.env.NODE_ENV !== "production") {
       app.get("/debug/smtp", async (req, res) => {
         try {
@@ -148,12 +154,10 @@ async function startServer() {
       });
     }
 
-    // 404 handler
     app.use((req, res) => {
       res.status(404).json({ msg: "Route non trouvée" });
     });
 
-    // Error handler
     app.use((err, req, res, next) => {
       console.error("❌ Erreur serveur:", err);
 

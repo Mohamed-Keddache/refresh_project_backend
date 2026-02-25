@@ -1677,9 +1677,26 @@ export const updateOfferByAdmin = async (req, res) => {
   try {
     const { id } = req.params;
 
+    // Fix - whitelist allowed fields:
+    const allowedFields = [
+      "titre",
+      "description",
+      "requirements",
+      "domaine",
+      "type",
+      "salaryMin",
+      "salaryMax",
+      "experienceLevel",
+      "skills",
+      "wilaya",
+      "visibility",
+    ];
+    const updates = Object.fromEntries(
+      Object.entries(req.body).filter(([k]) => allowedFields.includes(k)),
+    );
     const offer = await Offer.findByIdAndUpdate(
       id,
-      { $set: req.body },
+      { $set: updates },
       { new: true },
     );
 

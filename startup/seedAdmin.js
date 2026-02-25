@@ -10,7 +10,15 @@ export const seedAdmin = async () => {
       return;
     }
 
-    const hash = await bcrypt.hash("admin", 10);
+    // Fix - use environment variable with strong fallback warning:
+    const adminPassword = process.env.ADMIN_DEFAULT_PASSWORD;
+    if (!adminPassword) {
+      console.error(
+        "❌ ADMIN_DEFAULT_PASSWORD not set in environment. Skipping admin seed for security.",
+      );
+      return;
+    }
+    const hash = await bcrypt.hash(adminPassword, 12);
 
     const user = await User.create({
       nom: "Super Admin",

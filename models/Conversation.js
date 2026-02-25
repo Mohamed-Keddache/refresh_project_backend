@@ -87,6 +87,5 @@ const conversationSchema = new mongoose.Schema(
 conversationSchema.index({ recruiterId: 1, candidateHasReplied: 1 });
 conversationSchema.index({ candidateId: 1, lastMessageAt: -1 });
 conversationSchema.index({ recruiterId: 1, lastMessageAt: -1 });
-conversationSchema.index({ applicationId: 1 });
 
 export default mongoose.model("Conversation", conversationSchema);
