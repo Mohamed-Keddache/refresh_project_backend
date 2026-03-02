@@ -173,3 +173,29 @@ export const updateSettingsBulk = async (req, res) => {
     res.status(500).json({ msg: err.message });
   }
 };
+
+export const toggleStorageMode = async (req, res) => {
+  try {
+    const { mode } = req.body;
+
+    if (!["local_storage", "cloudinary"].includes(mode)) {
+      return res.status(400).json({
+        msg: "Mode invalide. Utilisez 'local_storage' ou 'cloudinary'.",
+      });
+    }
+
+    await SystemSettings.setSetting(
+      "storage_mode",
+      mode,
+      "Mode de stockage des fichiers",
+      req.user.id,
+    );
+
+    res.json({
+      msg: `Mode de stockage changé avec succès en : ${mode}`,
+      mode,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};

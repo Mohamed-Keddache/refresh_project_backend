@@ -39,23 +39,18 @@ function getRecruiterStatusMessage(status) {
 
 export const register = async (req, res) => {
   try {
-    const {
-      nom,
-      email,
-      motDePasse,
-      role,
-      companyId,
-      nouveauNomEntreprise,
-      nouveauSiteWeb,
-    } = req.body;
+    const { nom, email, motDePasse, role } = req.body;
 
+    // Check if email already exists
     const exist = await User.findOne({ email: email.toLowerCase() });
     if (exist) {
       return res.status(400).json({ msg: "Email déjà utilisé" });
     }
 
+    // Hash password
     const hash = await bcrypt.hash(motDePasse, 12);
 
+    // Create user
     const user = await User.create({
       nom,
       email: email.toLowerCase(),
@@ -66,39 +61,17 @@ export const register = async (req, res) => {
     });
 
     try {
+      // Create role-specific profile
       if (role === "recruteur") {
-        let finalCompanyId;
-
-        if (companyId) {
-          const comp = await Company.findById(companyId);
-          if (!comp) {
-            await User.findByIdAndDelete(user._id);
-            return res.status(400).json({ msg: "Entreprise introuvable" });
-          }
-          finalCompanyId = comp._id;
-        } else if (nouveauNomEntreprise) {
-          const newComp = await Company.create({
-            name: nouveauNomEntreprise,
-            website: nouveauSiteWeb,
-            status: "pending",
-          });
-          finalCompanyId = newComp._id;
-        } else {
-          await User.findByIdAndDelete(user._id);
-          return res.status(400).json({
-            msg: "Vous devez sélectionner ou créer une entreprise.",
-          });
-        }
-
+        // Recruiter is created without company initially
         await Recruiter.create({
           userId: user._id,
-          companyId: finalCompanyId,
-          position: "Recruteur",
-          status: "pending_validation",
-          isAdmin: !companyId,
+          status: "incomplete", // will complete company info later
         });
       } else if (role === "candidat") {
-        await Candidate.create({ userId: user._id });
+        await Candidate.create({
+          userId: user._id,
+        });
       }
 
       // Send verification email
@@ -118,14 +91,13 @@ export const register = async (req, res) => {
             "email_verification",
             15,
           );
-          //console.log(`📧 Sending verification email to ${user.email} with code ${code}`);
+
           console.log(`📧 Sending verification email to ${user.email}`);
           await sendVerificationEmail(user.email, code, user.nom);
           console.log(`✅ Verification email sent successfully`);
         } catch (emailError) {
           console.error("❌ Failed to send verification email:", emailError);
-          // Don't fail registration, just log the error
-          // User can request a new code later
+          // Do not fail registration if email fails
         }
       } else {
         console.log(
@@ -135,7 +107,7 @@ export const register = async (req, res) => {
 
       const token = generateToken(user);
 
-      res.status(201).json({
+      return res.status(201).json({
         msg: "Inscription réussie. Vérifiez votre email.",
         token,
         user: {
@@ -147,12 +119,13 @@ export const register = async (req, res) => {
         needsEmailVerification: true,
       });
     } catch (err) {
+      // Rollback user if profile creation fails
       await User.findByIdAndDelete(user._id);
       throw err;
     }
   } catch (err) {
     console.error("Registration error:", err);
-    res.status(500).json({ msg: err.message });
+    return res.status(500).json({ msg: err.message });
   }
 };
 

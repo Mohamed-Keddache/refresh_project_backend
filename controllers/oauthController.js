@@ -22,7 +22,6 @@ const generateToken = (user) => {
 // ─── Build user response (shared helper) ────────────────────────────
 const buildUserResponse = async (user, isNew = false) => {
   const token = generateToken(user);
-
   const response = {
     token,
     user: {
@@ -35,15 +34,14 @@ const buildUserResponse = async (user, isNew = false) => {
     isNewUser: isNew,
   };
 
-  // If recruiter, add recruiter status info
   if (user.role === "recruteur") {
     const recruiter = await Recruiter.findOne({ userId: user._id });
     if (recruiter) {
       response.recruiterStatus = recruiter.status;
       response.limitedAccess = recruiter.status !== "validated";
+      response.needsOnboarding = recruiter.status === "incomplete"; // Indique au frontend d'afficher l'onboarding
     }
   }
-
   return response;
 };
 
@@ -59,7 +57,6 @@ export const googleTokenLogin = async (req, res) => {
       return res.status(400).json({ msg: "Token Google manquant." });
     }
 
-    // Verify the Google ID token
     let ticket;
     try {
       ticket = await googleClient.verifyIdToken({
@@ -67,138 +64,98 @@ export const googleTokenLogin = async (req, res) => {
         audience: process.env.GOOGLE_CLIENT_ID,
       });
     } catch (verifyError) {
-      console.error("Google token verification failed:", verifyError.message);
       return res.status(401).json({ msg: "Token Google invalide ou expiré." });
     }
 
     const payload = ticket.getPayload();
-
-    if (!payload.email) {
-      return res
-        .status(400)
-        .json({ msg: "Aucun email trouvé dans le compte Google." });
-    }
-
-    if (!payload.email_verified) {
-      return res.status(400).json({ msg: "L'email Google n'est pas vérifié." });
-    }
-
     const email = payload.email.toLowerCase();
     const nom =
       payload.name ||
       `${payload.given_name || ""} ${payload.family_name || ""}`.trim();
     const profilePicture = payload.picture || null;
 
-    // Check if user exists
     let user = await User.findOne({ email });
-    let isNew = false;
 
+    // Si l'utilisateur existe déjà, on le connecte directement
     if (user) {
-      // ── Existing user ──────────────────────────────────────────────
       if (!user.canLogin()) {
-        if (user.accountStatus === "banned") {
-          return res.status(403).json({
-            msg: "Votre compte a été banni.",
-            code: "ACCOUNT_BANNED",
-          });
-        }
-        if (user.accountStatus === "suspended") {
-          return res.status(403).json({
-            msg: `Votre compte est suspendu${
-              user.suspendedUntil
-                ? ` jusqu'au ${user.suspendedUntil.toLocaleDateString("fr-FR")}`
-                : ""
-            }.`,
+        return res
+          .status(403)
+          .json({
+            msg: "Votre compte est suspendu ou banni.",
             code: "ACCOUNT_SUSPENDED",
           });
-        }
       }
 
-      // Link Google provider if not already linked
-      if (!user.oauthProviders) {
-        user.oauthProviders = [];
-      }
-
-      const hasGoogle = user.oauthProviders.some(
+      // Ajout du provider s'il n'existait pas
+      const hasGoogle = user.oauthProviders?.some(
         (p) => p.provider === "google",
       );
       if (!hasGoogle) {
+        user.oauthProviders = user.oauthProviders || [];
         user.oauthProviders.push({
           provider: "google",
           providerId: payload.sub,
           linkedAt: new Date(),
         });
       }
-
-      if (!user.emailVerified) {
-        user.emailVerified = true;
-      }
-
+      user.emailVerified = true;
       user.derniereConnexion = new Date();
       await user.save();
-    } else {
-      // ── New user ───────────────────────────────────────────────────
-      isNew = true;
 
-      const selectedRole = role === "recruteur" ? "recruteur" : "candidat";
-
-      // Generate random password for OAuth users
-      const crypto = await import("crypto");
-      const bcrypt = await import("bcryptjs");
-      const randomPassword = crypto.randomBytes(32).toString("hex");
-      const hashedPassword = await bcrypt.default.hash(randomPassword, 12);
-
-      user = await User.create({
-        nom,
-        email,
-        motDePasse: hashedPassword,
-        role: selectedRole,
-        emailVerified: true,
-        accountStatus: "active",
-        oauthProviders: [
-          {
-            provider: "google",
-            providerId: payload.sub,
-            linkedAt: new Date(),
-          },
-        ],
-        derniereConnexion: new Date(),
-      });
-
-      // Create role-specific profile
-      if (selectedRole === "candidat") {
-        await Candidate.create({
-          userId: user._id,
-          ...(profilePicture && { profilePicture }),
-        });
-      }
-      // Note: For recruiter via OAuth, they will need to complete
-      // company selection separately (see below endpoint).
+      const response = await buildUserResponse(user, false);
+      response.msg = "Connexion réussie via Google ✅";
+      return res.json(response);
     }
 
-    const response = await buildUserResponse(user, isNew);
+    // Si l'utilisateur n'existe pas et qu'aucun rôle n'est fourni, on demande au Frontend de lui poser la question
+    if (!role) {
+      return res.status(200).json({
+        isNewUser: true,
+        needsRoleSelection: true,
+        email,
+        nom,
+        profilePicture,
+      });
+    }
 
-    // Add extra info for new users
-    if (isNew) {
-      response.msg = "Compte créé avec succès via Google ! 🎉";
-      response.needsProfileCompletion = true;
+    // Création du nouvel utilisateur avec le rôle choisi
+    const crypto = await import("crypto");
+    const bcrypt = await import("bcryptjs");
+    const randomPassword = crypto.randomBytes(32).toString("hex");
+    const hashedPassword = await bcrypt.default.hash(randomPassword, 12);
 
-      if (user.role === "recruteur") {
-        response.needsCompanySelection = true;
-        response.msg =
-          "Compte créé via Google ! Veuillez sélectionner votre entreprise.";
-      }
-    } else {
-      response.msg = "Connexion réussie via Google ✅";
+    user = await User.create({
+      nom,
+      email,
+      motDePasse: hashedPassword,
+      role,
+      emailVerified: true,
+      accountStatus: "active",
+      oauthProviders: [
+        { provider: "google", providerId: payload.sub, linkedAt: new Date() },
+      ],
+      derniereConnexion: new Date(),
+    });
+
+    if (role === "candidat") {
+      await Candidate.create({ userId: user._id, profilePicture });
+    } else if (role === "recruteur") {
+      await Recruiter.create({ userId: user._id, status: "incomplete" });
+    }
+
+    const response = await buildUserResponse(user, true);
+    response.msg = "Compte créé avec succès via Google ! 🎉";
+
+    if (role === "recruteur") {
+      response.needsOnboarding = true;
     }
 
     res.json(response);
   } catch (err) {
-    console.error("Google token login error:", err);
     res.status(500).json({ msg: "Erreur lors de la connexion avec Google." });
   }
 };
-
 // ═══════════════════════════════════════════════════════════════════════
 //  METHOD 2: Passport OAuth callback handler (redirect-based flow)
 //  Used as the callback after Google/Facebook redirects back.

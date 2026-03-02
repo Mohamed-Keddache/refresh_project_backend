@@ -37,19 +37,17 @@
 
 
 === server.js ===
-import dotenv from "dotenv";
-dotenv.config();
+import "dotenv/config"; 
 import express from "express";
 import cors from "cors";
 import morgan from "morgan";
-import passport from "passport"; 
+import passport from "passport";
 import connectDB from "./config/db.js";
 import setupFolders from "./startup/setupFolders.js";
 import { seedAdmin } from "./startup/seedAdmin.js";
 import { setupSecurity } from "./middleware/security.js";
 import SystemSettings from "./models/SystemSettings.js";
 import { verifySmtpConnection } from "./services/emailService.js";
-
 
 import "./config/passport.js";
 
@@ -89,7 +87,6 @@ app.use(
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
-
 app.use(passport.initialize());
 
 if (process.env.NODE_ENV !== "test") {
@@ -97,7 +94,6 @@ if (process.env.NODE_ENV !== "test") {
 }
 
 app.use("/uploads", express.static("uploads"));
-
 
 async function startServer() {
   try {
@@ -107,7 +103,7 @@ async function startServer() {
     console.log("   SMTP_PORT:", process.env.SMTP_PORT || "NOT SET");
     console.log("   SMTP_USER:", process.env.SMTP_USER || "NOT SET");
     console.log("   SMTP_PASS:", process.env.SMTP_PASS ? "SET" : "NOT SET");
-    
+
     console.log(
       "   GOOGLE_CLIENT_ID:",
       process.env.GOOGLE_CLIENT_ID ? "SET" : "NOT SET",
@@ -500,11 +496,19 @@ export default { uploadCV, uploadImage, uploadAttachments, handleMulterError };
 
 
 === config\passport.js ===
+import "dotenv/config"; 
 import passport from "passport";
 import { Strategy as GoogleStrategy } from "passport-google-oauth20";
 import { Strategy as FacebookStrategy } from "passport-facebook";
 import User from "../models/User.js";
 import Candidate from "../models/Candidate.js";
+
+console.log("🔑 PASSPORT ENV CHECK:", {
+  GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID ? "SET" : "NOT SET",
+  GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET ? "SET" : "NOT SET",
+  FACEBOOK_APP_ID: process.env.FACEBOOK_APP_ID ? "SET" : "NOT SET",
+  FACEBOOK_APP_SECRET: process.env.FACEBOOK_APP_SECRET ? "SET" : "NOT SET",
+});
 
 passport.serializeUser((user, done) => {
   done(null, user._id);
@@ -518,7 +522,6 @@ passport.deserializeUser(async (id, done) => {
     done(err, null);
   }
 });
-
 
 if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
   passport.use(
@@ -546,7 +549,6 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
   );
 }
 
-
 if (process.env.FACEBOOK_APP_ID && process.env.FACEBOOK_APP_SECRET) {
   passport.use(
     new FacebookStrategy(
@@ -573,7 +575,6 @@ if (process.env.FACEBOOK_APP_ID && process.env.FACEBOOK_APP_SECRET) {
   );
 }
 
-
 async function handleOAuthUser(profile, provider) {
   const email =
     profile.emails && profile.emails.length > 0
@@ -596,11 +597,9 @@ async function handleOAuthUser(profile, provider) {
       ? profile.photos[0].value
       : null;
 
-  
   let user = await User.findOne({ email });
 
   if (user) {
-    
     let updated = false;
 
     if (!user.oauthProviders) {
@@ -620,7 +619,6 @@ async function handleOAuthUser(profile, provider) {
       updated = true;
     }
 
-    
     if (!user.emailVerified) {
       user.emailVerified = true;
       updated = true;
@@ -630,7 +628,6 @@ async function handleOAuthUser(profile, provider) {
       await user.save();
     }
 
-    
     if (!user.canLogin()) {
       const error = new Error("ACCOUNT_RESTRICTED");
       error.accountStatus = user.accountStatus;
@@ -645,8 +642,6 @@ async function handleOAuthUser(profile, provider) {
     return { user, isNew: false };
   }
 
-  
-  
   const crypto = await import("crypto");
   const randomPassword = crypto.randomBytes(32).toString("hex");
   const bcrypt = await import("bcryptjs");
@@ -656,8 +651,8 @@ async function handleOAuthUser(profile, provider) {
     nom: displayName,
     email,
     motDePasse: hashedPassword,
-    role: "candidat", 
-    emailVerified: true, 
+    role: "candidat",
+    emailVerified: true,
     accountStatus: "active",
     oauthProviders: [
       {
@@ -669,7 +664,6 @@ async function handleOAuthUser(profile, provider) {
     derniereConnexion: new Date(),
   });
 
-  
   const candidateData = { userId: user._id };
 
   if (profilePicture) {
@@ -2598,12 +2592,39 @@ export const updateSettingsBulk = async (req, res) => {
   }
 };
 
+export const toggleStorageMode = async (req, res) => {
+  try {
+    const { mode } = req.body;
+
+    if (!["local_storage", "cloudinary"].includes(mode)) {
+      return res.status(400).json({
+        msg: "Mode invalide. Utilisez 'local_storage' ou 'cloudinary'.",
+      });
+    }
+
+    await SystemSettings.setSetting(
+      "storage_mode",
+      mode,
+      "Mode de stockage des fichiers",
+      req.user.id,
+    );
+
+    res.json({
+      msg: `Mode de stockage changé avec succès en : ${mode}`,
+      mode,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
 
 === controllers\adminSupportController.js ===
 import SupportTicket from "../models/SupportTicket.js";
 import Admin from "../models/Admin.js";
 import Notification from "../models/Notification.js";
 import { logAdminAction } from "../models/AdminLog.js";
+import { saveFiles } from "../services/fileService.js";
 
 export const getTicketsByLabel = async (req, res) => {
   try {
@@ -2670,7 +2691,7 @@ export const respondToTicket = async (req, res) => {
     const admin = await Admin.findOne({ userId: req.user.id });
     const { ticketId } = req.params;
     const { content, newStatus } = req.body;
-    const attachments = req.files?.map((f) => f.path.replace(/\\/g, "/")) || [];
+    const attachments = await saveFiles(req.files, "attachments");
 
     if (!content) {
       return res.status(400).json({ msg: "Le contenu est obligatoire." });
@@ -2711,7 +2732,7 @@ export const respondToTicket = async (req, res) => {
       "ticket_responded",
       { type: "ticket", id: ticket._id },
       { newStatus },
-      req
+      req,
     );
 
     res.json({ msg: "Réponse envoyée.", ticket });
@@ -2746,7 +2767,7 @@ export const reassignTicket = async (req, res) => {
       "ticket_reassigned",
       { type: "ticket", id: ticket._id },
       { newLabel, newAdminId },
-      req
+      req,
     );
 
     res.json({ msg: "Ticket réassigné.", ticket });
@@ -2789,7 +2810,7 @@ export const closeTicket = async (req, res) => {
       "ticket_closed",
       { type: "ticket", id: ticket._id },
       { resolution },
-      req
+      req,
     );
 
     res.json({ msg: "Ticket fermé.", ticket });
@@ -5408,23 +5429,18 @@ function getRecruiterStatusMessage(status) {
 
 export const register = async (req, res) => {
   try {
-    const {
-      nom,
-      email,
-      motDePasse,
-      role,
-      companyId,
-      nouveauNomEntreprise,
-      nouveauSiteWeb,
-    } = req.body;
+    const { nom, email, motDePasse, role } = req.body;
 
+    
     const exist = await User.findOne({ email: email.toLowerCase() });
     if (exist) {
       return res.status(400).json({ msg: "Email déjà utilisé" });
     }
 
+    
     const hash = await bcrypt.hash(motDePasse, 12);
 
+    
     const user = await User.create({
       nom,
       email: email.toLowerCase(),
@@ -5435,39 +5451,17 @@ export const register = async (req, res) => {
     });
 
     try {
+      
       if (role === "recruteur") {
-        let finalCompanyId;
-
-        if (companyId) {
-          const comp = await Company.findById(companyId);
-          if (!comp) {
-            await User.findByIdAndDelete(user._id);
-            return res.status(400).json({ msg: "Entreprise introuvable" });
-          }
-          finalCompanyId = comp._id;
-        } else if (nouveauNomEntreprise) {
-          const newComp = await Company.create({
-            name: nouveauNomEntreprise,
-            website: nouveauSiteWeb,
-            status: "pending",
-          });
-          finalCompanyId = newComp._id;
-        } else {
-          await User.findByIdAndDelete(user._id);
-          return res.status(400).json({
-            msg: "Vous devez sélectionner ou créer une entreprise.",
-          });
-        }
-
+        
         await Recruiter.create({
           userId: user._id,
-          companyId: finalCompanyId,
-          position: "Recruteur",
-          status: "pending_validation",
-          isAdmin: !companyId,
+          status: "incomplete", 
         });
       } else if (role === "candidat") {
-        await Candidate.create({ userId: user._id });
+        await Candidate.create({
+          userId: user._id,
+        });
       }
 
       
@@ -5487,13 +5481,12 @@ export const register = async (req, res) => {
             "email_verification",
             15,
           );
-          
+
           console.log(`📧 Sending verification email to ${user.email}`);
           await sendVerificationEmail(user.email, code, user.nom);
           console.log(`✅ Verification email sent successfully`);
         } catch (emailError) {
           console.error("❌ Failed to send verification email:", emailError);
-          
           
         }
       } else {
@@ -5504,7 +5497,7 @@ export const register = async (req, res) => {
 
       const token = generateToken(user);
 
-      res.status(201).json({
+      return res.status(201).json({
         msg: "Inscription réussie. Vérifiez votre email.",
         token,
         user: {
@@ -5516,12 +5509,13 @@ export const register = async (req, res) => {
         needsEmailVerification: true,
       });
     } catch (err) {
+      
       await User.findByIdAndDelete(user._id);
       throw err;
     }
   } catch (err) {
     console.error("Registration error:", err);
-    res.status(500).json({ msg: err.message });
+    return res.status(500).json({ msg: err.message });
   }
 };
 
@@ -9047,6 +9041,7 @@ import Candidate from "../models/Candidate.js";
 import Recruiter from "../models/Recruiter.js";
 import Notification from "../models/Notification.js";
 import { mapRecruiterToCandidate } from "../utils/statusMapping.js";
+import { saveFiles } from "../services/fileService.js";
 
 
 
@@ -9143,7 +9138,7 @@ export const sendMessageAsRecruiter = async (req, res) => {
     const recruiter = await Recruiter.findOne({ userId: req.user.id });
     const { conversationId } = req.params;
     const { content } = req.body;
-    const attachments = req.files?.map((f) => f.path.replace(/\\/g, "/")) || [];
+    const attachments = await saveFiles(req.files, "attachments");
 
     const conversation = await Conversation.findOne({
       _id: conversationId,
@@ -9333,7 +9328,7 @@ export const sendMessageAsCandidate = async (req, res) => {
     const candidate = await Candidate.findOne({ userId: req.user.id });
     const { conversationId } = req.params;
     const { content } = req.body;
-    const attachments = req.files?.map((f) => f.path.replace(/\\/g, "/")) || [];
+    const attachments = await saveFiles(req.files, "attachments");
 
     const conversation = await Conversation.findOne({
       _id: conversationId,
@@ -10109,7 +10104,6 @@ const generateToken = (user) => {
 
 const buildUserResponse = async (user, isNew = false) => {
   const token = generateToken(user);
-
   const response = {
     token,
     user: {
@@ -10122,15 +10116,14 @@ const buildUserResponse = async (user, isNew = false) => {
     isNewUser: isNew,
   };
 
-  
   if (user.role === "recruteur") {
     const recruiter = await Recruiter.findOne({ userId: user._id });
     if (recruiter) {
       response.recruiterStatus = recruiter.status;
       response.limitedAccess = recruiter.status !== "validated";
+      response.needsOnboarding = recruiter.status === "incomplete"; 
     }
   }
-
   return response;
 };
 
@@ -10146,7 +10139,6 @@ export const googleTokenLogin = async (req, res) => {
       return res.status(400).json({ msg: "Token Google manquant." });
     }
 
-    
     let ticket;
     try {
       ticket = await googleClient.verifyIdToken({
@@ -10154,138 +10146,98 @@ export const googleTokenLogin = async (req, res) => {
         audience: process.env.GOOGLE_CLIENT_ID,
       });
     } catch (verifyError) {
-      console.error("Google token verification failed:", verifyError.message);
       return res.status(401).json({ msg: "Token Google invalide ou expiré." });
     }
 
     const payload = ticket.getPayload();
-
-    if (!payload.email) {
-      return res
-        .status(400)
-        .json({ msg: "Aucun email trouvé dans le compte Google." });
-    }
-
-    if (!payload.email_verified) {
-      return res.status(400).json({ msg: "L'email Google n'est pas vérifié." });
-    }
-
     const email = payload.email.toLowerCase();
     const nom =
       payload.name ||
       `${payload.given_name || ""} ${payload.family_name || ""}`.trim();
     const profilePicture = payload.picture || null;
 
-    
     let user = await User.findOne({ email });
-    let isNew = false;
 
+    
     if (user) {
-      
       if (!user.canLogin()) {
-        if (user.accountStatus === "banned") {
-          return res.status(403).json({
-            msg: "Votre compte a été banni.",
-            code: "ACCOUNT_BANNED",
-          });
-        }
-        if (user.accountStatus === "suspended") {
-          return res.status(403).json({
-            msg: `Votre compte est suspendu${
-              user.suspendedUntil
-                ? ` jusqu'au ${user.suspendedUntil.toLocaleDateString("fr-FR")}`
-                : ""
-            }.`,
+        return res
+          .status(403)
+          .json({
+            msg: "Votre compte est suspendu ou banni.",
             code: "ACCOUNT_SUSPENDED",
           });
-        }
       }
 
       
-      if (!user.oauthProviders) {
-        user.oauthProviders = [];
-      }
-
-      const hasGoogle = user.oauthProviders.some(
+      const hasGoogle = user.oauthProviders?.some(
         (p) => p.provider === "google",
       );
       if (!hasGoogle) {
+        user.oauthProviders = user.oauthProviders || [];
         user.oauthProviders.push({
           provider: "google",
           providerId: payload.sub,
           linkedAt: new Date(),
         });
       }
-
-      if (!user.emailVerified) {
-        user.emailVerified = true;
-      }
-
+      user.emailVerified = true;
       user.derniereConnexion = new Date();
       await user.save();
-    } else {
-      
-      isNew = true;
 
-      const selectedRole = role === "recruteur" ? "recruteur" : "candidat";
-
-      
-      const crypto = await import("crypto");
-      const bcrypt = await import("bcryptjs");
-      const randomPassword = crypto.randomBytes(32).toString("hex");
-      const hashedPassword = await bcrypt.default.hash(randomPassword, 12);
-
-      user = await User.create({
-        nom,
-        email,
-        motDePasse: hashedPassword,
-        role: selectedRole,
-        emailVerified: true,
-        accountStatus: "active",
-        oauthProviders: [
-          {
-            provider: "google",
-            providerId: payload.sub,
-            linkedAt: new Date(),
-          },
-        ],
-        derniereConnexion: new Date(),
-      });
-
-      
-      if (selectedRole === "candidat") {
-        await Candidate.create({
-          userId: user._id,
-          ...(profilePicture && { profilePicture }),
-        });
-      }
-      
-      
+      const response = await buildUserResponse(user, false);
+      response.msg = "Connexion réussie via Google ✅";
+      return res.json(response);
     }
 
-    const response = await buildUserResponse(user, isNew);
+    
+    if (!role) {
+      return res.status(200).json({
+        isNewUser: true,
+        needsRoleSelection: true,
+        email,
+        nom,
+        profilePicture,
+      });
+    }
 
     
-    if (isNew) {
-      response.msg = "Compte créé avec succès via Google ! 🎉";
-      response.needsProfileCompletion = true;
+    const crypto = await import("crypto");
+    const bcrypt = await import("bcryptjs");
+    const randomPassword = crypto.randomBytes(32).toString("hex");
+    const hashedPassword = await bcrypt.default.hash(randomPassword, 12);
 
-      if (user.role === "recruteur") {
-        response.needsCompanySelection = true;
-        response.msg =
-          "Compte créé via Google ! Veuillez sélectionner votre entreprise.";
-      }
-    } else {
-      response.msg = "Connexion réussie via Google ✅";
+    user = await User.create({
+      nom,
+      email,
+      motDePasse: hashedPassword,
+      role,
+      emailVerified: true,
+      accountStatus: "active",
+      oauthProviders: [
+        { provider: "google", providerId: payload.sub, linkedAt: new Date() },
+      ],
+      derniereConnexion: new Date(),
+    });
+
+    if (role === "candidat") {
+      await Candidate.create({ userId: user._id, profilePicture });
+    } else if (role === "recruteur") {
+      await Recruiter.create({ userId: user._id, status: "incomplete" });
+    }
+
+    const response = await buildUserResponse(user, true);
+    response.msg = "Compte créé avec succès via Google ! 🎉";
+
+    if (role === "recruteur") {
+      response.needsOnboarding = true;
     }
 
     res.json(response);
   } catch (err) {
-    console.error("Google token login error:", err);
     res.status(500).json({ msg: "Erreur lors de la connexion avec Google." });
   }
 };
-
 
 
 
@@ -11703,6 +11655,7 @@ import Application from "../models/Application.js";
 import Admin from "../models/Admin.js";
 import bcrypt from "bcryptjs";
 import AnemOffer from "../models/AnemOffer.js";
+import { saveFiles } from "../services/fileService.js";
 import { createAnemOffer } from "./anemOfferController.js";
 
 const getRecruiterProfile = async (userId) => {
@@ -12488,7 +12441,9 @@ export const submitValidationResponse = async (req, res) => {
     }
 
     const { requestId, text } = req.body;
-    const documents = req.files?.map((f) => f.path.replace(/\\/g, "/")) || [];
+
+    
+    const documents = await saveFiles(req.files, "documents");
 
     const request = recruiter.validationRequests.id(requestId);
 
@@ -12607,6 +12562,98 @@ export const getCandidateFullProfile = async (req, res) => {
 
     res.json(candidate);
   } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const completeRecruiterOnboarding = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    const recruiter = await Recruiter.findOne({ userId: req.user.id });
+
+    if (!recruiter)
+      return res.status(404).json({ msg: "Profil recruteur introuvable." });
+    if (recruiter.status !== "incomplete") {
+      return res
+        .status(400)
+        .json({ msg: "Votre compte a déjà passé cette étape." });
+    }
+
+    const { position, telephone, companyId, newCompany } = req.body;
+
+    if (!position || !telephone) {
+      return res
+        .status(400)
+        .json({ msg: "Votre poste et numéro de téléphone sont requis." });
+    }
+
+    let finalCompanyId;
+    let isAdmin = false;
+
+    if (companyId) {
+      
+      const comp = await Company.findById(companyId);
+      if (!comp)
+        return res.status(404).json({ msg: "Entreprise introuvable." });
+      finalCompanyId = comp._id;
+    } else if (newCompany && newCompany.name) {
+      
+      const exist = await Company.findOne({
+        name: { $regex: new RegExp(`^${newCompany.name}$`, "i") },
+      });
+      if (exist)
+        return res
+          .status(400)
+          .json({ msg: "Une entreprise avec ce nom existe déjà." });
+
+      const createdComp = await Company.create({
+        name: newCompany.name,
+        website: newCompany.website,
+        industry: newCompany.industry,
+        location: newCompany.location,
+        size: newCompany.size,
+        status: "pending",
+      });
+      finalCompanyId = createdComp._id;
+      isAdmin = true; 
+    } else {
+      return res
+        .status(400)
+        .json({ msg: "Vous devez sélectionner ou créer une entreprise." });
+    }
+
+    recruiter.companyId = finalCompanyId;
+    recruiter.position = position;
+    recruiter.telephone = telephone;
+    recruiter.isAdmin = isAdmin;
+    if (isAdmin) {
+      recruiter.permissions.editCompany = true;
+      recruiter.permissions.manageTeam = true;
+    }
+
+    
+    recruiter.status = "pending_validation";
+    await recruiter.save();
+
+    
+    const admins = await Admin.find({
+      "permissions.validateRecruiters": true,
+    }).populate("userId", "_id");
+    const notifPromises = admins.map((admin) =>
+      Notification.create({
+        userId: admin.userId._id,
+        message: `Nouveau recruteur en attente de validation : ${user.nom}`,
+        type: "info",
+      }),
+    );
+    await Promise.all(notifPromises);
+
+    res.json({
+      msg: "Profil complété avec succès ! En attente de validation par un administrateur.",
+      recruiterStatus: recruiter.status,
+    });
+  } catch (err) {
+    console.error("Onboarding error:", err);
     res.status(500).json({ msg: err.message });
   }
 };
@@ -14084,11 +14131,12 @@ import SupportTicket from "../models/SupportTicket.js";
 import Admin from "../models/Admin.js";
 import Notification from "../models/Notification.js";
 import { logAdminAction } from "../models/AdminLog.js";
+import { saveFiles } from "../services/fileService.js";
 
 export const createTicket = async (req, res) => {
   try {
     const { subject, description, category } = req.body;
-    const attachments = req.files?.map((f) => f.path.replace(/\\/g, "/")) || [];
+    const attachments = await saveFiles(req.files, "attachments");
 
     if (!subject || !description || !category) {
       return res.status(400).json({
@@ -14115,7 +14163,7 @@ export const createTicket = async (req, res) => {
         userId: admin.userId._id,
         message: `Nouveau ticket support: "${subject}"`,
         type: "info",
-      })
+      }),
     );
     await Promise.all(notifPromises);
 
@@ -14160,8 +14208,7 @@ export const replyToTicket = async (req, res) => {
   try {
     const { ticketId } = req.params;
     const { content } = req.body;
-    const attachments = req.files?.map((f) => f.path.replace(/\\/g, "/")) || [];
-
+    const attachments = await saveFiles(req.files, "attachments");
     if (!content) {
       return res.status(400).json({ msg: "Le contenu est obligatoire." });
     }
@@ -15010,7 +15057,6 @@ const anemOfferSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-anemOfferSchema.index({ offerId: 1 });
 anemOfferSchema.index({ recruiterId: 1 });
 anemOfferSchema.index({ anemEnabled: 1 });
 anemOfferSchema.index({ recruiterId: 1, anemEnabled: 1 });
@@ -16198,7 +16244,6 @@ const conversationSchema = new mongoose.Schema(
 conversationSchema.index({ recruiterId: 1, candidateHasReplied: 1 });
 conversationSchema.index({ candidateId: 1, lastMessageAt: -1 });
 conversationSchema.index({ recruiterId: 1, lastMessageAt: -1 });
-conversationSchema.index({ applicationId: 1 });
 
 export default mongoose.model("Conversation", conversationSchema);
 
@@ -16534,7 +16579,6 @@ const recruiterSchema = new mongoose.Schema(
     companyId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Company",
-      required: true,
     },
 
     telephone: { type: String },
@@ -16543,6 +16587,7 @@ const recruiterSchema = new mongoose.Schema(
     status: {
       type: String,
       enum: [
+        "incomplete",
         "pending_validation",
         "pending_documents",
         "pending_info",
@@ -16551,7 +16596,7 @@ const recruiterSchema = new mongoose.Schema(
         "validated",
         "rejected",
       ],
-      default: "pending_validation",
+      default: "incomplete",
     },
 
     rejectionReason: String,
@@ -16591,17 +16636,12 @@ const recruiterSchema = new mongoose.Schema(
 
     isAdmin: { type: Boolean, default: false },
 
-    
-    
-    
     anem: {
-      
       registrationId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: "AnemRegistration",
       },
 
-      
       status: {
         type: String,
         enum: [
@@ -16617,21 +16657,16 @@ const recruiterSchema = new mongoose.Schema(
         default: "not_started",
       },
 
-      
       anemId: { type: String },
 
-      
       registeredAt: { type: Date },
 
-      
       hasSeenAnemModal: { type: Boolean, default: false },
       modalSeenAt: { type: Date },
 
-      
       declinedAnem: { type: Boolean, default: false },
       declinedAt: { type: Date },
 
-      
       lastStatusUpdate: { type: Date },
     },
 
@@ -16672,9 +16707,6 @@ recruiterSchema.methods.canCreateAnemOffer = function () {
 };
 
 recruiterSchema.methods.shouldShowAnemModal = function (offerCount) {
-  
-  
-  
   if (offerCount === 0 && !this.anem.hasSeenAnemModal) {
     return { show: true, reason: "first_offer" };
   }
@@ -16752,7 +16784,6 @@ const skillClusterSchema = new mongoose.Schema(
 );
 
 skillClusterSchema.index({ status: 1, totalUsageCount: -1 });
-skillClusterSchema.index({ canonicalName: 1 });
 skillClusterSchema.index({ "variants.text": 1 });
 skillClusterSchema.index({ isFlagged: 1, flagCount: -1 });
 skillClusterSchema.index({ createdAt: -1 });
@@ -17159,6 +17190,13 @@ systemSettingsSchema.statics.initializeDefaults = async function () {
       category: "email",
     },
     {
+      key: "storage_mode",
+      value: "cloudinary", 
+      description:
+        "Mode de stockage des fichiers (pièces jointes, documents) : 'local_storage' ou 'cloudinary'",
+      category: "general",
+    },
+    {
       key: "verification_code_expiry_minutes",
       value: 15,
       description: "Durée de validité du code de vérification en minutes",
@@ -17337,7 +17375,6 @@ const userSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-userSchema.index({ email: 1 });
 userSchema.index({ role: 1 });
 userSchema.index({ createdAt: -1 });
 userSchema.index({ accountStatus: 1 });
@@ -17753,6 +17790,7 @@ import {
   getAllSettings,
   getSettingsByCategory,
   updateSettingsBulk,
+  toggleStorageMode,
 } from "../controllers/adminSettingsController.js";
 
 import { uploadAttachments } from "../config/multer.js";
@@ -18047,6 +18085,11 @@ router.put(
   "/settings/bulk",
   requirePermission("editAdminPermissions"),
   updateSettingsBulk,
+);
+router.post(
+  "/settings/storage-mode",
+  requirePermission("editAdminPermissions"),
+  toggleStorageMode,
 );
 
 
@@ -19087,6 +19130,7 @@ import {
   getCandidateFullProfile,
   getMyOffersWithStats,
   getRecruiterOfferDetails,
+  completeRecruiterOnboarding,
 } from "../controllers/recruiterController.js";
 
 
@@ -19125,7 +19169,7 @@ router.get("/public/:id", optionalAuth, getRecruiterById);
 
 
 router.use(auth, authRole(["recruteur"]));
-
+router.post("/onboarding", completeRecruiterOnboarding);
 
 router.get("/profile", getRecruiterProfileEndpoint);
 router.put("/profile", updateRecruiterProfile);
@@ -19595,6 +19639,57 @@ export default {
   sendPasswordResetEmail,
   sendPasswordResetSuccessEmail,
   verifySmtpConnection,
+};
+
+
+=== services\fileService.js ===
+import fs from "fs/promises";
+import path from "path";
+import SystemSettings from "../models/SystemSettings.js";
+import { uploadAttachment } from "../config/cloudinary.js";
+
+export const saveFiles = async (files, folderName = "attachments") => {
+  if (!files || files.length === 0) return [];
+
+  
+  const storageMode = await SystemSettings.getSetting(
+    "storage_mode",
+    "local_storage",
+  );
+  const savedPaths = [];
+
+  if (storageMode === "cloudinary") {
+    
+    for (const file of files) {
+      const result = await uploadAttachment(
+        file.buffer,
+        file.originalname,
+        folderName,
+      );
+      savedPaths.push(result.secure_url);
+    }
+  } else {
+    
+    const uploadDir = path.join(process.cwd(), "uploads", folderName);
+
+    
+    await fs.mkdir(uploadDir, { recursive: true });
+
+    for (const file of files) {
+      const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+      const ext = path.extname(file.originalname);
+      const filename = `doc-${uniqueSuffix}${ext}`;
+      const filePath = path.join(uploadDir, filename);
+
+      
+      await fs.writeFile(filePath, file.buffer);
+
+      
+      savedPaths.push(`/uploads/${folderName}/${filename}`);
+    }
+  }
+
+  return savedPaths;
 };
 
 

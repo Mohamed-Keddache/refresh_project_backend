@@ -8,6 +8,7 @@ import Application from "../models/Application.js";
 import Admin from "../models/Admin.js";
 import bcrypt from "bcryptjs";
 import AnemOffer from "../models/AnemOffer.js";
+import { saveFiles } from "../services/fileService.js";
 import { createAnemOffer } from "./anemOfferController.js";
 
 const getRecruiterProfile = async (userId) => {
@@ -793,7 +794,9 @@ export const submitValidationResponse = async (req, res) => {
     }
 
     const { requestId, text } = req.body;
-    const documents = req.files?.map((f) => f.path.replace(/\\/g, "/")) || [];
+
+    // NOUVEAU CODE ICI 👇
+    const documents = await saveFiles(req.files, "documents");
 
     const request = recruiter.validationRequests.id(requestId);
 
@@ -912,6 +915,98 @@ export const getCandidateFullProfile = async (req, res) => {
 
     res.json(candidate);
   } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+// Ajoutez cette nouvelle fonction dans recruiterController.js
+export const completeRecruiterOnboarding = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    const recruiter = await Recruiter.findOne({ userId: req.user.id });
+
+    if (!recruiter)
+      return res.status(404).json({ msg: "Profil recruteur introuvable." });
+    if (recruiter.status !== "incomplete") {
+      return res
+        .status(400)
+        .json({ msg: "Votre compte a déjà passé cette étape." });
+    }
+
+    const { position, telephone, companyId, newCompany } = req.body;
+
+    if (!position || !telephone) {
+      return res
+        .status(400)
+        .json({ msg: "Votre poste et numéro de téléphone sont requis." });
+    }
+
+    let finalCompanyId;
+    let isAdmin = false;
+
+    if (companyId) {
+      // Rejoindre une entreprise existante
+      const comp = await Company.findById(companyId);
+      if (!comp)
+        return res.status(404).json({ msg: "Entreprise introuvable." });
+      finalCompanyId = comp._id;
+    } else if (newCompany && newCompany.name) {
+      // Créer une nouvelle entreprise
+      const exist = await Company.findOne({
+        name: { $regex: new RegExp(`^${newCompany.name}$`, "i") },
+      });
+      if (exist)
+        return res
+          .status(400)
+          .json({ msg: "Une entreprise avec ce nom existe déjà." });
+
+      const createdComp = await Company.create({
+        name: newCompany.name,
+        website: newCompany.website,
+        industry: newCompany.industry,
+        location: newCompany.location,
+        size: newCompany.size,
+        status: "pending",
+      });
+      finalCompanyId = createdComp._id;
+      isAdmin = true; // Le créateur devient le premier admin de l'entreprise
+    } else {
+      return res
+        .status(400)
+        .json({ msg: "Vous devez sélectionner ou créer une entreprise." });
+    }
+
+    recruiter.companyId = finalCompanyId;
+    recruiter.position = position;
+    recruiter.telephone = telephone;
+    recruiter.isAdmin = isAdmin;
+    if (isAdmin) {
+      recruiter.permissions.editCompany = true;
+      recruiter.permissions.manageTeam = true;
+    }
+
+    // Le profil est maintenant complet, on l'envoie en validation
+    recruiter.status = "pending_validation";
+    await recruiter.save();
+
+    // Notifier les administrateurs
+    const admins = await Admin.find({
+      "permissions.validateRecruiters": true,
+    }).populate("userId", "_id");
+    const notifPromises = admins.map((admin) =>
+      Notification.create({
+        userId: admin.userId._id,
+        message: `Nouveau recruteur en attente de validation : ${user.nom}`,
+        type: "info",
+      }),
+    );
+    await Promise.all(notifPromises);
+
+    res.json({
+      msg: "Profil complété avec succès ! En attente de validation par un administrateur.",
+      recruiterStatus: recruiter.status,
+    });
+  } catch (err) {
+    console.error("Onboarding error:", err);
     res.status(500).json({ msg: err.message });
   }
 };

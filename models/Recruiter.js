@@ -12,7 +12,6 @@ const recruiterSchema = new mongoose.Schema(
     companyId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Company",
-      required: true,
     },
 
     telephone: { type: String },
@@ -21,6 +20,7 @@ const recruiterSchema = new mongoose.Schema(
     status: {
       type: String,
       enum: [
+        "incomplete",
         "pending_validation",
         "pending_documents",
         "pending_info",
@@ -29,7 +29,7 @@ const recruiterSchema = new mongoose.Schema(
         "validated",
         "rejected",
       ],
-      default: "pending_validation",
+      default: "incomplete",
     },
 
     rejectionReason: String,
@@ -69,17 +69,12 @@ const recruiterSchema = new mongoose.Schema(
 
     isAdmin: { type: Boolean, default: false },
 
-    // ==========================================
-    // ANEM Registration Status
-    // ==========================================
     anem: {
-      // Reference to the AnemRegistration document
       registrationId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: "AnemRegistration",
       },
 
-      // Current status synced from AnemRegistration
       status: {
         type: String,
         enum: [
@@ -95,21 +90,16 @@ const recruiterSchema = new mongoose.Schema(
         default: "not_started",
       },
 
-      // Verified ANEM ID (copied here for quick access)
       anemId: { type: String },
 
-      // When successfully registered
       registeredAt: { type: Date },
 
-      // Track if user has seen the initial ANEM modal (first offer creation)
       hasSeenAnemModal: { type: Boolean, default: false },
       modalSeenAt: { type: Date },
 
-      // Track if user explicitly declined ANEM (said "No" to first question)
       declinedAnem: { type: Boolean, default: false },
       declinedAt: { type: Date },
 
-      // Last status update timestamp
       lastStatusUpdate: { type: Date },
     },
 
@@ -150,9 +140,6 @@ recruiterSchema.methods.canCreateAnemOffer = function () {
 };
 
 recruiterSchema.methods.shouldShowAnemModal = function (offerCount) {
-  // Show modal if:
-  // 1. First offer creation AND hasn't seen modal yet
-  // 2. OR trying to enable ANEM toggle but not registered and hasn't declined
   if (offerCount === 0 && !this.anem.hasSeenAnemModal) {
     return { show: true, reason: "first_offer" };
   }

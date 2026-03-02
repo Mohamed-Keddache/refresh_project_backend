@@ -88,6 +88,7 @@ import {
   getAllSettings,
   getSettingsByCategory,
   updateSettingsBulk,
+  toggleStorageMode,
 } from "../controllers/adminSettingsController.js";
 
 import { uploadAttachments } from "../config/multer.js";
@@ -382,6 +383,11 @@ router.put(
   "/settings/bulk",
   requirePermission("editAdminPermissions"),
   updateSettingsBulk,
+);
+router.post(
+  "/settings/storage-mode",
+  requirePermission("editAdminPermissions"),
+  toggleStorageMode,
 );
 
 ////////////////////////////////////////////////////

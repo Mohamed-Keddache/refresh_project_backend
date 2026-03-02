@@ -2,11 +2,12 @@ import SupportTicket from "../models/SupportTicket.js";
 import Admin from "../models/Admin.js";
 import Notification from "../models/Notification.js";
 import { logAdminAction } from "../models/AdminLog.js";
+import { saveFiles } from "../services/fileService.js";
 
 export const createTicket = async (req, res) => {
   try {
     const { subject, description, category } = req.body;
-    const attachments = req.files?.map((f) => f.path.replace(/\\/g, "/")) || [];
+    const attachments = await saveFiles(req.files, "attachments");
 
     if (!subject || !description || !category) {
       return res.status(400).json({
@@ -33,7 +34,7 @@ export const createTicket = async (req, res) => {
         userId: admin.userId._id,
         message: `Nouveau ticket support: "${subject}"`,
         type: "info",
-      })
+      }),
     );
     await Promise.all(notifPromises);
 
@@ -78,8 +79,7 @@ export const replyToTicket = async (req, res) => {
   try {
     const { ticketId } = req.params;
     const { content } = req.body;
-    const attachments = req.files?.map((f) => f.path.replace(/\\/g, "/")) || [];
-
+    const attachments = await saveFiles(req.files, "attachments");
     if (!content) {
       return res.status(400).json({ msg: "Le contenu est obligatoire." });
     }

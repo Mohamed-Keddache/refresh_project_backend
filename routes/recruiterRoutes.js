@@ -23,6 +23,7 @@ import {
   getCandidateFullProfile,
   getMyOffersWithStats,
   getRecruiterOfferDetails,
+  completeRecruiterOnboarding,
 } from "../controllers/recruiterController.js";
 
 // === NOUVEAUX CONTROLLERS ===
@@ -61,7 +62,7 @@ router.get("/public/:id", optionalAuth, getRecruiterById);
 
 // Middleware Auth
 router.use(auth, authRole(["recruteur"]));
-
+router.post("/onboarding", completeRecruiterOnboarding);
 // --- ROUTES GESTION COMPTE & OFFRES (Inchangées) ---
 router.get("/profile", getRecruiterProfileEndpoint);
 router.put("/profile", updateRecruiterProfile);

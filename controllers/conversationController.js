@@ -6,6 +6,7 @@ import Candidate from "../models/Candidate.js";
 import Recruiter from "../models/Recruiter.js";
 import Notification from "../models/Notification.js";
 import { mapRecruiterToCandidate } from "../utils/statusMapping.js";
+import { saveFiles } from "../services/fileService.js";
 
 // === RECRUTEUR ===
 
@@ -102,7 +103,7 @@ export const sendMessageAsRecruiter = async (req, res) => {
     const recruiter = await Recruiter.findOne({ userId: req.user.id });
     const { conversationId } = req.params;
     const { content } = req.body;
-    const attachments = req.files?.map((f) => f.path.replace(/\\/g, "/")) || [];
+    const attachments = await saveFiles(req.files, "attachments");
 
     const conversation = await Conversation.findOne({
       _id: conversationId,
@@ -292,7 +293,7 @@ export const sendMessageAsCandidate = async (req, res) => {
     const candidate = await Candidate.findOne({ userId: req.user.id });
     const { conversationId } = req.params;
     const { content } = req.body;
-    const attachments = req.files?.map((f) => f.path.replace(/\\/g, "/")) || [];
+    const attachments = await saveFiles(req.files, "attachments");
 
     const conversation = await Conversation.findOne({
       _id: conversationId,

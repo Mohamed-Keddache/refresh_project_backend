@@ -89,6 +89,13 @@ systemSettingsSchema.statics.initializeDefaults = async function () {
       category: "email",
     },
     {
+      key: "storage_mode",
+      value: "cloudinary", //"local_storage"
+      description:
+        "Mode de stockage des fichiers (pièces jointes, documents) : 'local_storage' ou 'cloudinary'",
+      category: "general",
+    },
+    {
       key: "verification_code_expiry_minutes",
       value: 15,
       description: "Durée de validité du code de vérification en minutes",

@@ -2,6 +2,7 @@ import SupportTicket from "../models/SupportTicket.js";
 import Admin from "../models/Admin.js";
 import Notification from "../models/Notification.js";
 import { logAdminAction } from "../models/AdminLog.js";
+import { saveFiles } from "../services/fileService.js";
 
 export const getTicketsByLabel = async (req, res) => {
   try {
@@ -68,7 +69,7 @@ export const respondToTicket = async (req, res) => {
     const admin = await Admin.findOne({ userId: req.user.id });
     const { ticketId } = req.params;
     const { content, newStatus } = req.body;
-    const attachments = req.files?.map((f) => f.path.replace(/\\/g, "/")) || [];
+    const attachments = await saveFiles(req.files, "attachments");
 
     if (!content) {
       return res.status(400).json({ msg: "Le contenu est obligatoire." });
@@ -109,7 +110,7 @@ export const respondToTicket = async (req, res) => {
       "ticket_responded",
       { type: "ticket", id: ticket._id },
       { newStatus },
-      req
+      req,
     );
 
     res.json({ msg: "Réponse envoyée.", ticket });
@@ -144,7 +145,7 @@ export const reassignTicket = async (req, res) => {
       "ticket_reassigned",
       { type: "ticket", id: ticket._id },
       { newLabel, newAdminId },
-      req
+      req,
     );
 
     res.json({ msg: "Ticket réassigné.", ticket });
@@ -187,7 +188,7 @@ export const closeTicket = async (req, res) => {
       "ticket_closed",
       { type: "ticket", id: ticket._id },
       { resolution },
-      req
+      req,
     );
 
     res.json({ msg: "Ticket fermé.", ticket });
