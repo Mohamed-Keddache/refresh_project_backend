@@ -9,7 +9,7 @@ import Admin from "../models/Admin.js";
 import bcrypt from "bcryptjs";
 import AnemOffer from "../models/AnemOffer.js";
 import { saveFiles } from "../services/fileService.js";
-import { createAnemOffer } from "./anemOfferController.js";
+import { createAnemOfferV2 } from "./anemOfferController.js";
 
 const getRecruiterProfile = async (userId) => {
   const recruiter = await Recruiter.findOne({ userId }).populate("companyId");
@@ -65,7 +65,10 @@ export const createOffer = async (req, res) => {
       visibility,
       candidateSearchMode,
       allowRepostulation,
-      enableAnem, // New field for ANEM
+      hiresNeeded,
+      repostulationCooldownDays,
+      maxRepostulations,
+      enableAnem,
     } = req.body;
 
     if (!titre || !description || !requirements) {
@@ -74,14 +77,21 @@ export const createOffer = async (req, res) => {
       });
     }
 
-    // Check ANEM eligibility if trying to enable
+    if (candidateSearchMode === "manual" && !hiresNeeded) {
+      return res.status(400).json({
+        msg: "Le nombre de recrutements nécessaires (hiresNeeded) est obligatoire si vous demandez à l'admin de proposer des candidats.",
+      });
+    }
+
     if (enableAnem && !recruiter.canCreateAnemOffer()) {
       return res.status(403).json({
-        msg: "Vous devez être enregistré ANEM pour activer cette fonctionnalité.",
+        msg: "Vous devez être enregistré ANEM pour passer par l'ANEM.",
         code: "ANEM_NOT_REGISTERED",
         anemStatus: recruiter.anem.status,
       });
     }
+
+    const isAnemOffer = !!(enableAnem && recruiter.canCreateAnemOffer());
 
     const newOffer = new Offer({
       recruteurId: recruiter._id,
@@ -95,6 +105,9 @@ export const createOffer = async (req, res) => {
       salaryMax,
       allowRepostulation:
         allowRepostulation !== undefined ? allowRepostulation : true,
+      hiresNeeded,
+      repostulationCooldownDays: repostulationCooldownDays || 30,
+      maxRepostulations: maxRepostulations || 2,
       experienceLevel,
       skills: skills || [],
       wilaya,
@@ -103,46 +116,56 @@ export const createOffer = async (req, res) => {
         acceptsDirectApplications: true,
       },
       candidateSearchMode: candidateSearchMode || "disabled",
-      validationStatus: "pending",
+      validationStatus: isAnemOffer ? "pending_anem" : "pending",
+      isAnem: isAnemOffer,
       actif: false,
       datePublication: null,
     });
 
     const savedOffer = await newOffer.save();
 
-    // Create ANEM offer association if enabled
     let anemData = null;
-    if (enableAnem && recruiter.canCreateAnemOffer()) {
+    if (isAnemOffer) {
       try {
-        anemData = await createAnemOffer(
+        anemData = await createAnemOfferV2(
           savedOffer._id,
           recruiter._id,
-          recruiter.anem.registrationId,
+          recruiter.companyId._id,
           recruiter.anem.anemId,
+          recruiter.anem.registrationId,
         );
       } catch (anemErr) {
-        console.error("Error creating ANEM offer:", anemErr);
-        // Don't fail the whole request, just log
+        console.error("Error creating ANEM offer V2:", anemErr);
+        await Offer.findByIdAndDelete(savedOffer._id);
+        return res.status(500).json({
+          msg: "Erreur lors de la création de l'offre ANEM",
+        });
       }
     }
 
-    // Notify admins
     const admins = await User.find({ role: "admin" });
+    const notifMessage = isAnemOffer
+      ? `Nouvelle offre ANEM à traiter : "${savedOffer.titre}" de ${recruiter.companyId.name}`
+      : `Nouvelle offre à valider : "${savedOffer.titre}" de ${recruiter.companyId.name}`;
+
     const notificationPromises = admins.map((admin) =>
       Notification.create({
         userId: admin._id,
-        message: `Nouvelle offre à valider : "${savedOffer.titre}" de ${recruiter.companyId.name}`,
+        message: notifMessage,
         type: "info",
       }),
     );
     await Promise.all(notificationPromises);
 
     res.status(201).json({
-      msg: "Offre créée et en attente de validation ✅",
+      msg: isAnemOffer
+        ? "Offre ANEM créée et en attente de traitement ✅"
+        : "Offre créée et en attente de validation ✅",
       offer: savedOffer,
       anem: anemData
         ? {
-            enabled: true,
+            anemOfferId: anemData._id,
+            status: anemData.status,
             anemId: anemData.anemId,
           }
         : null,
@@ -156,44 +179,28 @@ export const getMyOffers = async (req, res) => {
   try {
     const recruiter = await getRecruiterProfile(req.user.id);
 
-    const offers = await Offer.find({ recruteurId: recruiter._id }).sort({
-      createdAt: -1,
-    });
+    const offers = await Offer.find({
+      recruteurId: recruiter._id,
+      isDeletedByRecruiter: { $ne: true },
+    }).sort({ createdAt: -1 });
 
-    // Get ANEM status for all offers
-    const offerIds = offers.map((o) => o._id);
-    const anemOffers = await AnemOffer.find({
-      offerId: { $in: offerIds },
-    }).lean();
-    const anemMap = new Map(anemOffers.map((a) => [a.offerId.toString(), a]));
-
-    const enrichedOffers = offers.map((offer) => {
-      const anem = anemMap.get(offer._id.toString());
-      return {
-        ...offer.toObject(),
-        anem: anem
-          ? {
-              enabled: anem.anemEnabled,
-              anemId: anem.anemId,
-              enabledAt: anem.enabledAt,
-            }
-          : null,
-      };
-    });
-
-    res.json(enrichedOffers);
+    res.json(offers);
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
 };
 
-// recruiterController.js - Améliorer getMyOffers
 export const getMyOffersWithStats = async (req, res) => {
   try {
     const recruiter = await getRecruiterProfile(req.user.id);
 
     const offers = await Offer.aggregate([
-      { $match: { recruteurId: recruiter._id } },
+      {
+        $match: {
+          recruteurId: recruiter._id,
+          isDeletedByRecruiter: { $ne: true },
+        },
+      },
       {
         $lookup: {
           from: "applications",
@@ -237,13 +244,21 @@ export const getMyOffersWithStats = async (req, res) => {
               },
             },
           },
-          anem: {
+          anemPipeline: {
             $cond: {
               if: { $gt: [{ $size: "$anemData" }, 0] },
               then: {
-                enabled: { $arrayElemAt: ["$anemData.anemEnabled", 0] },
+                status: { $arrayElemAt: ["$anemData.status", 0] },
                 anemId: { $arrayElemAt: ["$anemData.anemId", 0] },
-                enabledAt: { $arrayElemAt: ["$anemData.enabledAt", 0] },
+                cooldownEndsAt: {
+                  $arrayElemAt: ["$anemData.cooldownEndsAt", 0],
+                },
+                failureOption: {
+                  $arrayElemAt: ["$anemData.failureOption", 0],
+                },
+                failureReason: {
+                  $arrayElemAt: ["$anemData.failureReason", 0],
+                },
               },
               else: null,
             },
@@ -264,6 +279,7 @@ export const getMyOffersWithStats = async (req, res) => {
     res.status(500).json({ msg: err.message });
   }
 };
+
 export const getRecruiterOfferDetails = async (req, res) => {
   try {
     const recruiter = await getRecruiterProfile(req.user.id);
@@ -275,31 +291,51 @@ export const getRecruiterOfferDetails = async (req, res) => {
       return res.status(404).json({ msg: "Offre introuvable" });
     }
 
-    // Security Check: Ensure the offer belongs to this recruiter
     if (offer.recruteurId.toString() !== recruiter._id.toString()) {
       return res
         .status(403)
         .json({ msg: "Action non autorisée. Ce n'est pas votre offre." });
     }
 
-    // Get ANEM details to pre-fill the form if needed
-    const anemOffer = await AnemOffer.findOne({
-      offerId: offer._id,
-    }).lean();
+    let anemPipeline = null;
+    if (offer.isAnem) {
+      const anemOffer = await AnemOffer.findOne({ offerId: offer._id }).lean();
+      if (anemOffer) {
+        anemPipeline = {
+          _id: anemOffer._id,
+          status: anemOffer.status,
+          anemId: anemOffer.anemId,
+          pdfDownloaded: anemOffer.pdfDownloaded,
+          cooldownEndsAt: anemOffer.cooldownEndsAt,
+          cooldownRemaining:
+            anemOffer.status === "in_cooldown" && anemOffer.cooldownEndsAt
+              ? Math.max(
+                  0,
+                  Math.ceil(
+                    (new Date(anemOffer.cooldownEndsAt).getTime() -
+                      Date.now()) /
+                      (1000 * 60 * 60 * 24),
+                  ),
+                )
+              : null,
+          failureOption: anemOffer.failureOption,
+          failureReason: anemOffer.failureReason,
+          failedAt: anemOffer.failedAt,
+          publishedAt: anemOffer.publishedAt,
+          createdAt: anemOffer.createdAt,
+        };
+      }
+    }
 
     res.json({
       ...offer.toObject(),
-      anem: anemOffer
-        ? {
-            enabled: anemOffer.anemEnabled,
-            anemId: anemOffer.anemId,
-          }
-        : null,
+      anemPipeline,
     });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
 };
+
 export const updateOffer = async (req, res) => {
   try {
     const recruiter = await getRecruiterProfile(req.user.id);
@@ -311,44 +347,23 @@ export const updateOffer = async (req, res) => {
       return res.status(403).json({ msg: "Action non autorisée" });
     }
 
+    if (offer.isAnem && offer.validationStatus === "pending_anem") {
+      return res.status(400).json({
+        msg: "Impossible de modifier une offre en cours de traitement ANEM. Vous pouvez la supprimer et en créer une nouvelle.",
+        code: "ANEM_PIPELINE_LOCKED",
+      });
+    }
+
     const { enableAnem, ...offerData } = req.body;
 
-    // Handle ANEM toggle
-    if (enableAnem !== undefined) {
-      const existingAnem = await AnemOffer.findOne({ offerId: offer._id });
-
-      if (enableAnem) {
-        // Enable ANEM
-        if (!recruiter.canCreateAnemOffer()) {
-          return res.status(403).json({
-            msg: "Vous devez être enregistré ANEM pour activer cette fonctionnalité.",
-            code: "ANEM_NOT_REGISTERED",
-            anemStatus: recruiter.anem.status,
-          });
-        }
-
-        if (existingAnem) {
-          existingAnem.anemEnabled = true;
-          existingAnem.anemId = recruiter.anem.anemId;
-          existingAnem.enabledAt = new Date();
-          existingAnem.disabledAt = undefined;
-          await existingAnem.save();
-        } else {
-          await createAnemOffer(
-            offer._id,
-            recruiter._id,
-            recruiter.anem.registrationId,
-            recruiter.anem.anemId,
-          );
-        }
-      } else {
-        // Disable ANEM
-        if (existingAnem && existingAnem.anemEnabled) {
-          existingAnem.anemEnabled = false;
-          existingAnem.disabledAt = new Date();
-          await existingAnem.save();
-        }
-      }
+    if (
+      offerData.candidateSearchMode === "manual" &&
+      !offerData.hiresNeeded &&
+      !offer.hiresNeeded
+    ) {
+      return res.status(400).json({
+        msg: "Le nombre de recrutements nécessaires est obligatoire pour la recherche manuelle.",
+      });
     }
 
     const updatedOffer = await Offer.findByIdAndUpdate(
@@ -357,20 +372,9 @@ export const updateOffer = async (req, res) => {
       { new: true },
     );
 
-    // Get updated ANEM status
-    const anemOffer = await AnemOffer.findOne({
-      offerId: updatedOffer._id,
-    }).lean();
-
     res.json({
       msg: "Offre mise à jour ✅",
       offer: updatedOffer,
-      anem: anemOffer
-        ? {
-            enabled: anemOffer.anemEnabled,
-            anemId: anemOffer.anemId,
-          }
-        : null,
     });
   } catch (err) {
     res.status(500).json({ msg: err.message });
@@ -400,16 +404,51 @@ export const updateRecruiterProfile = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    const { nom, motDePasse, telephone } = req.body;
+    const { nom, motDePasse, ancienMotDePasse, telephone } = req.body;
 
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ msg: "Utilisateur introuvable" });
 
     if (nom) user.nom = nom;
+
     if (motDePasse) {
-      const hash = await bcrypt.hash(motDePasse, 10);
+      if (!ancienMotDePasse) {
+        return res.status(400).json({
+          msg: "L'ancien mot de passe est requis pour changer de mot de passe.",
+        });
+      }
+
+      const isMatch = await bcrypt.compare(ancienMotDePasse, user.motDePasse);
+      if (!isMatch) {
+        return res.status(401).json({ msg: "Ancien mot de passe incorrect." });
+      }
+
+      const isSame = await bcrypt.compare(motDePasse, user.motDePasse);
+      if (isSame) {
+        return res.status(400).json({
+          msg: "Le nouveau mot de passe doit être différent de l'ancien.",
+        });
+      }
+
+      if (motDePasse.length < 8) {
+        return res.status(400).json({
+          msg: "Le mot de passe doit contenir au moins 8 caractères.",
+        });
+      }
+      if (
+        !/[a-z]/.test(motDePasse) ||
+        !/[A-Z]/.test(motDePasse) ||
+        !/\d/.test(motDePasse)
+      ) {
+        return res.status(400).json({
+          msg: "Le mot de passe doit contenir une minuscule, une majuscule et un chiffre.",
+        });
+      }
+
+      const hash = await bcrypt.hash(motDePasse, 12);
       user.motDePasse = hash;
     }
+
     await user.save();
 
     const recruiter = await Recruiter.findOne({ userId });
@@ -436,13 +475,18 @@ export const updateRecruiterProfile = async (req, res) => {
 
 function getStatusMessage(status) {
   const messages = {
+    incomplete:
+      "Veuillez compléter votre profil recruteur (entreprise, poste, téléphone).",
     pending_validation: "En attente de validation initiale",
     pending_documents: "Documents demandés par l'administration",
     pending_info: "Informations complémentaires demandées",
+    pending_info_and_documents:
+      "Documents et informations demandés par l'administration",
     pending_revalidation: "Réponse en cours d'examen",
+    validated: "Compte validé",
     rejected: "Compte refusé",
   };
-  return messages[status] || status;
+  return messages[status] || `Statut: ${status}`;
 }
 
 export const updateCompanyDetails = async (req, res) => {
@@ -501,20 +545,23 @@ export const getRecruiterDashboard = async (req, res) => {
       applicationsByStatus,
       topOffers,
       recentApplications,
-      anemOffersCount,
+      anemPipelineCounts,
     ] = await Promise.all([
       Offer.countDocuments({
         recruteurId: recruiter._id,
         actif: true,
         validationStatus: "approved",
+        isDeletedByRecruiter: { $ne: true },
       }),
       Offer.countDocuments({
         recruteurId: recruiter._id,
-        validationStatus: "pending",
+        validationStatus: { $in: ["pending", "pending_anem"] },
+        isDeletedByRecruiter: { $ne: true },
       }),
       Offer.countDocuments({
         recruteurId: recruiter._id,
         validationStatus: { $in: ["rejected", "changes_requested"] },
+        isDeletedByRecruiter: { $ne: true },
       }),
       Application.countDocuments({ offerId: { $in: myOfferIds } }),
       Application.countDocuments({
@@ -525,7 +572,11 @@ export const getRecruiterDashboard = async (req, res) => {
         { $match: { offerId: { $in: myOfferIds } } },
         { $group: { _id: "$status", count: { $sum: 1 } } },
       ]),
-      Offer.find({ recruteurId: recruiter._id, actif: true })
+      Offer.find({
+        recruteurId: recruiter._id,
+        actif: true,
+        isDeletedByRecruiter: { $ne: true },
+      })
         .sort({ nombreCandidatures: -1 })
         .limit(5)
         .select("titre nombreCandidatures datePublication"),
@@ -538,15 +589,20 @@ export const getRecruiterDashboard = async (req, res) => {
         .populate("offerId", "titre")
         .sort({ datePostulation: -1 })
         .limit(10),
-      AnemOffer.countDocuments({
-        recruiterId: recruiter._id,
-        anemEnabled: true,
-      }),
+      AnemOffer.aggregate([
+        { $match: { recruiterId: recruiter._id } },
+        { $group: { _id: "$status", count: { $sum: 1 } } },
+      ]),
     ]);
 
     const statusMap = {};
     applicationsByStatus.forEach((s) => {
       statusMap[s._id] = s.count;
+    });
+
+    const anemStatusMap = {};
+    anemPipelineCounts.forEach((s) => {
+      anemStatusMap[s._id] = s.count;
     });
 
     const alerts = [];
@@ -566,7 +622,7 @@ export const getRecruiterDashboard = async (req, res) => {
     if (pendingOffers > 0) {
       alerts.push({
         type: "info",
-        message: `${pendingOffers} offre(s) en attente de validation`,
+        message: `${pendingOffers} offre(s) en attente de validation/traitement`,
       });
     }
     if (rejectedOffers > 0) {
@@ -587,6 +643,14 @@ export const getRecruiterDashboard = async (req, res) => {
       });
     }
 
+    // Alert for ANEM failures needing action
+    if (anemStatusMap["failed"] > 0) {
+      alerts.push({
+        type: "action_required",
+        message: `${anemStatusMap["failed"]} offre(s) ANEM en échec nécessitent votre décision`,
+      });
+    }
+
     res.json({
       overview: {
         activeOffers,
@@ -594,7 +658,6 @@ export const getRecruiterDashboard = async (req, res) => {
         rejectedOffers,
         totalApplications,
         newApplicationsThisWeek,
-        anemOffersCount,
       },
       applicationsByStatus: statusMap,
       topOffers,
@@ -609,6 +672,7 @@ export const getRecruiterDashboard = async (req, res) => {
         status: recruiter.anem.status,
         anemId: recruiter.anem.anemId,
         isRegistered: recruiter.canCreateAnemOffer(),
+        pipeline: anemStatusMap,
       },
       alerts,
       permissions: recruiter.permissions,
@@ -632,32 +696,44 @@ export const getOfferStats = async (req, res) => {
       return res.status(404).json({ msg: "Offre introuvable" });
     }
 
-    const [applicationsByStatus, applicationsByDay, anemOffer] =
-      await Promise.all([
-        Application.aggregate([
-          { $match: { offerId: offer._id } },
-          { $group: { _id: "$status", count: { $sum: 1 } } },
-        ]),
-        Application.aggregate([
-          { $match: { offerId: offer._id } },
-          {
-            $group: {
-              _id: {
-                $dateToString: { format: "%Y-%m-%d", date: "$datePostulation" },
-              },
-              count: { $sum: 1 },
+    const [applicationsByStatus, applicationsByDay] = await Promise.all([
+      Application.aggregate([
+        { $match: { offerId: offer._id } },
+        { $group: { _id: "$status", count: { $sum: 1 } } },
+      ]),
+      Application.aggregate([
+        { $match: { offerId: offer._id } },
+        {
+          $group: {
+            _id: {
+              $dateToString: { format: "%Y-%m-%d", date: "$datePostulation" },
             },
+            count: { $sum: 1 },
           },
-          { $sort: { _id: 1 } },
-          { $limit: 30 },
-        ]),
-        AnemOffer.findOne({ offerId: offer._id }).lean(),
-      ]);
+        },
+        { $sort: { _id: 1 } },
+        { $limit: 30 },
+      ]),
+    ]);
 
     const statusMap = {};
     applicationsByStatus.forEach((s) => {
       statusMap[s._id] = s.count;
     });
+
+    let anemPipeline = null;
+    if (offer.isAnem) {
+      const anemOffer = await AnemOffer.findOne({ offerId: offer._id }).lean();
+      if (anemOffer) {
+        anemPipeline = {
+          status: anemOffer.status,
+          anemId: anemOffer.anemId,
+          cooldownEndsAt: anemOffer.cooldownEndsAt,
+          failureOption: anemOffer.failureOption,
+          publishedAt: anemOffer.publishedAt,
+        };
+      }
+    }
 
     res.json({
       offer: {
@@ -665,16 +741,11 @@ export const getOfferStats = async (req, res) => {
         titre: offer.titre,
         actif: offer.actif,
         validationStatus: offer.validationStatus,
+        isAnem: offer.isAnem,
         datePublication: offer.datePublication,
         nombreCandidatures: offer.nombreCandidatures,
       },
-      anem: anemOffer
-        ? {
-            enabled: anemOffer.anemEnabled,
-            anemId: anemOffer.anemId,
-            enabledAt: anemOffer.enabledAt,
-          }
-        : null,
+      anemPipeline,
       applicationsByStatus: statusMap,
       applicationsByDay,
       conversionRate:
@@ -795,7 +866,6 @@ export const submitValidationResponse = async (req, res) => {
 
     const { requestId, text } = req.body;
 
-    // NOUVEAU CODE ICI 👇
     const documents = await saveFiles(req.files, "documents");
 
     const request = recruiter.validationRequests.id(requestId);
@@ -918,7 +988,7 @@ export const getCandidateFullProfile = async (req, res) => {
     res.status(500).json({ msg: err.message });
   }
 };
-// Ajoutez cette nouvelle fonction dans recruiterController.js
+
 export const completeRecruiterOnboarding = async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
@@ -944,13 +1014,11 @@ export const completeRecruiterOnboarding = async (req, res) => {
     let isAdmin = false;
 
     if (companyId) {
-      // Rejoindre une entreprise existante
       const comp = await Company.findById(companyId);
       if (!comp)
         return res.status(404).json({ msg: "Entreprise introuvable." });
       finalCompanyId = comp._id;
     } else if (newCompany && newCompany.name) {
-      // Créer une nouvelle entreprise
       const exist = await Company.findOne({
         name: { $regex: new RegExp(`^${newCompany.name}$`, "i") },
       });
@@ -968,7 +1036,7 @@ export const completeRecruiterOnboarding = async (req, res) => {
         status: "pending",
       });
       finalCompanyId = createdComp._id;
-      isAdmin = true; // Le créateur devient le premier admin de l'entreprise
+      isAdmin = true;
     } else {
       return res
         .status(400)
@@ -984,11 +1052,9 @@ export const completeRecruiterOnboarding = async (req, res) => {
       recruiter.permissions.manageTeam = true;
     }
 
-    // Le profil est maintenant complet, on l'envoie en validation
     recruiter.status = "pending_validation";
     await recruiter.save();
 
-    // Notifier les administrateurs
     const admins = await Admin.find({
       "permissions.validateRecruiters": true,
     }).populate("userId", "_id");

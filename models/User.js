@@ -58,6 +58,7 @@ userSchema.index({
   "oauthProviders.provider": 1,
   "oauthProviders.providerId": 1,
 });
+userSchema.index({ derniereConnexion: 1 });
 
 userSchema.methods.canLogin = function () {
   if (this.accountStatus === "banned") return false;

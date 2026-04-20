@@ -7,7 +7,6 @@ export default function auth(req, res, next) {
     ? authHeader.slice(7)
     : authHeader;
   if (!token) return res.status(401).json({ msg: "Pas de token fourni" });
-  if (!token) return res.status(401).json({ msg: "Pas de token fourni" });
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);

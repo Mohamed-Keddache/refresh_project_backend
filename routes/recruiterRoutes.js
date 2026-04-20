@@ -39,13 +39,9 @@ import {
 } from "../controllers/recruiterApplicationController.js";
 
 import {
-  proposeInterview,
   getRecruiterInterviews,
-  acceptAlternativeDate,
-  rescheduleByRecruiter,
-  cancelInterviewByRecruiter,
-  completeInterview,
   getRecruiterInterviewsGrouped,
+  getRecruiterInterviewById,
 } from "../controllers/interviewController.js";
 
 import {
@@ -53,6 +49,7 @@ import {
   openConversation,
   sendMessageAsRecruiter,
   getRecruiterConversationMessages,
+  toggleChatStatus,
 } from "../controllers/conversationController.js";
 
 const router = express.Router();
@@ -97,23 +94,18 @@ router.put("/applications/:applicationId/notes", updateNotes);
 // 2. Entretiens (Modèle Interview)
 router.get("/interviews/grouped", getRecruiterInterviewsGrouped);
 router.get("/interviews", getRecruiterInterviews);
-router.post("/applications/:applicationId/interviews", proposeInterview);
-router.put(
-  "/interviews/:interviewId/accept-alternative",
-  acceptAlternativeDate,
-);
-router.put("/interviews/:interviewId/reschedule", rescheduleByRecruiter);
-router.put("/interviews/:interviewId/cancel", cancelInterviewByRecruiter);
-router.put("/interviews/:interviewId/complete", completeInterview);
+router.get("/interviews/:interviewId", getRecruiterInterviewById);
 
 // 3. Conversations
 router.get("/conversations", getRecruiterConversations);
+
 router.post("/applications/:applicationId/conversation", openConversation);
 router.post(
   "/conversations/:conversationId/messages",
   uploadAttachments.array("attachments", 3),
   sendMessageAsRecruiter,
 );
+router.put("/conversations/:conversationId/status", toggleChatStatus);
 
 // Offres avec stats enrichies
 router.get("/my-offers-stats", getMyOffersWithStats);
@@ -123,6 +115,5 @@ router.put("/offers/:offerId/mark-all-seen", markAllOfferApplicationsAsSeen);
 
 // Détail d'une conversation (messages)
 router.get("/conversations/:conversationId", getRecruiterConversationMessages);
-//router.get("/conversations/:conversationId", getRecruiterConversationDetail);
 
 export default router;

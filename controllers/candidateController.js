@@ -26,8 +26,6 @@ import {
   submitSkillFeedback,
 } from "./skillController.js";
 
-// ============ PROFILE MANAGEMENT ============
-
 export const getProfile = async (req, res) => {
   try {
     const candidate = await Candidate.findOne({ userId: req.user.id })
@@ -77,7 +75,6 @@ export const updateProfile = async (req, res) => {
       candidate = new Candidate({ userId });
     }
 
-    // Update fields if provided
     if (telephone !== undefined) candidate.telephone = telephone;
     if (residence !== undefined) candidate.residence = residence;
     if (searchPreferences !== undefined)
@@ -108,10 +105,15 @@ export const updateProfile = async (req, res) => {
   }
 };
 
+// ══════════════════════════════════════════════════════════════
+// BUG 5 FIX: Suppression de la logique mot de passe de updateAccount.
+// Le changement de mot de passe se fait via POST /api/auth/change-password.
+// updateAccount gère uniquement nom et email.
+// ══════════════════════════════════════════════════════════════
 export const updateAccount = async (req, res) => {
   try {
     const userId = req.user.id;
-    const { nom, email, motDePasse } = req.body;
+    const { nom, email } = req.body;
 
     const user = await User.findById(userId);
     if (!user) {
@@ -125,13 +127,7 @@ export const updateAccount = async (req, res) => {
       if (emailExists) {
         return res.status(400).json({ msg: "Cet email est déjà utilisé." });
       }
-      // Note: In production, you might want to re-verify the new email
       user.email = email;
-    }
-
-    if (motDePasse) {
-      const bcrypt = await import("bcryptjs");
-      user.motDePasse = await bcrypt.default.hash(motDePasse, 10);
     }
 
     await user.save();
@@ -140,8 +136,6 @@ export const updateAccount = async (req, res) => {
     res.status(500).json({ msg: err.message });
   }
 };
-
-// ============ FILE UPLOADS (CLOUDINARY) ============
 
 export const uploadProfilePicture = async (req, res) => {
   try {
@@ -156,7 +150,6 @@ export const uploadProfilePicture = async (req, res) => {
       return res.status(400).json({ msg: "Aucune image fournie." });
     }
 
-    // Delete old profile picture from Cloudinary if exists
     if (candidate.profilePicture) {
       const publicId = getPublicIdFromUrl(candidate.profilePicture);
       if (publicId) {
@@ -164,7 +157,6 @@ export const uploadProfilePicture = async (req, res) => {
       }
     }
 
-    // Upload new image to Cloudinary
     const result = await uploadProfileImage(req.file.buffer, userId);
 
     candidate.profilePicture = result.secure_url;
@@ -177,6 +169,39 @@ export const uploadProfilePicture = async (req, res) => {
   } catch (err) {
     console.error("Profile picture upload error:", err);
     res.status(500).json({ msg: "Erreur lors du téléchargement de l'image" });
+  }
+};
+
+// ══════════════════════════════════════════════════════════════
+// FEATURE 2.2: Supprimer la photo de profil
+// ══════════════════════════════════════════════════════════════
+export const deleteProfilePicture = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const candidate = await Candidate.findOne({ userId });
+
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil introuvable." });
+    }
+
+    if (!candidate.profilePicture) {
+      return res
+        .status(400)
+        .json({ msg: "Aucune photo de profil à supprimer." });
+    }
+
+    const publicId = getPublicIdFromUrl(candidate.profilePicture);
+    if (publicId) {
+      await deleteFromCloudinary(publicId, "image");
+    }
+
+    candidate.profilePicture = null;
+    await candidate.save();
+
+    res.json({ msg: "Photo de profil supprimée 🗑️" });
+  } catch (err) {
+    console.error("Profile picture deletion error:", err);
+    res.status(500).json({ msg: "Erreur lors de la suppression de l'image" });
   }
 };
 
@@ -200,19 +225,16 @@ export const uploadCandidateCV = async (req, res) => {
       return res.status(400).json({ msg: "Aucun fichier fourni." });
     }
 
-    // Upload CV to Cloudinary
     const result = await cloudinaryUploadCV(
       req.file.buffer,
       req.file.originalname,
       userId,
     );
 
-    // Calculate simple score based on file size
     const fileSize = req.file.size;
     let score = 100;
-    if (fileSize < 20 * 1024)
-      score = 50; // Too small
-    else if (fileSize > 5 * 1024 * 1024) score = 70; // Very large
+    if (fileSize < 20 * 1024) score = 50;
+    else if (fileSize > 5 * 1024 * 1024) score = 70;
 
     candidate.cvs.push({
       url: result.secure_url,
@@ -251,7 +273,6 @@ export const deleteCV = async (req, res) => {
       return res.status(404).json({ msg: "CV introuvable." });
     }
 
-    // Delete from Cloudinary
     const publicId = getPublicIdFromUrl(cv.url);
     if (publicId) {
       await deleteFromCloudinary(publicId, "raw");
@@ -269,10 +290,6 @@ export const deleteCV = async (req, res) => {
     res.status(500).json({ msg: err.message });
   }
 };
-
-// ============ SKILLS MANAGEMENT ============
-
-// ============ EXPERIENCE MANAGEMENT ============
 
 export const addExperience = async (req, res) => {
   try {
@@ -354,8 +371,6 @@ export const deleteExperience = async (req, res) => {
     res.status(500).json({ msg: err.message });
   }
 };
-
-// ============ EDUCATION MANAGEMENT ============
 
 export const addEducation = async (req, res) => {
   try {
@@ -442,8 +457,6 @@ export const deleteEducation = async (req, res) => {
   }
 };
 
-// ============ FAVORITES MANAGEMENT ============
-
 export const getFavorites = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -462,7 +475,6 @@ export const getFavorites = async (req, res) => {
       return res.status(404).json({ msg: "Profil introuvable." });
     }
 
-    // Filter out null offers (deleted) and inactive ones
     const validFavorites = candidate.favoris
       .filter((f) => f.offerId !== null)
       .map((f) => ({
@@ -571,9 +583,51 @@ export const removeFromFavorites = async (req, res) => {
   }
 };
 
-// ============ APPLICATION ============
+// ══════════════════════════════════════════════════════════════
+// FEATURE 3.1: Vérification des favoris en batch
+// POST /api/candidates/favorites/check
+// Body: { offerIds: ["id1", "id2", ...] }
+// ══════════════════════════════════════════════════════════════
+export const checkFavoritesInBatch = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { offerIds } = req.body;
 
+    if (!offerIds || !Array.isArray(offerIds) || offerIds.length === 0) {
+      return res.json({ favorites: {} });
+    }
+
+    // Limiter à 50 IDs max par requête
+    const limitedIds = offerIds.slice(0, 50);
+
+    const candidate = await Candidate.findOne({ userId })
+      .select("favoris")
+      .lean();
+
+    if (!candidate) {
+      return res.json({ favorites: {} });
+    }
+
+    const favSet = new Set(candidate.favoris.map((f) => f.offerId.toString()));
+
+    const favorites = {};
+    for (const id of limitedIds) {
+      favorites[id] = favSet.has(id);
+    }
+
+    res.json({ favorites });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+// ══════════════════════════════════════════════════════════════
+// BUG 1 FIX: Mise à jour du snapshot lors de la repostulation
+// ══════════════════════════════════════════════════════════════
 export const applyToOffer = async (req, res) => {
+  const mongoose = (await import("mongoose")).default;
+  const session = await mongoose.startSession();
+
   try {
     const userId = req.user.id;
     const { offreId, cvUrl, coverLetter } = req.body;
@@ -612,103 +666,174 @@ export const applyToOffer = async (req, res) => {
         .json({ msg: "Cette offre n'est plus disponible." });
     }
 
-    // Check for existing application
-    const existingApp = await Application.findOne({
-      offerId: offreId,
-      candidateId: candidate._id,
-    });
+    let result;
 
-    if (existingApp) {
-      const activeStatuses = ["envoyee", "en_cours", "retenue", "non_retenue"];
+    await session.withTransaction(async () => {
+      const existingApp = await Application.findOne({
+        offerId: offreId,
+        candidateId: candidate._id,
+      }).session(session);
 
-      if (activeStatuses.includes(existingApp.candidateStatus)) {
-        return res.status(400).json({
-          msg: "Vous avez déjà une candidature active pour cette offre.",
-        });
-      }
+      if (existingApp) {
+        const activeStatuses = [
+          "envoyee",
+          "en_cours",
+          "entretien",
+          "retenue",
+          "embauchee",
+          "non_retenue",
+        ];
 
-      if (["cancelled", "retiree"].includes(existingApp.candidateStatus)) {
-        if (offer.allowRepostulation === false) {
-          return res.status(403).json({
-            msg: "L'employeur n'accepte pas les repostulations pour cette offre.",
-          });
+        if (activeStatuses.includes(existingApp.candidateStatus)) {
+          throw {
+            status: 400,
+            msg: "Vous avez déjà une candidature active pour cette offre.",
+          };
         }
 
-        const wasWithdrawn = existingApp.candidateStatus === "retiree";
+        if (["cancelled", "retiree"].includes(existingApp.candidateStatus)) {
+          if (offer.allowRepostulation === false) {
+            throw {
+              status: 403,
+              msg: "L'employeur n'accepte pas les repostulations pour cette offre.",
+            };
+          }
 
-        existingApp.candidateStatus = "envoyee";
-        existingApp.recruiterStatus = "nouvelle";
-        existingApp.cvUrl = cvUrl;
-        existingApp.coverLetter = coverLetter || "";
-        existingApp.seenByRecruiter = false;
-        existingApp.seenAt = null;
-        existingApp.datePostulation = new Date();
-        existingApp.isRepostulation = true;
-        existingApp.withdrawReason = undefined;
-        existingApp.withdrawnAt = undefined;
+          if (existingApp.repostulationCount >= offer.maxRepostulations) {
+            throw {
+              status: 403,
+              msg: `Vous avez atteint le nombre maximum de repostulations (${offer.maxRepostulations}) pour cette offre.`,
+            };
+          }
 
-        existingApp.statusHistory.push({
-          candidateStatus: "envoyee",
-          recruiterStatus: "nouvelle",
-          changedBy: userId,
-          note: wasWithdrawn
-            ? "Repostulation après retrait"
-            : "Nouvelle postulation après annulation",
-        });
+          const cooldownMs =
+            offer.repostulationCooldownDays * 24 * 60 * 60 * 1000;
+          const lastPostulationDate =
+            existingApp.datePostulation || existingApp.createdAt;
 
-        await existingApp.save();
+          if (new Date() - new Date(lastPostulationDate) < cooldownMs) {
+            const remainingDays = Math.ceil(
+              (cooldownMs - (new Date() - new Date(lastPostulationDate))) /
+                (1000 * 60 * 60 * 24),
+            );
+            throw {
+              status: 403,
+              msg: `Vous devez attendre encore ${remainingDays} jour(s) avant de postuler à nouveau à cette offre.`,
+            };
+          }
 
-        await Offer.findByIdAndUpdate(offreId, {
-          $inc: { nombreCandidatures: 1 },
-        });
+          const wasWithdrawn = existingApp.candidateStatus === "retiree";
 
-        return res.json({
-          msg: "Candidature envoyée avec succès ✅",
-          applicationId: existingApp._id,
-          reactivated: true,
-        });
+          existingApp.candidateStatus = "envoyee";
+          existingApp.recruiterStatus = "nouvelle";
+          existingApp.cvUrl = cvUrl;
+          existingApp.coverLetter = coverLetter || "";
+          existingApp.seenByRecruiter = false;
+          existingApp.seenAt = null;
+          existingApp.datePostulation = new Date();
+          existingApp.isRepostulation = true;
+          existingApp.repostulationCount += 1;
+          existingApp.withdrawReason = undefined;
+          existingApp.withdrawnAt = undefined;
+          existingApp.rejectionMessage = undefined;
+          existingApp.dateDecision = undefined;
+
+          // ── BUG 1 FIX: Rafraîchir le snapshot avec les données actuelles de l'offre ──
+          const company = await Company.findById(offer.companyId).session(
+            session,
+          );
+          existingApp.offerSnapshot = {
+            titre: offer.titre,
+            entrepriseNom: company?.name || "Entreprise",
+            companyId: offer.companyId,
+            location: offer.wilaya,
+            wilaya: offer.wilaya,
+            salaryMin: offer.salaryMin,
+            salaryMax: offer.salaryMax,
+            type: offer.type,
+            domaine: offer.domaine,
+          };
+
+          existingApp.statusHistory.push({
+            candidateStatus: "envoyee",
+            recruiterStatus: "nouvelle",
+            changedBy: userId,
+            note: wasWithdrawn
+              ? "Repostulation après retrait"
+              : "Nouvelle postulation après annulation",
+          });
+
+          await existingApp.save({ session });
+
+          await Offer.findByIdAndUpdate(
+            offreId,
+            { $inc: { nombreCandidatures: 1 } },
+            { session },
+          );
+
+          result = {
+            msg: "Candidature envoyée avec succès ✅",
+            applicationId: existingApp._id,
+            reactivated: true,
+          };
+          return;
+        }
       }
-    }
 
-    // Create new application
-    const company = await Company.findById(offer.companyId);
+      const company = await Company.findById(offer.companyId).session(session);
 
-    const newApplication = await Application.create({
-      offerId: offreId,
-      candidateId: candidate._id,
-      cvUrl,
-      coverLetter: coverLetter || "",
-      candidateStatus: "envoyee",
-      recruiterStatus: "nouvelle",
-      source: "direct",
-      isRepostulation: false,
-      offerSnapshot: {
-        titre: offer.titre,
-        entrepriseNom: company?.name || "Entreprise",
-        companyId: offer.companyId,
-        location: offer.wilaya,
-        wilaya: offer.wilaya,
-        salaryMin: offer.salaryMin,
-        salaryMax: offer.salaryMax,
-        type: offer.type,
-        domaine: offer.domaine,
-      },
+      const newApplication = new Application({
+        offerId: offreId,
+        candidateId: candidate._id,
+        cvUrl,
+        coverLetter: coverLetter || "",
+        candidateStatus: "envoyee",
+        recruiterStatus: "nouvelle",
+        source: "direct",
+        isRepostulation: false,
+        repostulationCount: 0,
+        offerSnapshot: {
+          titre: offer.titre,
+          entrepriseNom: company?.name || "Entreprise",
+          companyId: offer.companyId,
+          location: offer.wilaya,
+          wilaya: offer.wilaya,
+          salaryMin: offer.salaryMin,
+          salaryMax: offer.salaryMax,
+          type: offer.type,
+          domaine: offer.domaine,
+        },
+      });
+
+      await newApplication.save({ session });
+
+      await Offer.findByIdAndUpdate(
+        offreId,
+        { $inc: { nombreCandidatures: 1 } },
+        { session },
+      );
+
+      result = {
+        msg: "Candidature envoyée avec succès ✅",
+        applicationId: newApplication._id,
+      };
     });
 
-    await Offer.findByIdAndUpdate(offreId, {
-      $inc: { nombreCandidatures: 1 },
-    });
-
-    res.json({
-      msg: "Candidature envoyée avec succès ✅",
-      applicationId: newApplication._id,
-    });
+    res.json(result);
   } catch (err) {
+    if (err.status) {
+      return res.status(err.status).json({ msg: err.msg });
+    }
+    if (err.code === 11000) {
+      return res.status(400).json({
+        msg: "Vous avez déjà une candidature pour cette offre.",
+      });
+    }
     res.status(500).json({ msg: err.message });
+  } finally {
+    await session.endSession();
   }
 };
-
-// ============ STATISTICS & DASHBOARD ============
 
 export const getCandidateStats = async (req, res) => {
   try {
@@ -783,7 +908,6 @@ export const getCandidateStats = async (req, res) => {
     const user = await User.findById(req.user.id);
     const profileCompletion = calculateProfileCompletion(candidate, user);
 
-    // Generate smart suggestions
     const suggestions = [];
 
     if (!user.emailVerified) {
@@ -838,7 +962,6 @@ export const getCandidateStats = async (req, res) => {
       });
     }
 
-    // Sort suggestions by priority
     suggestions.sort((a, b) => a.priority - b.priority);
 
     res.json({
@@ -881,7 +1004,6 @@ export const getActivityTimeline = async (req, res) => {
 
     const { limit = 20 } = req.query;
 
-    // Get recent applications
     const recentApplications = await Application.find({
       candidateId: candidate._id,
     })
@@ -894,7 +1016,6 @@ export const getActivityTimeline = async (req, res) => {
       })
       .lean();
 
-    // Get recent interviews
     const recentInterviews = await Interview.find({
       candidateId: candidate._id,
     })
@@ -903,7 +1024,6 @@ export const getActivityTimeline = async (req, res) => {
       .populate("offerId", "titre")
       .lean();
 
-    // Combine and sort activities
     const activities = [
       ...recentApplications.map((app) => ({
         type: "application",
@@ -929,7 +1049,6 @@ export const getActivityTimeline = async (req, res) => {
       })),
     ];
 
-    // Sort by date
     activities.sort((a, b) => new Date(b.date) - new Date(a.date));
 
     res.json(activities.slice(0, parseInt(limit)));
@@ -938,7 +1057,6 @@ export const getActivityTimeline = async (req, res) => {
   }
 };
 
-// Helper functions for icons
 function getApplicationIcon(status) {
   const icons = {
     envoyee: "send",
@@ -962,8 +1080,12 @@ function getInterviewIcon(status) {
   return icons[status] || "calendar";
 }
 
-// ============ IMPROVED RECOMMENDATIONS ============
-
+// ══════════════════════════════════════════════════════════════
+// BUG 2 FIX: On utilise TOUTES les compétences du candidat pour
+// les recommandations personnelles (y compris les masquées).
+// Les compétences masquées ne sont pas visibles par les recruteurs,
+// mais servent au matching personnel du candidat.
+// ══════════════════════════════════════════════════════════════
 export const getRecommendedOffers = async (req, res) => {
   try {
     const candidate = await Candidate.findOne({ userId: req.user.id });
@@ -972,12 +1094,10 @@ export const getRecommendedOffers = async (req, res) => {
       return res.status(404).json({ msg: "Profil candidat introuvable" });
     }
 
-    // Get already applied offer IDs
     const appliedOfferIds = await Application.find({
       candidateId: candidate._id,
     }).distinct("offerId");
 
-    // Build base query for active offers
     const baseQuery = {
       actif: true,
       validationStatus: "approved",
@@ -987,19 +1107,17 @@ export const getRecommendedOffers = async (req, res) => {
     const candidateSkills = [];
 
     for (const skill of candidate.skills || []) {
-      if (!skill.isVisibleToRecruiters) continue;
+      // BUG 2 FIX: Ne plus filtrer par isVisibleToRecruiters
+      // Les recommandations sont POUR le candidat, on utilise toutes ses compétences
 
-      // Add raw normalized text
       if (skill.normalizedText) {
         candidateSkills.push(skill.normalizedText);
       }
 
-      // Add official name if mapped
       if (skill.officialSkillName) {
         candidateSkills.push(skill.officialSkillName.toLowerCase());
       }
 
-      // Add domain for broader matching
       if (skill.domain) {
         candidateSkills.push(skill.domain.toLowerCase());
       }
@@ -1009,7 +1127,6 @@ export const getRecommendedOffers = async (req, res) => {
     const desiredPosition = candidate.desiredPosition?.toLowerCase();
     const desiredJobTypes = candidate.desiredJobTypes || [];
 
-    // If no skills, return offers based on location only
     if (candidateSkills.length === 0 && !candidateWilaya && !desiredPosition) {
       const popularOffers = await Offer.find(baseQuery)
         .populate("companyId", "name logo location")
@@ -1026,10 +1143,8 @@ export const getRecommendedOffers = async (req, res) => {
       );
     }
 
-    // Build dynamic query
     const queryConditions = [];
 
-    // Skill matching
     if (candidateSkills.length > 0) {
       queryConditions.push({
         skills: {
@@ -1038,24 +1153,20 @@ export const getRecommendedOffers = async (req, res) => {
       });
     }
 
-    // Location matching
     if (candidateWilaya) {
       queryConditions.push({ wilaya: candidateWilaya });
     }
 
-    // Position matching
     if (desiredPosition) {
       queryConditions.push({
         titre: { $regex: desiredPosition, $options: "i" },
       });
     }
 
-    // Job type matching
     if (desiredJobTypes.length > 0) {
       queryConditions.push({ type: { $in: desiredJobTypes } });
     }
 
-    // Combine with OR to get broader results, then score them
     let offerQuery = { ...baseQuery };
     if (queryConditions.length > 0) {
       offerQuery.$or = queryConditions;
@@ -1067,12 +1178,10 @@ export const getRecommendedOffers = async (req, res) => {
       .limit(50)
       .lean();
 
-    // Score and rank offers
     const scoredOffers = offers.map((offer) => {
       let score = 0;
       const matchReasons = [];
 
-      // Skill matching (40% weight)
       const offerSkills = (offer.skills || []).map((s) =>
         s.trim().toLowerCase(),
       );
@@ -1090,19 +1199,16 @@ export const getRecommendedOffers = async (req, res) => {
         );
       }
 
-      // Location matching (25% weight)
       if (candidateWilaya && offer.wilaya === candidateWilaya) {
         score += 25;
         matchReasons.push("Même wilaya");
       }
 
-      // Job type matching (20% weight)
       if (desiredJobTypes.length > 0 && desiredJobTypes.includes(offer.type)) {
         score += 20;
         matchReasons.push("Type de contrat souhaité");
       }
 
-      // Position/title matching (15% weight)
       if (
         desiredPosition &&
         offer.titre.toLowerCase().includes(desiredPosition)
@@ -1111,7 +1217,6 @@ export const getRecommendedOffers = async (req, res) => {
         matchReasons.push("Correspond au poste recherché");
       }
 
-      // Bonus for new offers (last 7 days)
       const isNew =
         new Date() - new Date(offer.datePublication) < 7 * 24 * 60 * 60 * 1000;
       if (isNew) {
@@ -1128,7 +1233,6 @@ export const getRecommendedOffers = async (req, res) => {
       };
     });
 
-    // Sort by score, then by date
     scoredOffers.sort((a, b) => {
       if (b.matchScore !== a.matchScore) {
         return b.matchScore - a.matchScore;
@@ -1139,13 +1243,13 @@ export const getRecommendedOffers = async (req, res) => {
       );
     });
 
-    // Return top 10
     res.json(scoredOffers.slice(0, 10));
   } catch (err) {
     console.error("Recommendation error:", err);
     res.status(500).json({ msg: err.message });
   }
 };
+
 export {
   addSkill,
   updateSkill,

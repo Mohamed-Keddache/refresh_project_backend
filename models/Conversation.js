@@ -1,4 +1,3 @@
-// models/Conversation.js
 import mongoose from "mongoose";
 
 const messageSchema = new mongoose.Schema({
@@ -9,13 +8,40 @@ const messageSchema = new mongoose.Schema({
   },
   senderType: {
     type: String,
-    enum: ["candidate", "recruiter"],
+    enum: ["candidate", "recruiter", "system"],
     required: true,
   },
   content: { type: String, required: true, maxLength: 5000 },
   attachments: [String],
   readAt: Date,
   createdAt: { type: Date, default: Date.now },
+
+  // Type de message spécial
+  messageType: {
+    type: String,
+    enum: [
+      "text", // Message texte normal
+      "predefined", // Message pré-défini (premier contact)
+      "interview_card", // Carte d'entretien
+      "interview_response", // Réponse à un entretien (accepter/refuser/négocier)
+      "negotiate", // Message de négociation d'entretien
+      "hire_offer", // Proposition d'embauche
+      "hire_response", // Réponse embauche (accepter/décliner)
+      "hire_cancelled", // Annulation de la proposition d'embauche
+      "rejection", // Message de refus
+      "system", // Message système
+      "closure", // Message de clôture
+    ],
+    default: "text",
+  },
+
+  // Métadonnées pour les messages spéciaux
+  metadata: {
+    interviewId: { type: mongoose.Schema.Types.ObjectId, ref: "Interview" },
+    interviewNumber: Number,
+    predefinedTemplateId: String,
+    negotiateTag: { type: Boolean, default: false },
+  },
 });
 
 const conversationSchema = new mongoose.Schema(
@@ -24,7 +50,7 @@ const conversationSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Application",
       required: true,
-      unique: true, // Une conversation par candidature
+      unique: true,
     },
     offerId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -42,16 +68,22 @@ const conversationSchema = new mongoose.Schema(
       required: true,
     },
 
-    // Le candidat a-t-il répondu au moins une fois ?
+    // Verrouillage du chat (garder de l'ancien flow)
+    isClosed: { type: Boolean, default: false },
+    closedReason: {
+      type: String,
+      enum: [
+        "recruiter_locked",
+        "application_rejected",
+        "application_closed",
+        "offer_closed",
+      ],
+    },
+
     candidateHasReplied: { type: Boolean, default: false },
-
-    // Premier message envoyé par le recruteur
     initiatedAt: { type: Date, default: Date.now },
-
-    // Premier réponse du candidat
     firstCandidateReplyAt: Date,
 
-    // Le recruteur ouvre la conversation
     openedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -61,31 +93,34 @@ const conversationSchema = new mongoose.Schema(
 
     messages: [messageSchema],
 
-    // Compteurs non-lus
     unreadByCandidate: { type: Number, default: 0 },
     unreadByRecruiter: { type: Number, default: 0 },
 
     lastMessageAt: Date,
 
-    // Statut conversation
     status: {
       type: String,
       enum: ["active", "archived", "closed"],
       default: "active",
     },
-    // Contexte de création
+
+    // Entretiens actifs liés à cette conversation
+    activeInterviewIds: [
+      { type: mongoose.Schema.Types.ObjectId, ref: "Interview" },
+    ],
+
     createdWith: {
       type: String,
-      enum: ["custom_message", "standard_message"],
-      default: "custom_message",
+      enum: ["predefined_message", "custom_message"],
+      default: "predefined_message",
     },
   },
   { timestamps: true },
 );
 
-// Index
 conversationSchema.index({ recruiterId: 1, candidateHasReplied: 1 });
 conversationSchema.index({ candidateId: 1, lastMessageAt: -1 });
 conversationSchema.index({ recruiterId: 1, lastMessageAt: -1 });
-
+conversationSchema.index({ offerId: 1 });
+conversationSchema.index({ status: 1 });
 export default mongoose.model("Conversation", conversationSchema);

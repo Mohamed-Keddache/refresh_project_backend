@@ -6,6 +6,9 @@ import Company from "../models/Company.js";
 import Recruiter from "../models/Recruiter.js";
 import VerificationToken from "../models/VerificationToken.js";
 import SystemSettings from "../models/SystemSettings.js";
+import Application from "../models/Application.js";
+import Interview from "../models/Interview.js";
+import Offer from "../models/Offer.js";
 import {
   sendVerificationEmail,
   sendWelcomeEmail,
@@ -25,6 +28,7 @@ const generateToken = (user) => {
 
 function getRecruiterStatusMessage(status) {
   const messages = {
+    incomplete: "Veuillez compléter votre profil recruteur pour continuer.",
     pending_validation:
       "Votre compte est en attente de validation par un administrateur.",
     pending_documents:
@@ -41,16 +45,13 @@ export const register = async (req, res) => {
   try {
     const { nom, email, motDePasse, role } = req.body;
 
-    // Check if email already exists
     const exist = await User.findOne({ email: email.toLowerCase() });
     if (exist) {
       return res.status(400).json({ msg: "Email déjà utilisé" });
     }
 
-    // Hash password
     const hash = await bcrypt.hash(motDePasse, 12);
 
-    // Create user
     const user = await User.create({
       nom,
       email: email.toLowerCase(),
@@ -61,12 +62,10 @@ export const register = async (req, res) => {
     });
 
     try {
-      // Create role-specific profile
       if (role === "recruteur") {
-        // Recruiter is created without company initially
         await Recruiter.create({
           userId: user._id,
-          status: "incomplete", // will complete company info later
+          status: "incomplete",
         });
       } else if (role === "candidat") {
         await Candidate.create({
@@ -74,7 +73,6 @@ export const register = async (req, res) => {
         });
       }
 
-      // Send verification email
       const verificationMode = await SystemSettings.getSetting(
         "email_verification_mode",
         "development",
@@ -97,7 +95,6 @@ export const register = async (req, res) => {
           console.log(`✅ Verification email sent successfully`);
         } catch (emailError) {
           console.error("❌ Failed to send verification email:", emailError);
-          // Do not fail registration if email fails
         }
       } else {
         console.log(
@@ -119,7 +116,6 @@ export const register = async (req, res) => {
         needsEmailVerification: true,
       });
     } catch (err) {
-      // Rollback user if profile creation fails
       await User.findByIdAndDelete(user._id);
       throw err;
     }
@@ -132,15 +128,22 @@ export const register = async (req, res) => {
 export const login = async (req, res) => {
   try {
     const { email, motDePasse } = req.body;
+    const GENERIC_ERROR = "Email ou mot de passe incorrect";
 
     const user = await User.findOne({ email: email.toLowerCase() });
+
     if (!user) {
-      return res.status(404).json({ msg: "Utilisateur non trouvé" });
+      await bcrypt.hash("dummy_password_timing_protection", 12);
+      return res
+        .status(401)
+        .json({ msg: GENERIC_ERROR, code: "INVALID_CREDENTIALS" });
     }
 
     const ok = await bcrypt.compare(motDePasse, user.motDePasse);
     if (!ok) {
-      return res.status(401).json({ msg: "Mot de passe incorrect" });
+      return res
+        .status(401)
+        .json({ msg: GENERIC_ERROR, code: "INVALID_CREDENTIALS" });
     }
 
     if (!user.canLogin()) {
@@ -165,10 +168,12 @@ export const login = async (req, res) => {
 
     if (user.role === "recruteur") {
       if (!user.emailVerified) {
+        const token = generateToken(user);
         return res.status(403).json({
           msg: "Veuillez confirmer votre email avant de vous connecter.",
           code: "EMAIL_NOT_VERIFIED",
           needEmailVerification: true,
+          token,
         });
       }
 
@@ -244,10 +249,6 @@ export const resendConfirmationCode = async (req, res) => {
       "development",
     );
 
-    console.log(
-      `📧 Resend code - Email verification mode: ${verificationMode}`,
-    );
-
     if (verificationMode === "smtp") {
       try {
         const { code, expiresAt } =
@@ -257,9 +258,6 @@ export const resendConfirmationCode = async (req, res) => {
             15,
           );
 
-        console.log(
-          `📧 Sending new verification code to ${user.email}: ${code}`,
-        );
         await sendVerificationEmail(user.email, code, user.nom);
 
         res.json({
@@ -277,9 +275,6 @@ export const resendConfirmationCode = async (req, res) => {
         });
       }
     } else {
-      console.log(
-        `📨 [DEV MODE] Code de confirmation pour ${user.email}: 123456`,
-      );
       res.json({
         msg: "Code de confirmation envoyé (Mode développement: utilisez 123456) 📨",
       });
@@ -306,10 +301,6 @@ export const verifyEmail = async (req, res) => {
     const verificationMode = await SystemSettings.getSetting(
       "email_verification_mode",
       "development",
-    );
-
-    console.log(
-      `📧 Verify email - Mode: ${verificationMode}, Code received: ${code}`,
     );
 
     let isValid = false;
@@ -341,7 +332,6 @@ export const verifyEmail = async (req, res) => {
       user.emailVerified = true;
       await user.save();
 
-      // Send welcome email (don't fail if this fails)
       try {
         await sendWelcomeEmail(user.email, user.nom);
       } catch (emailErr) {
@@ -406,6 +396,288 @@ export const changeEmail = async (req, res) => {
   }
 };
 
+export const changePassword = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { currentPassword, newPassword, confirmNewPassword } = req.body;
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({
+        msg: "Le mot de passe actuel et le nouveau mot de passe sont requis.",
+      });
+    }
+
+    if (newPassword.length < 8) {
+      return res.status(400).json({
+        msg: "Le nouveau mot de passe doit contenir au moins 8 caractères.",
+      });
+    }
+
+    if (
+      !/[a-z]/.test(newPassword) ||
+      !/[A-Z]/.test(newPassword) ||
+      !/\d/.test(newPassword)
+    ) {
+      return res.status(400).json({
+        msg: "Le mot de passe doit contenir une minuscule, une majuscule et un chiffre.",
+      });
+    }
+
+    if (confirmNewPassword && newPassword !== confirmNewPassword) {
+      return res
+        .status(400)
+        .json({ msg: "Les mots de passe ne correspondent pas." });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ msg: "Utilisateur introuvable." });
+    }
+
+    const isMatch = await bcrypt.compare(currentPassword, user.motDePasse);
+    if (!isMatch) {
+      return res.status(401).json({ msg: "Mot de passe actuel incorrect." });
+    }
+
+    const isSame = await bcrypt.compare(newPassword, user.motDePasse);
+    if (isSame) {
+      return res.status(400).json({
+        msg: "Le nouveau mot de passe doit être différent de l'ancien.",
+      });
+    }
+
+    const hash = await bcrypt.hash(newPassword, 12);
+    user.motDePasse = hash;
+    await user.save();
+
+    const token = generateToken(user);
+
+    res.json({
+      msg: "Mot de passe modifié avec succès ✅",
+      token,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+// ══════════════════════════════════════════════════════════════
+// BUG 4 FIX: Nettoyage des conversations et tickets de support
+// lors de la suppression du compte.
+// ══════════════════════════════════════════════════════════════
+export const deleteMyAccount = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { password, confirmation } = req.body;
+
+    if (confirmation !== "SUPPRIMER MON COMPTE") {
+      return res.status(400).json({
+        msg: "Veuillez confirmer en écrivant 'SUPPRIMER MON COMPTE'.",
+      });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ msg: "Utilisateur introuvable." });
+    }
+
+    const hasOAuthOnly = user.oauthProviders && user.oauthProviders.length > 0;
+
+    if (!hasOAuthOnly) {
+      if (!password) {
+        return res
+          .status(400)
+          .json({ msg: "Mot de passe requis pour confirmer." });
+      }
+      const isMatch = await bcrypt.compare(password, user.motDePasse);
+      if (!isMatch) {
+        return res.status(401).json({ msg: "Mot de passe incorrect." });
+      }
+    }
+
+    if (user.role === "admin") {
+      return res.status(403).json({
+        msg: "Un administrateur ne peut pas supprimer son propre compte via cette route.",
+      });
+    }
+
+    const mongoose = (await import("mongoose")).default;
+    const session = await mongoose.startSession();
+
+    try {
+      await session.withTransaction(async () => {
+        if (user.role === "candidat") {
+          const candidate = await Candidate.findOne({ userId }).session(
+            session,
+          );
+          if (candidate) {
+            const activeApps = await Application.find({
+              candidateId: candidate._id,
+              candidateStatus: {
+                $in: ["envoyee", "en_cours", "entretien", "retenue"],
+              },
+            }).session(session);
+
+            for (const app of activeApps) {
+              app.candidateStatus = "retiree";
+              app.recruiterStatus = "retiree_par_candidat";
+              app.withdrawnAt = new Date();
+              app.withdrawReason = "Compte supprimé par l'utilisateur";
+              await app.save({ session });
+
+              await Offer.findByIdAndUpdate(
+                app.offerId,
+                { $inc: { nombreCandidatures: -1 } },
+                { session },
+              );
+            }
+
+            await Interview.updateMany(
+              {
+                candidateId: candidate._id,
+                status: {
+                  $in: [
+                    "proposed",
+                    "confirmed",
+                    "rescheduled_by_candidate",
+                    "rescheduled_by_recruiter",
+                  ],
+                },
+              },
+              {
+                status: "cancelled_by_candidate",
+                cancellationReason: "Compte supprimé",
+                cancelledAt: new Date(),
+              },
+              { session },
+            );
+
+            // ── BUG 4 FIX: Fermer proprement les conversations ──
+            const Conversation = (await import("../models/Conversation.js"))
+              .default;
+            await Conversation.updateMany(
+              { candidateId: candidate._id, isClosed: { $ne: true } },
+              {
+                $set: {
+                  isClosed: true,
+                  closedReason: "application_closed",
+                },
+                $push: {
+                  messages: {
+                    senderId: userId,
+                    senderType: "system",
+                    content: "Le candidat a supprimé son compte.",
+                    messageType: "system",
+                    createdAt: new Date(),
+                  },
+                },
+                $inc: { unreadByRecruiter: 1 },
+              },
+              { session },
+            );
+
+            // ── BUG 4 FIX: Fermer les tickets de support ouverts ──
+            const SupportTicket = (await import("../models/SupportTicket.js"))
+              .default;
+            await SupportTicket.updateMany(
+              { userId, status: { $nin: ["closed", "resolved"] } },
+              {
+                $set: {
+                  status: "closed",
+                  closedAt: new Date(),
+                },
+              },
+              { session },
+            );
+
+            try {
+              const {
+                deleteMultipleFromCloudinary,
+                deleteFromCloudinary,
+                getPublicIdFromUrl,
+              } = await import("../config/cloudinary.js");
+
+              const cvUrls = candidate.cvs.map((cv) => cv.url).filter(Boolean);
+              if (cvUrls.length > 0) {
+                await deleteMultipleFromCloudinary(cvUrls);
+              }
+              if (candidate.profilePicture) {
+                const pubId = getPublicIdFromUrl(candidate.profilePicture);
+                if (pubId) await deleteFromCloudinary(pubId, "image");
+              }
+            } catch (cloudErr) {
+              console.error(
+                "Cloudinary cleanup error (non-blocking):",
+                cloudErr,
+              );
+            }
+
+            await Candidate.deleteOne({ _id: candidate._id }).session(session);
+          }
+
+          const CandidateAnemRegistration = (
+            await import("../models/CandidateAnemRegistration.js")
+          ).default;
+          await CandidateAnemRegistration.deleteMany({ userId }).session(
+            session,
+          );
+        } else if (user.role === "recruteur") {
+          const recruiter = await Recruiter.findOne({ userId }).session(
+            session,
+          );
+          if (recruiter) {
+            const myOfferIds = await Offer.find({
+              recruteurId: recruiter._id,
+            }).distinct("_id");
+            const activeOfferApps = await Application.countDocuments({
+              offerId: { $in: myOfferIds },
+              recruiterStatus: {
+                $nin: [
+                  "refusee",
+                  "retiree_par_candidat",
+                  "annulee_par_candidat",
+                  "embauche",
+                  "offer_declined",
+                ],
+              },
+            });
+
+            if (activeOfferApps > 0) {
+              throw new Error(
+                "Vous avez des candidatures actives en cours. Veuillez d'abord les traiter.",
+              );
+            }
+
+            await Recruiter.deleteOne({ _id: recruiter._id }).session(session);
+          }
+
+          const AnemRegistration = (
+            await import("../models/AnemRegistration.js")
+          ).default;
+          await AnemRegistration.deleteMany({ userId }).session(session);
+        }
+
+        const Notification = (await import("../models/Notification.js"))
+          .default;
+        await Notification.deleteMany({ userId }).session(session);
+
+        await VerificationToken.deleteMany({ userId }).session(session);
+
+        await User.deleteOne({ _id: userId }).session(session);
+      });
+
+      res.json({ msg: "Votre compte a été supprimé avec succès. Au revoir." });
+    } finally {
+      await session.endSession();
+    }
+  } catch (err) {
+    if (err.message.includes("candidatures actives")) {
+      return res.status(400).json({ msg: err.message });
+    }
+    res.status(500).json({ msg: err.message });
+  }
+};
+
 export const getCompanies = async (req, res) => {
   try {
     const companies = await Company.find({ status: "active" })
@@ -417,13 +689,4 @@ export const getCompanies = async (req, res) => {
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
-};
-
-export default {
-  register,
-  login,
-  verifyEmail,
-  resendConfirmationCode,
-  changeEmail,
-  getCompanies,
 };

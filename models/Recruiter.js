@@ -132,7 +132,7 @@ recruiterSchema.methods.hasPendingRequests = function () {
 };
 
 recruiterSchema.methods.isAnemRegistered = function () {
-  return this.anem.status === "registered" && this.anem.anemId;
+  return this.anem.status === "registered" && !!this.anem.anemId;
 };
 
 recruiterSchema.methods.canCreateAnemOffer = function () {

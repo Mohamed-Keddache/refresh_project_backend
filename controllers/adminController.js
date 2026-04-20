@@ -417,10 +417,61 @@ export const deleteAdmin = async (req, res) => {
     if (!adminUser || adminUser.role !== "admin")
       return res.status(404).json({ msg: "Admin introuvable" });
 
-    await User.findByIdAndDelete(id);
-    await Admin.findOneAndDelete({ userId: id });
+    const admin = await Admin.findOne({ userId: id });
 
-    res.json({ msg: "Administrateur supprimé 🗑️" });
+    if (admin && admin.label === "super_admin") {
+      // Vérifier qu'il reste au moins un super_admin
+      const superAdminCount = await Admin.countDocuments({
+        label: "super_admin",
+        status: "active",
+      });
+      if (superAdminCount <= 1) {
+        return res.status(400).json({
+          msg: "Impossible de supprimer le dernier super admin.",
+        });
+      }
+    }
+
+    // Nettoyer les données orphelines
+
+    // 1. Réassigner les tickets de support
+    if (admin) {
+      await SupportTicket.updateMany(
+        { assignedTo: admin._id },
+        { $unset: { assignedTo: 1 } },
+      );
+    }
+
+    // 2. Réassigner les demandes ANEM
+    if (admin) {
+      await AnemRegistration.updateMany(
+        { assignedTo: admin._id },
+        { $unset: { assignedTo: 1, assignedAt: 1, assignedBy: 1 } },
+      );
+
+      await CandidateAnemRegistration.updateMany(
+        { assignedTo: admin._id },
+        { $unset: { assignedTo: 1, assignedAt: 1, assignedBy: 1 } },
+      );
+    }
+
+    // 3. Logger la suppression avant de supprimer
+    await logAdminAction(
+      req.user.id,
+      "admin_deleted",
+      { type: "admin", id: admin?._id || id },
+      { deletedAdminName: adminUser.nom, deletedAdminEmail: adminUser.email },
+      req,
+    );
+
+    // 4. Supprimer les notifications de l'admin
+    await Notification.deleteMany({ userId: id });
+
+    // 5. Supprimer le profil admin et l'utilisateur
+    await Admin.findOneAndDelete({ userId: id });
+    await User.findByIdAndDelete(id);
+
+    res.json({ msg: "Administrateur supprimé et données nettoyées 🗑️" });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
@@ -528,6 +579,33 @@ export const getAllUsers = async (req, res) => {
       ];
     }
 
+    // FIX #5: Apply wilaya and proposable filters at DB level BEFORE pagination
+    if (wilaya || proposable === "true") {
+      let candidateFilter = {};
+      if (wilaya) {
+        candidateFilter["residence.wilaya"] = {
+          $regex: new RegExp(`^${wilaya}$`, "i"),
+        };
+      }
+      if (proposable === "true") {
+        candidateFilter.autoriserProposition = true;
+      }
+
+      const matchingCandidates = await Candidate.find(candidateFilter)
+        .select("userId")
+        .lean();
+      const matchingUserIds = matchingCandidates.map((c) => c.userId);
+
+      // Combine with existing query
+      if (query.$or) {
+        // If we already have $or from search, we need $and
+        query.$and = [{ $or: query.$or }, { _id: { $in: matchingUserIds } }];
+        delete query.$or;
+      } else {
+        query._id = { $in: matchingUserIds };
+      }
+    }
+
     const skip = (page - 1) * limit;
 
     const [users, total] = await Promise.all([
@@ -571,7 +649,7 @@ export const getAllUsers = async (req, res) => {
       offerCounts.map((o) => [o._id.toString(), o.count]),
     );
 
-    let enriched = users.map((u) => {
+    const enriched = users.map((u) => {
       const userId = u._id.toString();
       let details = {};
 
@@ -605,19 +683,7 @@ export const getAllUsers = async (req, res) => {
       };
     });
 
-    if (wilaya) {
-      enriched = enriched.filter(
-        (u) =>
-          u.details?.wilaya &&
-          u.details.wilaya.toLowerCase() === wilaya.toLowerCase(),
-      );
-    }
-
-    if (proposable === "true") {
-      enriched = enriched.filter(
-        (u) => u.details?.autoriserProposition === true,
-      );
-    }
+    // No more post-pagination filtering needed — it's already in the DB query
 
     res.json({
       data: enriched,
@@ -909,7 +975,7 @@ export const getManualSelectionOffers = async (req, res) => {
               $expr: {
                 $and: [
                   { $eq: ["$offerId", "$$offerId"] },
-                  { $eq: ["$recommandeParAdmin", true] },
+                  { $eq: ["$source", "admin_proposal"] }, // Correction: on compte les propositions admin
                 ],
               },
             },
@@ -925,6 +991,8 @@ export const getManualSelectionOffers = async (req, res) => {
         proposalCount: {
           $ifNull: [{ $arrayElemAt: ["$adminProposals.count", 0] }, 0],
         },
+        // PHASE 1: On s'assure que hiresNeeded est bien exposé au frontend
+        hiresNeeded: { $ifNull: ["$hiresNeeded", "Non spécifié"] },
       },
     });
 
@@ -1059,7 +1127,21 @@ export const proposeCandidateToOffer = async (req, res) => {
       type: "info",
     });
 
-    return res.json({ msg: "Candidat proposé avec succès ✅" });
+    // --- PHASE 1: Feedback pour l'Admin sur son quota ---
+    const currentProposals = await Application.countDocuments({
+      offerId: offreId,
+      source: "admin_proposal",
+    });
+
+    let msg = "Candidat proposé avec succès ✅";
+
+    // Si l'admin a atteint ou dépassé le nombre de candidats demandés par le recruteur
+    if (offer.hiresNeeded && currentProposals >= offer.hiresNeeded) {
+      msg += ` (Note: Vous avez atteint le quota demandé par le recruteur : ${currentProposals}/${offer.hiresNeeded})`;
+    }
+
+    return res.json({ msg, currentProposals, hiresNeeded: offer.hiresNeeded });
+    // ----------------------------------------------------
   } catch (err) {
     console.error(err);
     return res.status(500).json({ msg: err.message });
@@ -1622,27 +1704,37 @@ export const getAllCompanies = async (req, res) => {
 
     const skip = (page - 1) * limit;
 
-    const companies = await Company.find(query)
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(parseInt(limit));
-
-    const total = await Company.countDocuments(query);
-
-    const enrichedCompanies = await Promise.all(
-      companies.map(async (company) => {
-        const recruitersCount = await Recruiter.countDocuments({
-          companyId: company._id,
-        });
-        return {
-          ...company.toObject(),
-          recruitersCount,
-        };
-      }),
-    );
+    // Fix N+1: Utiliser aggregation avec $lookup au lieu de boucler
+    const [companies, total] = await Promise.all([
+      Company.aggregate([
+        { $match: query },
+        { $sort: { createdAt: -1 } },
+        { $skip: skip },
+        { $limit: parseInt(limit) },
+        {
+          $lookup: {
+            from: "recruiters",
+            localField: "_id",
+            foreignField: "companyId",
+            as: "recruiters",
+          },
+        },
+        {
+          $addFields: {
+            recruitersCount: { $size: "$recruiters" },
+          },
+        },
+        {
+          $project: {
+            recruiters: 0, // Ne pas renvoyer les détails des recruteurs
+          },
+        },
+      ]),
+      Company.countDocuments(query),
+    ]);
 
     res.json({
-      data: enrichedCompanies,
+      data: companies,
       meta: {
         total,
         page: parseInt(page),
@@ -1654,6 +1746,7 @@ export const getAllCompanies = async (req, res) => {
     res.status(500).json({ msg: err.message });
   }
 };
+
 export const getOfferDetailsAdmin = async (req, res) => {
   try {
     const { id } = req.params;

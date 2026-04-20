@@ -739,7 +739,6 @@ export const getCandidateRegistrationForm = async (req, res) => {
 };
 
 // ============ ADMIN ENDPOINTS ============
-
 export const getCandidateAnemDemandes = async (req, res) => {
   try {
     const {
@@ -822,7 +821,12 @@ export const getCandidateAnemDemandes = async (req, res) => {
         .limit(parseInt(limit))
         .populate("userId", "nom email")
         .populate("candidateId", "telephone residence profilePicture")
-        .populate("assignedTo", "userId label")
+        // ▶ FIX N+1: Populate imbriqué pour le nom de l'admin
+        .populate({
+          path: "assignedTo",
+          select: "userId label",
+          populate: { path: "userId", select: "nom" },
+        })
         .lean(),
       CandidateAnemRegistration.countDocuments(query),
       CandidateAnemRegistration.aggregate([
@@ -831,56 +835,45 @@ export const getCandidateAnemDemandes = async (req, res) => {
       ]),
     ]);
 
-    const enrichedDemandes = await Promise.all(
-      demandes.map(async (d) => {
-        let assignedAdminName = null;
-        if (d.assignedTo?.userId) {
-          const adminUser = await User.findById(d.assignedTo.userId).select(
-            "nom",
-          );
-          assignedAdminName = adminUser?.nom;
-        }
+    // Plus de boucle N+1 ici
+    const enrichedDemandes = demandes.map((d) => ({
+      _id: d._id,
+      registrationType: d.registrationType,
+      status: d.status,
+      currentStep: d.currentStep,
+      formCompleted: d.formCompleted,
+      formSubmittedAt: d.formSubmittedAt,
+      declaredAnemId: d.declaredAnemId,
+      verifiedAnemId: d.verifiedAnemId,
 
-        return {
-          _id: d._id,
-          registrationType: d.registrationType,
-          status: d.status,
-          currentStep: d.currentStep,
-          formCompleted: d.formCompleted,
-          formSubmittedAt: d.formSubmittedAt,
-          declaredAnemId: d.declaredAnemId,
-          verifiedAnemId: d.verifiedAnemId,
+      candidate: {
+        _id: d.candidateId?._id,
+        nom: d.userId?.nom,
+        email: d.userId?.email,
+        telephone: d.candidateId?.telephone,
+        profilePicture: d.candidateId?.profilePicture,
+      },
 
-          candidate: {
-            _id: d.candidateId?._id,
-            nom: d.userId?.nom,
-            email: d.userId?.email,
-            telephone: d.candidateId?.telephone,
-            profilePicture: d.candidateId?.profilePicture,
-          },
+      wilaya: d.step2?.wilayaResidence,
+      nomComplet: `${d.step1?.prenom || ""} ${d.step1?.nom || ""}`.trim(),
 
-          wilaya: d.step2?.wilayaResidence,
-          nomComplet: `${d.step1?.prenom || ""} ${d.step1?.nom || ""}`.trim(),
+      assignedTo: d.assignedTo
+        ? {
+            _id: d.assignedTo._id,
+            name: d.assignedTo.userId?.nom || null,
+            label: d.assignedTo.label,
+          }
+        : null,
+      assignedAt: d.assignedAt,
 
-          assignedTo: d.assignedTo
-            ? {
-                _id: d.assignedTo._id,
-                name: assignedAdminName,
-                label: d.assignedTo.label,
-              }
-            : null,
-          assignedAt: d.assignedAt,
+      pdfDownloadCount: d.pdfDownloads?.length || 0,
+      lastPdfDownload: d.pdfDownloads?.slice(-1)[0]?.downloadedAt,
 
-          pdfDownloadCount: d.pdfDownloads?.length || 0,
-          lastPdfDownload: d.pdfDownloads?.slice(-1)[0]?.downloadedAt,
-
-          failureReason: d.failureReason,
-          rejectionReason: d.rejectionReason,
-          createdAt: d.createdAt,
-          updatedAt: d.updatedAt,
-        };
-      }),
-    );
+      failureReason: d.failureReason,
+      rejectionReason: d.rejectionReason,
+      createdAt: d.createdAt,
+      updatedAt: d.updatedAt,
+    }));
 
     const countsMap = {};
     statusCounts.forEach((s) => {

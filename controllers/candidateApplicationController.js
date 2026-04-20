@@ -1,4 +1,3 @@
-// controllers/candidateApplicationController.js
 import Application from "../models/Application.js";
 import Interview from "../models/Interview.js";
 import Conversation from "../models/Conversation.js";
@@ -6,7 +5,9 @@ import Candidate from "../models/Candidate.js";
 import Notification from "../models/Notification.js";
 import Offer from "../models/Offer.js";
 
-// Obtenir toutes mes candidatures
+// ══════════════════════════════════════════════════════════════
+// FEATURE 2.4: Ajout du paramètre `search` pour filtrer les candidatures
+// ══════════════════════════════════════════════════════════════
 export const getMyApplications = async (req, res) => {
   try {
     const candidate = await Candidate.findOne({ userId: req.user.id });
@@ -14,13 +15,22 @@ export const getMyApplications = async (req, res) => {
       return res.status(404).json({ msg: "Profil introuvable" });
     }
 
-    const { status, page = 1, limit = 20 } = req.query;
+    const { status, search, page = 1, limit = 20 } = req.query;
     const skip = (page - 1) * limit;
 
     let query = { candidateId: candidate._id };
 
     if (status && status !== "all") {
       query.candidateStatus = status;
+    }
+
+    // FEATURE 2.4: Recherche dans les candidatures par titre d'offre ou nom d'entreprise
+    if (search && search.trim().length > 0) {
+      const searchRegex = { $regex: search.trim(), $options: "i" };
+      query.$or = [
+        { "offerSnapshot.titre": searchRegex },
+        { "offerSnapshot.entrepriseNom": searchRegex },
+      ];
     }
 
     const [applications, total] = await Promise.all([
@@ -37,62 +47,86 @@ export const getMyApplications = async (req, res) => {
       Application.countDocuments(query),
     ]);
 
-    // Enrichir avec infos conversation et entretiens
-    const enriched = await Promise.all(
-      applications.map(async (app) => {
-        const [conversation, upcomingInterview, interviewCount] =
-          await Promise.all([
-            Conversation.findOne({ applicationId: app._id })
-              .select("unreadByCandidate lastMessageAt status")
-              .lean(),
-            Interview.findOne({
-              applicationId: app._id,
-              status: {
-                $in: ["proposed", "confirmed", "rescheduled_by_recruiter"],
-              },
-              scheduledAt: { $gte: new Date() },
-            })
-              .sort({ scheduledAt: 1 })
-              .lean(),
-            Interview.countDocuments({ applicationId: app._id }),
-          ]);
+    const appIds = applications.map((app) => app._id);
 
-        return {
-          _id: app._id,
-          status: app.candidateStatus,
-          source: app.source,
-          datePostulation: app.datePostulation,
-          offer: app.offerId
-            ? {
-                _id: app.offerId._id,
-                titre: app.offerId.titre,
-                entreprise: app.offerId.companyId?.name,
-                logo: app.offerId.companyId?.logo,
-                type: app.offerId.type,
-                wilaya: app.offerId.wilaya,
-                actif: app.offerId.actif,
-              }
-            : {
-                titre: app.offerSnapshot?.titre,
-                entreprise: app.offerSnapshot?.entrepriseNom,
-                actif: false,
-                deleted: true,
-              },
-          hasConversation: !!conversation,
-          unreadMessages: conversation?.unreadByCandidate || 0,
-          upcomingInterview: upcomingInterview
-            ? {
-                _id: upcomingInterview._id,
-                scheduledAt: upcomingInterview.scheduledAt,
-                type: upcomingInterview.type,
-                status: upcomingInterview.status,
-                needsResponse: upcomingInterview.status === "proposed",
-              }
-            : null,
-          totalInterviews: interviewCount,
-        };
-      }),
+    const [conversations, upcomingInterviews, interviewCounts] =
+      await Promise.all([
+        Conversation.find({ applicationId: { $in: appIds } })
+          .select("applicationId unreadByCandidate lastMessageAt status")
+          .lean(),
+        Interview.find({
+          applicationId: { $in: appIds },
+          status: {
+            $in: ["proposed", "confirmed", "rescheduled_by_recruiter"],
+          },
+          scheduledAt: { $gte: new Date() },
+        })
+          .sort({ scheduledAt: 1 })
+          .lean(),
+        Interview.aggregate([
+          { $match: { applicationId: { $in: appIds } } },
+          { $group: { _id: "$applicationId", count: { $sum: 1 } } },
+        ]),
+      ]);
+
+    const convMap = new Map(
+      conversations.map((c) => [c.applicationId.toString(), c]),
     );
+
+    const interviewMap = new Map();
+    for (const interview of upcomingInterviews) {
+      const appIdStr = interview.applicationId.toString();
+      if (!interviewMap.has(appIdStr)) {
+        interviewMap.set(appIdStr, interview);
+      }
+    }
+
+    const countMap = new Map(
+      interviewCounts.map((ic) => [ic._id.toString(), ic.count]),
+    );
+
+    const enriched = applications.map((app) => {
+      const appIdStr = app._id.toString();
+      const conversation = convMap.get(appIdStr);
+      const upcomingInterview = interviewMap.get(appIdStr);
+      const interviewCount = countMap.get(appIdStr) || 0;
+
+      return {
+        _id: app._id,
+        status: app.candidateStatus,
+        source: app.source,
+        datePostulation: app.datePostulation,
+        offer: app.offerId
+          ? {
+              _id: app.offerId._id,
+              titre: app.offerId.titre,
+              entreprise: app.offerId.companyId?.name,
+              logo: app.offerId.companyId?.logo,
+              type: app.offerId.type,
+              wilaya: app.offerId.wilaya,
+              actif: app.offerId.actif,
+            }
+          : {
+              titre: app.offerSnapshot?.titre,
+              entreprise: app.offerSnapshot?.entrepriseNom,
+              actif: false,
+              deleted: true,
+            },
+        hasConversation: !!conversation,
+        conversationId: conversation?._id || null,
+        unreadMessages: conversation?.unreadByCandidate || 0,
+        upcomingInterview: upcomingInterview
+          ? {
+              _id: upcomingInterview._id,
+              scheduledAt: upcomingInterview.scheduledAt,
+              type: upcomingInterview.type,
+              status: upcomingInterview.status,
+              needsResponse: upcomingInterview.status === "proposed",
+            }
+          : null,
+        totalInterviews: interviewCount,
+      };
+    });
 
     res.json({
       data: enriched,
@@ -108,13 +142,11 @@ export const getMyApplications = async (req, res) => {
   }
 };
 
-// Détail d'une candidature
 export const getApplicationDetail = async (req, res) => {
   try {
     const candidate = await Candidate.findOne({ userId: req.user.id });
     const { applicationId } = req.params;
 
-    // 1. Get Application with Offer and Company details
     const application = await Application.findOne({
       _id: applicationId,
       candidateId: candidate._id,
@@ -134,34 +166,32 @@ export const getApplicationDetail = async (req, res) => {
       return res.status(404).json({ msg: "Candidature introuvable" });
     }
 
-    // 2. Fetch Conversation and Interviews in parallel
     const [conversation, interviews] = await Promise.all([
       Conversation.findOne({ applicationId })
-        .select("_id messages unreadByCandidate status lastMessageAt") // ADDED _id explicitly
+        .select("_id messages unreadByCandidate status lastMessageAt")
         .lean(),
       Interview.find({ applicationId }).sort({ scheduledAt: -1 }).lean(),
     ]);
 
-    // 3. Construct Response
     res.json({
       application: {
         _id: application._id,
         status: application.candidateStatus,
-        recruiterStatus: application.recruiterStatus, // Useful for UI timeline
+        recruiterStatus: application.recruiterStatus,
         source: application.source,
         cvUrl: application.cvUrl,
         coverLetter: application.coverLetter,
         datePostulation: application.datePostulation,
         dateDecision: application.dateDecision,
+        rejectionMessage: application.rejectionMessage || null,
       },
-      // Handle case where offer might be deleted (use snapshot if offerId is null)
+
       offer: application.offerId || application.offerSnapshot,
 
-      // IMPROVEMENT: Send full conversation context
       conversation: conversation
         ? {
             exists: true,
-            _id: conversation._id, // CRITICAL: Frontend needs this to "Go to Chat"
+            _id: conversation._id,
             unreadCount: conversation.unreadByCandidate,
             messageCount: conversation.messages?.length || 0,
             status: conversation.status,
@@ -179,7 +209,6 @@ export const getApplicationDetail = async (req, res) => {
         status: i.status,
         proposedAlternative: i.proposedAlternative,
         preparationNotes: i.preparationNotes,
-        // Helper boolean for frontend buttons
         canAccept:
           i.status === "proposed" || i.status === "rescheduled_by_recruiter",
         canCounter:
@@ -197,7 +226,9 @@ export const getApplicationDetail = async (req, res) => {
   }
 };
 
-// Retirer sa candidature
+// ══════════════════════════════════════════════════════════════
+// BUG 3 FIX: Ajout des événements Socket.IO lors du retrait
+// ══════════════════════════════════════════════════════════════
 export const withdrawApplication = async (req, res) => {
   try {
     const candidate = await Candidate.findOne({ userId: req.user.id });
@@ -212,12 +243,30 @@ export const withdrawApplication = async (req, res) => {
     if (!application)
       return res.status(404).json({ msg: "Candidature introuvable" });
 
-    // Vérifier si on peut retirer
-    const terminalStatuses = ["retiree", "cancelled", "non_retenue", "retenue"]; // On peut retirer une candidature "retenue" si on refuse l'offre
+    const terminalStatuses = [
+      "retiree",
+      "cancelled",
+      "non_retenue",
+      "embauchee",
+    ];
     if (terminalStatuses.includes(application.candidateStatus)) {
+      if (application.candidateStatus === "embauchee") {
+        return res.status(400).json({
+          msg: "Vous êtes embauché(e) sur cette offre. Utilisez la fonctionnalité dédiée si vous souhaitez quitter.",
+          code: "ALREADY_HIRED",
+        });
+      }
       return res
         .status(400)
         .json({ msg: "Action impossible pour le statut actuel." });
+    }
+
+    if (application.candidateStatus === "retenue") {
+      return res.status(400).json({
+        msg: "Vous avez une offre d'embauche en attente. Veuillez la décliner avant de retirer votre candidature.",
+        code: "HAS_PENDING_HIRE_OFFER",
+        applicationId: application._id,
+      });
     }
 
     application.candidateStatus = "retiree";
@@ -234,20 +283,61 @@ export const withdrawApplication = async (req, res) => {
 
     await application.save();
 
-    // Annuler les entretiens futurs
     await Interview.updateMany(
-      { applicationId, status: { $in: ["proposed", "confirmed"] } },
-      { status: "cancelled_by_candidate" },
+      {
+        applicationId,
+        status: {
+          $in: [
+            "proposed",
+            "confirmed",
+            "rescheduled_by_candidate",
+            "rescheduled_by_recruiter",
+          ],
+        },
+      },
+      {
+        status: "cancelled_by_candidate",
+        cancellationReason: "Candidature retirée",
+        cancelledBy: "candidate",
+        cancelledAt: new Date(),
+      },
     );
 
-    // OPTIONNEL : Décrémenter le compteur si vous voulez afficher seulement les candidats "Actifs"
-    // Si vous voulez garder le nombre total de reçus, ne mettez pas ce bloc.
-    // Je recommande de décrémenter pour que le recruteur voie le nombre de candidats "à traiter".
-    await Offer.findByIdAndUpdate(application.offerId, {
-      $inc: { nombreCandidatures: -1 },
-    });
+    const conversation = await Conversation.findOne({ applicationId });
+    if (conversation && !conversation.isClosed) {
+      conversation.messages.push({
+        senderId: req.user.id,
+        senderType: "system",
+        content: "Le candidat a retiré sa candidature.",
+        messageType: "system",
+      });
+      conversation.isClosed = true;
+      conversation.closedReason = "application_closed";
+      conversation.unreadByRecruiter += 1;
+      conversation.lastMessageAt = new Date();
+      await conversation.save();
 
-    // Notifier le recruteur
+      // ── BUG 3 FIX: Émettre les événements Socket.IO ──
+      try {
+        const { emitConversationClosed, emitNewMessage } =
+          await import("../services/socketEvents.js");
+        const lastMsg = conversation.messages[conversation.messages.length - 1];
+        emitNewMessage(conversation._id.toString(), lastMsg);
+        emitConversationClosed(conversation._id.toString(), {
+          isClosed: true,
+          closedBy: "candidate",
+          reason: "application_withdrawn",
+        });
+      } catch (socketErr) {
+        console.error("Socket emit failed (non-blocking):", socketErr.message);
+      }
+    }
+
+    await Offer.findOneAndUpdate(
+      { _id: application.offerId, nombreCandidatures: { $gt: 0 } },
+      { $inc: { nombreCandidatures: -1 } },
+    );
+
     const offer = await Offer.findById(application.offerId).populate(
       "recruteurId",
     );
@@ -266,51 +356,81 @@ export const withdrawApplication = async (req, res) => {
 };
 
 export const cancelApplication = async (req, res) => {
+  const mongoose = (await import("mongoose")).default;
+  const session = await mongoose.startSession();
+
   try {
     const candidate = await Candidate.findOne({ userId: req.user.id });
     const { applicationId } = req.params;
 
-    const application = await Application.findOne({
-      _id: applicationId,
-      candidateId: candidate._id,
-    });
+    await session.withTransaction(async () => {
+      const application = await Application.findOneAndUpdate(
+        {
+          _id: applicationId,
+          candidateId: candidate._id,
+          candidateStatus: "envoyee",
+          seenByRecruiter: false,
+          recruiterStatus: "nouvelle",
+        },
+        {
+          $set: {
+            candidateStatus: "cancelled",
+            recruiterStatus: "annulee_par_candidat",
+          },
+          $push: {
+            statusHistory: {
+              candidateStatus: "cancelled",
+              recruiterStatus: "annulee_par_candidat",
+              changedBy: req.user.id,
+              changedAt: new Date(),
+              note: "Annulation par le candidat (avant lecture)",
+            },
+          },
+        },
+        { new: true, session },
+      );
 
-    if (!application)
-      return res.status(404).json({ msg: "Candidature introuvable" });
+      if (!application) {
+        const existing = await Application.findOne({
+          _id: applicationId,
+          candidateId: candidate._id,
+        }).session(session);
 
-    // Sécurité : On ne peut annuler que si c'est "envoyee" et "pas vue"
-    if (
-      application.candidateStatus !== "envoyee" ||
-      application.seenByRecruiter
-    ) {
-      return res.status(403).json({
-        msg: "Trop tard pour annuler. Utilisez l'option 'Retirer' si disponible.",
-      });
-    }
+        if (!existing) {
+          throw { status: 404, msg: "Candidature introuvable" };
+        }
 
-    application.candidateStatus = "cancelled";
-    application.recruiterStatus = "annulee_par_candidat"; // Nécessite la modif du Model
+        if (existing.seenByRecruiter) {
+          throw {
+            status: 403,
+            msg: "Trop tard pour annuler. Le recruteur a déjà consulté votre candidature. Utilisez l'option 'Retirer' si disponible.",
+          };
+        }
 
-    application.statusHistory.push({
-      candidateStatus: "cancelled",
-      recruiterStatus: "annulee_par_candidat",
-      changedBy: req.user.id,
-      note: "Annulation par le candidat (avant lecture)",
-    });
+        throw {
+          status: 400,
+          msg: "Impossible d'annuler cette candidature dans son état actuel.",
+        };
+      }
 
-    await application.save();
-
-    // Décrémenter le compteur de l'offre
-    await Offer.findByIdAndUpdate(application.offerId, {
-      $inc: { nombreCandidatures: -1 },
+      await Offer.findOneAndUpdate(
+        { _id: application.offerId, nombreCandidatures: { $gt: 0 } },
+        { $inc: { nombreCandidatures: -1 } },
+        { session },
+      );
     });
 
     res.json({ msg: "Candidature annulée." });
   } catch (err) {
+    if (err.status) {
+      return res.status(err.status).json({ msg: err.msg });
+    }
     res.status(500).json({ msg: err.message });
+  } finally {
+    await session.endSession();
   }
 };
-// === NOUVELLE FONCTION CRUCIALE POUR LE FRONTEND ===
+
 export const checkApplicationStatus = async (req, res) => {
   try {
     const candidate = await Candidate.findOne({ userId: req.user.id });
@@ -321,29 +441,26 @@ export const checkApplicationStatus = async (req, res) => {
     const application = await Application.findOne({
       offerId: offerId,
       candidateId: candidate._id,
-    }).populate("offerId", "allowRepostulation"); // On vérifie si l'offre autorise la repostulation
+    }).populate("offerId", "allowRepostulation");
 
-    // Cas 1 : Aucune candidature n'existe
     if (!application) {
       return res.json({
         hasApplied: false,
         status: null,
         canCancel: false,
         canWithdraw: false,
-        canRepostulate: false, // Bouton sera "Postuler"
-        action: "apply", // Indication pour le frontend
+        canRepostulate: false,
+        action: "apply",
       });
     }
 
     const { candidateStatus, seenByRecruiter, recruiterStatus } = application;
 
-    // Logique basée sur ton flow
     let canCancel = false;
     let canWithdraw = false;
     let canRepostulate = false;
-    let action = "none"; // apply, cancel, withdraw, repostulate, disabled
+    let action = "none";
 
-    // 1. Bouton "Annuler"
     if (
       candidateStatus === "envoyee" &&
       !seenByRecruiter &&
@@ -353,8 +470,6 @@ export const checkApplicationStatus = async (req, res) => {
       action = "cancel";
     }
 
-    // 2. Bouton "Retirer"
-    // Disponible si en cours, ou si envoyée mais déjà vue par le recruteur
     const isEnCours =
       ["en_cours"].includes(candidateStatus) ||
       (candidateStatus === "envoyee" && seenByRecruiter);
@@ -363,19 +478,17 @@ export const checkApplicationStatus = async (req, res) => {
       action = "withdraw";
     }
 
-    // 3. Bouton "Repostuler"
-    // Si annulée (cancelled) OU retirée (retiree) ET que l'offre le permet
     if (["retiree", "cancelled"].includes(candidateStatus)) {
-      if (application.offerId.allowRepostulation !== false) {
-        // Par défaut true
+      const allowRepost = application.offerId?.allowRepostulation;
+
+      if (allowRepost !== false) {
         canRepostulate = true;
-        action = candidateStatus === "cancelled" ? "apply" : "repostulate"; // Si cancelled, on affiche "Postuler", si retirée "Repostuler"
+        action = candidateStatus === "cancelled" ? "apply" : "repostulate";
       } else {
-        action = "disabled"; // Repostulation interdite
+        action = "disabled";
       }
     }
 
-    // 4. Statuts finaux (Retenue / Non retenue)
     if (["retenue", "non_retenue"].includes(candidateStatus)) {
       action = "finished";
     }
@@ -389,7 +502,7 @@ export const checkApplicationStatus = async (req, res) => {
       canCancel,
       canWithdraw,
       canRepostulate,
-      action, // Le frontend peut juste regarder ce champ pour savoir quel bouton afficher
+      action,
       allowRepostulation: application.offerId.allowRepostulation,
     });
   } catch (err) {

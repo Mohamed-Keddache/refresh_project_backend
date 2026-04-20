@@ -88,6 +88,28 @@ systemSettingsSchema.statics.initializeDefaults = async function () {
         "Mode de vérification email: 'smtp' pour production, 'development' pour code statique 123456",
       category: "email",
     },
+    // ── V2: ANEM Offer Pipeline Settings ──
+    {
+      key: "anem_offer_auto_cleanup_enabled",
+      value: false,
+      description:
+        "Active la suppression automatique des offres ANEM en échec après X jours",
+      category: "general",
+    },
+    {
+      key: "anem_offer_auto_cleanup_days",
+      value: 90,
+      description:
+        "Nombre de jours avant suppression automatique des offres ANEM en échec",
+      category: "general",
+    },
+    {
+      key: "anem_offer_cooldown_days",
+      value: 21,
+      description:
+        "Nombre de jours de cooldown après dépôt ANEM réussi (défaut légal: 21 jours)",
+      category: "general",
+    },
     {
       key: "storage_mode",
       value: "cloudinary", //"local_storage"

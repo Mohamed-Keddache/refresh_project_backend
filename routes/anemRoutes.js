@@ -1,10 +1,9 @@
-// === routes/anemRoutes.js ===
 import express from "express";
 import auth from "../middleware/auth.js";
 import { authRole } from "../middleware/roles.js";
 import Admin from "../models/Admin.js";
 
-// Recruiter controllers
+// ── Recruiter ANEM Registration (kept from V1) ──
 import {
   getAnemStatus,
   checkAnemModalRequired,
@@ -18,7 +17,7 @@ import {
   getRegistrationForm,
 } from "../controllers/anemController.js";
 
-// Admin controllers
+// ── Admin ANEM Registration Management (kept from V1) ──
 import {
   getAnemDemandes,
   getDemandeDetails,
@@ -37,22 +36,37 @@ import {
   getAdminsForAssignment,
 } from "../controllers/anemController.js";
 
-// ANEM Offer controllers
+// ── V2: ANEM Offer Pipeline ──
 import {
+  // Recruiter
   checkAnemEligibility,
-  enableAnemForOffer,
-  disableAnemForOffer,
-  getOfferAnemStatus,
   getRecruiterAnemOffers,
+  getOfferAnemStatus,
+  recruiterPublishDirect,
+  recruiterSubmitClassic,
+  recruiterDeleteAnemOffer,
+  // Admin
+  getAdminAnemOffers,
+  getAnemOfferPdfData,
+  bulkGetAnemOfferPdfData,
+  markAsDepositing,
+  markDownloadedAsDepositing,
+  markDepositSuccess,
+  markDepositFailed,
+  addAnemOfferNote,
+  getAnemOfferDetails,
+  getDeletedAnemOffers,
+  hardDeleteAnemOffers,
+  getAnemOfferStats,
+  toggleAutoCleanup,
 } from "../controllers/anemOfferController.js";
 
 const router = express.Router();
 
-// ============================================
-// RECRUITER ROUTES
-// ============================================
+// ════════════════════════════════════════════════════════════════
+//  RECRUITER: ANEM REGISTRATION (unchanged from V1)
+// ════════════════════════════════════════════════════════════════
 
-// Status and sidebar
 router.get("/status", auth, authRole(["recruteur"]), getAnemStatus);
 router.get(
   "/check-modal",
@@ -64,10 +78,8 @@ router.post("/modal-seen", auth, authRole(["recruteur"]), markAnemModalSeen);
 router.post("/decline", auth, authRole(["recruteur"]), declineAnem);
 router.post("/reset-decline", auth, authRole(["recruteur"]), resetAnemDecline);
 
-// Self-declared ID submission
 router.post("/submit-id", auth, authRole(["recruteur"]), submitAnemId);
 
-// Site registration form
 router.post(
   "/start-registration",
   auth,
@@ -88,7 +100,10 @@ router.get(
   getRegistrationForm,
 );
 
-// Offer ANEM management
+// ════════════════════════════════════════════════════════════════
+//  RECRUITER: ANEM OFFER V2 PIPELINE
+// ════════════════════════════════════════════════════════════════
+
 router.get(
   "/offer-eligibility",
   auth,
@@ -102,22 +117,30 @@ router.get(
   authRole(["recruteur"]),
   getOfferAnemStatus,
 );
+
+// V2: Recruiter actions on failed ANEM offers
 router.post(
-  "/offers/:offerId/enable",
+  "/offers/:offerId/publish-direct",
   auth,
   authRole(["recruteur"]),
-  enableAnemForOffer,
+  recruiterPublishDirect,
 );
 router.post(
-  "/offers/:offerId/disable",
+  "/offers/:offerId/submit-classic",
   auth,
   authRole(["recruteur"]),
-  disableAnemForOffer,
+  recruiterSubmitClassic,
+);
+router.post(
+  "/offers/:offerId/delete",
+  auth,
+  authRole(["recruteur"]),
+  recruiterDeleteAnemOffer,
 );
 
-// ============================================
-// ADMIN ROUTES better to create a middleware import { requireAnemPermission } from "../middleware/anemPermissions.js"; but lets keep things like this.
-// ============================================
+// ════════════════════════════════════════════════════════════════
+//  ADMIN: ANEM REGISTRATION MANAGEMENT (unchanged from V1)
+// ════════════════════════════════════════════════════════════════
 
 const requireAnemPermission = async (req, res, next) => {
   try {
@@ -131,7 +154,6 @@ const requireAnemPermission = async (req, res, next) => {
       return res.status(403).json({ msg: "Compte admin suspendu" });
     }
 
-    // Check for relevant permissions
     const hasPermission =
       admin.label === "super_admin" ||
       admin.permissions.validateRecruiters ||
@@ -151,7 +173,7 @@ const requireAnemPermission = async (req, res, next) => {
   }
 };
 
-// Dashboard and stats
+// Registration stats
 router.get(
   "/admin/stats",
   auth,
@@ -168,7 +190,6 @@ router.get(
   getNewDemandesCount,
 );
 
-// Demande listing and details
 router.get(
   "/admin/demandes",
   auth,
@@ -185,7 +206,6 @@ router.get(
   getDemandeDetails,
 );
 
-// Pending IDs list (separate view)
 router.get(
   "/admin/pending-ids",
   auth,
@@ -194,7 +214,6 @@ router.get(
   getPendingAnemIds,
 );
 
-// Assignment
 router.get(
   "/admin/admins-for-assignment",
   auth,
@@ -211,7 +230,6 @@ router.post(
   assignDemande,
 );
 
-// Status management
 router.post(
   "/admin/demandes/:demandeId/in-progress",
   auth,
@@ -220,7 +238,6 @@ router.post(
   markInProgress,
 );
 
-// PDF
 router.get(
   "/admin/demandes/:demandeId/pdf-data",
   auth,
@@ -229,7 +246,6 @@ router.get(
   getPdfData,
 );
 
-// Approval/Rejection of self-declared IDs
 router.post(
   "/admin/demandes/:demandeId/approve-id",
   auth,
@@ -246,7 +262,6 @@ router.post(
   rejectAnemId,
 );
 
-// Site registration completion
 router.post(
   "/admin/demandes/:demandeId/register",
   auth,
@@ -263,7 +278,6 @@ router.post(
   markFailed,
 );
 
-// Notes
 router.post(
   "/admin/demandes/:demandeId/note",
   auth,
@@ -272,13 +286,132 @@ router.post(
   addAdminNote,
 );
 
-// Bulk operations
 router.post(
   "/admin/demandes/bulk-update",
   auth,
   authRole(["admin"]),
   requireAnemPermission,
   bulkUpdateStatus,
+);
+
+// ════════════════════════════════════════════════════════════════
+//  ADMIN: ANEM OFFER V2 PIPELINE MANAGEMENT
+// ════════════════════════════════════════════════════════════════
+
+// Dashboard & Stats
+router.get(
+  "/admin/offers/stats",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  getAnemOfferStats,
+);
+
+// List & Filter (with advanced filters)
+router.get(
+  "/admin/offers",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  getAdminAnemOffers,
+);
+
+// Deleted offers view (soft-deleted by recruiter)
+router.get(
+  "/admin/offers/deleted",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  getDeletedAnemOffers,
+);
+
+// Single offer details
+router.get(
+  "/admin/offers/:anemOfferId/details",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  getAnemOfferDetails,
+);
+
+// PDF operations
+router.get(
+  "/admin/offers/:anemOfferId/pdf-data",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  getAnemOfferPdfData,
+);
+
+router.post(
+  "/admin/offers/bulk-pdf-data",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  bulkGetAnemOfferPdfData,
+);
+
+// Mark as depositing (bulk)
+router.post(
+  "/admin/offers/mark-depositing",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  markAsDepositing,
+);
+
+// Shortcut: mark all PDF-downloaded offers as depositing
+router.post(
+  "/admin/offers/mark-downloaded-depositing",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  markDownloadedAsDepositing,
+);
+
+// Deposit result: success (starts cooldown)
+router.post(
+  "/admin/offers/:anemOfferId/deposit-success",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  markDepositSuccess,
+);
+
+// Deposit result: failure (with option B1/B2)
+router.post(
+  "/admin/offers/:anemOfferId/deposit-failed",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  markDepositFailed,
+);
+
+// Admin notes
+router.post(
+  "/admin/offers/:anemOfferId/note",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  addAnemOfferNote,
+);
+
+// Hard delete (permanent removal)
+router.post(
+  "/admin/offers/hard-delete",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  hardDeleteAnemOffers,
+);
+
+// Auto-cleanup settings
+router.post(
+  "/admin/offers/auto-cleanup",
+  auth,
+  authRole(["admin"]),
+  requireAnemPermission,
+  toggleAutoCleanup,
 );
 
 export default router;

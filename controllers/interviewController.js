@@ -1,4 +1,3 @@
-// controllers/interviewController.js
 import Interview from "../models/Interview.js";
 import Application from "../models/Application.js";
 import Offer from "../models/Offer.js";
@@ -7,95 +6,6 @@ import Recruiter from "../models/Recruiter.js";
 import Notification from "../models/Notification.js";
 import { mapRecruiterToCandidate } from "../utils/statusMapping.js";
 
-// === RECRUTEUR ===
-
-// Proposer un entretien
-export const proposeInterview = async (req, res) => {
-  try {
-    const recruiter = await Recruiter.findOne({ userId: req.user.id });
-    const { applicationId } = req.params;
-    const {
-      type,
-      scheduledAt,
-      duration,
-      location,
-      meetingLink,
-      phoneNumber,
-      preparationNotes,
-    } = req.body;
-
-    const application =
-      await Application.findById(applicationId).populate("offerId");
-
-    if (!application) {
-      return res.status(404).json({ msg: "Candidature introuvable" });
-    }
-
-    if (
-      application.offerId.recruteurId.toString() !== recruiter._id.toString()
-    ) {
-      return res.status(403).json({ msg: "Non autorisé" });
-    }
-
-    // Vérifier que le statut permet un entretien
-    const allowedStatuses = [
-      "consultee",
-      "preselection",
-      "en_discussion",
-      "entretien_termine",
-    ];
-    if (!allowedStatuses.includes(application.recruiterStatus)) {
-      return res.status(400).json({
-        msg: "Cette candidature ne peut pas recevoir d'entretien dans son état actuel",
-      });
-    }
-
-    const interview = await Interview.create({
-      applicationId,
-      offerId: application.offerId._id,
-      candidateId: application.candidateId,
-      recruiterId: recruiter._id,
-      type,
-      scheduledAt: new Date(scheduledAt),
-      duration: duration || 30,
-      location,
-      meetingLink,
-      phoneNumber,
-      preparationNotes,
-      status: "proposed",
-    });
-
-    // Mettre à jour le statut de l'application
-    if (application.recruiterStatus !== "entretien_planifie") {
-      application.recruiterStatus = "entretien_planifie";
-      application.candidateStatus =
-        mapRecruiterToCandidate("entretien_planifie");
-      application.statusHistory.push({
-        candidateStatus: application.candidateStatus,
-        recruiterStatus: "entretien_planifie",
-        changedBy: req.user.id,
-        note: "Entretien proposé",
-      });
-      await application.save();
-    }
-
-    // Notifier le candidat
-    const candidate = await Candidate.findById(application.candidateId);
-    await Notification.create({
-      userId: candidate.userId,
-      message: `Un entretien vous est proposé pour "${
-        application.offerId.titre
-      }" le ${new Date(scheduledAt).toLocaleDateString("fr-FR")}`,
-      type: "validation",
-    });
-
-    res.status(201).json({ msg: "Entretien proposé", interview });
-  } catch (err) {
-    res.status(500).json({ msg: err.message });
-  }
-};
-
-// Liste des entretiens du recruteur
 export const getRecruiterInterviews = async (req, res) => {
   try {
     const recruiter = await Recruiter.findOne({ userId: req.user.id });
@@ -131,7 +41,6 @@ export const getRecruiterInterviews = async (req, res) => {
       Interview.countDocuments(query),
     ]);
 
-    // Ajouter indicateurs
     const enriched = interviews.map((i) => ({
       ...i,
       needsAction: i.status === "rescheduled_by_candidate",
@@ -156,7 +65,7 @@ export const getRecruiterInterviews = async (req, res) => {
 export const getRecruiterInterviewsGrouped = async (req, res) => {
   try {
     const recruiter = await Recruiter.findOne({ userId: req.user.id });
-    const { view = "upcoming" } = req.query; // 'upcoming', 'recent', 'all'
+    const { view = "upcoming" } = req.query;
 
     const now = new Date();
     const sevenDaysAgo = new Date(now - 7 * 24 * 60 * 60 * 1000);
@@ -187,7 +96,6 @@ export const getRecruiterInterviewsGrouped = async (req, res) => {
       .populate("offerId", "titre")
       .lean();
 
-    // Grouper par date pour l'affichage
     const grouped = interviews.reduce((acc, interview) => {
       const dateKey = new Date(interview.scheduledAt)
         .toISOString()
@@ -225,220 +133,6 @@ export const getRecruiterInterviewsGrouped = async (req, res) => {
   }
 };
 
-// Accepter la proposition alternative du candidat
-export const acceptAlternativeDate = async (req, res) => {
-  try {
-    const recruiter = await Recruiter.findOne({ userId: req.user.id });
-    const { interviewId } = req.params;
-
-    const interview = await Interview.findOne({
-      _id: interviewId,
-      recruiterId: recruiter._id,
-      status: "rescheduled_by_candidate",
-    });
-
-    if (!interview) {
-      return res
-        .status(404)
-        .json({ msg: "Entretien introuvable ou pas de proposition" });
-    }
-
-    interview.scheduledAt = interview.proposedAlternative.date;
-    interview.status = "confirmed";
-    interview.proposedAlternative = undefined;
-    await interview.save();
-
-    // Notifier
-    const candidate = await Candidate.findById(interview.candidateId);
-    await Notification.create({
-      userId: candidate.userId,
-      message: `Votre nouvelle date d'entretien a été confirmée`,
-      type: "validation",
-    });
-
-    res.json({ msg: "Nouvelle date acceptée", interview });
-  } catch (err) {
-    res.status(500).json({ msg: err.message });
-  }
-};
-
-// Proposer une autre date (recruteur)
-export const rescheduleByRecruiter = async (req, res) => {
-  try {
-    const recruiter = await Recruiter.findOne({ userId: req.user.id });
-    const { interviewId } = req.params;
-    const { newDate, message } = req.body;
-
-    const interview = await Interview.findOne({
-      _id: interviewId,
-      recruiterId: recruiter._id,
-    });
-
-    if (!interview) {
-      return res.status(404).json({ msg: "Entretien introuvable" });
-    }
-
-    interview.scheduledAt = new Date(newDate);
-    interview.status = "rescheduled_by_recruiter";
-    interview.proposedAlternative = {
-      date: new Date(newDate),
-      proposedBy: "recruiter",
-      message,
-      proposedAt: new Date(),
-    };
-    await interview.save();
-
-    const candidate = await Candidate.findById(interview.candidateId);
-    await Notification.create({
-      userId: candidate.userId,
-      message: `L'entretien a été reprogrammé, veuillez confirmer la nouvelle date`,
-      type: "validation",
-    });
-
-    res.json({ msg: "Entretien reprogrammé", interview });
-  } catch (err) {
-    res.status(500).json({ msg: err.message });
-  }
-};
-
-// Annuler entretien (recruteur)
-export const cancelInterviewByRecruiter = async (req, res) => {
-  try {
-    const recruiter = await Recruiter.findOne({ userId: req.user.id });
-    const { interviewId } = req.params;
-    const { reason } = req.body;
-
-    const interview = await Interview.findOneAndUpdate(
-      {
-        _id: interviewId,
-        recruiterId: recruiter._id,
-        status: {
-          $in: [
-            "proposed",
-            "confirmed",
-            "rescheduled_by_candidate",
-            "rescheduled_by_recruiter",
-          ],
-        },
-      },
-      {
-        status: "cancelled_by_recruiter",
-        recruiterNotes: reason,
-      },
-      { new: true },
-    );
-
-    if (!interview) {
-      return res
-        .status(404)
-        .json({ msg: "Entretien introuvable ou déjà terminé" });
-    }
-
-    const candidate = await Candidate.findById(interview.candidateId);
-    await Notification.create({
-      userId: candidate.userId,
-      message: `L'entretien prévu a été annulé par le recruteur`,
-      type: "info",
-    });
-
-    res.json({ msg: "Entretien annulé", interview });
-  } catch (err) {
-    res.status(500).json({ msg: err.message });
-  }
-};
-
-// Marquer comme terminé + feedback
-export const completeInterview = async (req, res) => {
-  try {
-    const recruiter = await Recruiter.findOne({ userId: req.user.id });
-    const { interviewId } = req.params;
-
-    const { rating, notes, strengths, concerns, recommendation, status } =
-      req.body;
-
-    const interview = await Interview.findOne({
-      _id: interviewId,
-      recruiterId: recruiter._id,
-    });
-
-    if (!interview) {
-      return res.status(404).json({ msg: "Entretien introuvable" });
-    }
-
-    interview.status = "completed";
-    interview.feedback = {
-      rating,
-      notes,
-      strengths,
-      concerns,
-      recommendation,
-      completedAt: new Date(),
-    };
-
-    await interview.save();
-
-    if (status === "retenue" || status === "refusee") {
-      const application = await Application.findById(interview.applicationId);
-
-      application.recruiterStatus = status;
-
-      if (status === "retenue") {
-        application.candidateStatus = "retenue";
-        application.dateDecision = new Date();
-      } else {
-        application.candidateStatus = "non_retenue";
-        application.dateDecision = new Date();
-      }
-
-      application.statusHistory.push({
-        candidateStatus: application.candidateStatus,
-        recruiterStatus: status,
-        changedBy: req.user.id,
-        note: `Décision finale après entretien: ${recommendation}`,
-      });
-
-      await application.save();
-    } else {
-      const pendingInterviews = await Interview.countDocuments({
-        applicationId: interview.applicationId,
-        status: { $in: ["proposed", "confirmed"] },
-      });
-
-      if (pendingInterviews === 0) {
-        const application = await Application.findById(interview.applicationId);
-
-        if (
-          application.recruiterStatus !== "retenue" &&
-          application.recruiterStatus !== "refusee"
-        ) {
-          application.recruiterStatus = "entretien_termine";
-          application.candidateStatus =
-            mapRecruiterToCandidate("entretien_termine");
-
-          application.statusHistory.push({
-            candidateStatus: application.candidateStatus,
-            recruiterStatus: "entretien_termine",
-            changedBy: req.user.id,
-            note: "Tous les entretiens terminés",
-          });
-
-          await application.save();
-        }
-      }
-    }
-
-    res.json({
-      msg: "Entretien terminé et décision enregistrée",
-      interview,
-    });
-  } catch (err) {
-    res.status(500).json({ msg: err.message });
-  }
-};
-
-// === CANDIDAT ===
-
-// Mes entretiens
 export const getCandidateInterviews = async (req, res) => {
   try {
     const candidate = await Candidate.findOne({ userId: req.user.id });
@@ -448,7 +142,6 @@ export const getCandidateInterviews = async (req, res) => {
 
     if (upcoming === "true") {
       query.scheduledAt = { $gte: new Date() };
-      // Don't show cancelled ones in the "Upcoming" tab
       query.status = {
         $nin: [
           "cancelled_by_candidate",
@@ -481,12 +174,10 @@ export const getCandidateInterviews = async (req, res) => {
       preparationNotes: i.preparationNotes,
       proposedAlternative: i.proposedAlternative,
 
-      // Context info
       offerTitle: i.offerId?.titre,
       companyName: i.offerId?.companyId?.name,
       companyLogo: i.offerId?.companyId?.logo,
 
-      // Logic helpers for Frontend
       needsResponse: ["proposed", "rescheduled_by_recruiter"].includes(
         i.status,
       ),
@@ -500,112 +191,167 @@ export const getCandidateInterviews = async (req, res) => {
   }
 };
 
-// Accepter entretien
-export const acceptInterview = async (req, res) => {
+// ====================================================================
+// FIX #12: New endpoint — Get interview details by ID (for candidate)
+// ====================================================================
+export const getCandidateInterviewById = async (req, res) => {
   try {
     const candidate = await Candidate.findOne({ userId: req.user.id });
-    const { interviewId } = req.params;
-
-    const interview = await Interview.findOneAndUpdate(
-      {
-        _id: interviewId,
-        candidateId: candidate._id,
-        status: { $in: ["proposed", "rescheduled_by_recruiter"] },
-      },
-      { status: "confirmed" },
-      { new: true },
-    );
-
-    if (!interview) {
-      return res
-        .status(404)
-        .json({ msg: "Entretien introuvable ou déjà traité" });
+    if (!candidate) {
+      return res.status(404).json({ msg: "Profil candidat introuvable" });
     }
 
-    // Notifier recruteur
-    const recruiter = await Recruiter.findById(interview.recruiterId);
-    await Notification.create({
-      userId: recruiter.userId,
-      message: `Le candidat a confirmé l'entretien`,
-      type: "validation",
-    });
-
-    res.json({ msg: "Entretien confirmé", interview });
-  } catch (err) {
-    res.status(500).json({ msg: err.message });
-  }
-};
-
-// Refuser entretien
-export const declineInterview = async (req, res) => {
-  try {
-    const candidate = await Candidate.findOne({ userId: req.user.id });
     const { interviewId } = req.params;
-    const { reason } = req.body;
-
-    const interview = await Interview.findOneAndUpdate(
-      {
-        _id: interviewId,
-        candidateId: candidate._id,
-        status: { $in: ["proposed", "rescheduled_by_recruiter"] },
-      },
-      { status: "cancelled_by_candidate" },
-      { new: true },
-    );
-
-    if (!interview) {
-      return res.status(404).json({ msg: "Entretien introuvable" });
-    }
-
-    const recruiter = await Recruiter.findById(interview.recruiterId);
-    await Notification.create({
-      userId: recruiter.userId,
-      message: `Le candidat a décliné l'entretien${
-        reason ? `: ${reason}` : ""
-      }`,
-      type: "info",
-    });
-
-    res.json({ msg: "Entretien décliné", interview });
-  } catch (err) {
-    res.status(500).json({ msg: err.message });
-  }
-};
-
-// Proposer nouvelle date (candidat)
-export const proposeAlternativeDate = async (req, res) => {
-  try {
-    const candidate = await Candidate.findOne({ userId: req.user.id });
-    const { interviewId } = req.params;
-    const { newDate, message } = req.body;
 
     const interview = await Interview.findOne({
       _id: interviewId,
       candidateId: candidate._id,
-      status: { $in: ["proposed", "rescheduled_by_recruiter"] },
-    });
+    })
+      .populate("offerId", "titre companyId type wilaya")
+      .populate({
+        path: "offerId",
+        populate: { path: "companyId", select: "name logo location" },
+      })
+      .lean();
 
     if (!interview) {
       return res.status(404).json({ msg: "Entretien introuvable" });
     }
 
-    interview.status = "rescheduled_by_candidate";
-    interview.proposedAlternative = {
-      date: new Date(newDate),
-      proposedBy: "candidate",
-      message,
-      proposedAt: new Date(),
-    };
-    await interview.save();
+    res.json({
+      _id: interview._id,
+      interviewNumber: interview.interviewNumber,
+      type: interview.type,
+      scheduledAt: interview.scheduledAt,
+      duration: interview.duration,
+      location: interview.location,
+      meetingLink: interview.meetingLink,
+      phoneNumber: interview.phoneNumber,
+      schedulingMode: interview.schedulingMode,
+      proposedSlots: interview.proposedSlots,
+      chosenSlot: interview.chosenSlot,
+      preparationNotes: interview.preparationNotes,
+      status: interview.status,
+      proposedAlternative: interview.proposedAlternative,
+      declineReason: interview.declineReason,
+      cancellationReason: interview.cancellationReason,
+      cancelledBy: interview.cancelledBy,
 
-    const recruiter = await Recruiter.findById(interview.recruiterId);
-    await Notification.create({
-      userId: recruiter.userId,
-      message: `Le candidat propose une nouvelle date pour l'entretien`,
-      type: "validation",
+      offer: {
+        _id: interview.offerId?._id,
+        titre: interview.offerId?.titre,
+        type: interview.offerId?.type,
+        wilaya: interview.offerId?.wilaya,
+        company: {
+          name: interview.offerId?.companyId?.name,
+          logo: interview.offerId?.companyId?.logo,
+          location: interview.offerId?.companyId?.location,
+        },
+      },
+
+      needsResponse: ["proposed", "rescheduled_by_recruiter"].includes(
+        interview.status,
+      ),
+      canAccept: ["proposed", "rescheduled_by_recruiter"].includes(
+        interview.status,
+      ),
+      canCounter: ["proposed", "rescheduled_by_recruiter"].includes(
+        interview.status,
+      ),
+      canCancel: ["proposed", "confirmed", "rescheduled_by_recruiter"].includes(
+        interview.status,
+      ),
+
+      createdAt: interview.createdAt,
+      updatedAt: interview.updatedAt,
     });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
 
-    res.json({ msg: "Proposition envoyée", interview });
+// FIX #12: New endpoint — Get interview details by ID (for recruiter)
+export const getRecruiterInterviewById = async (req, res) => {
+  try {
+    const recruiter = await Recruiter.findOne({ userId: req.user.id });
+    if (!recruiter) {
+      return res.status(404).json({ msg: "Profil recruteur introuvable" });
+    }
+
+    const { interviewId } = req.params;
+
+    const interview = await Interview.findOne({
+      _id: interviewId,
+      recruiterId: recruiter._id,
+    })
+      .populate({
+        path: "candidateId",
+        select: "profilePicture userId telephone",
+        populate: { path: "userId", select: "nom email" },
+      })
+      .populate("offerId", "titre companyId type")
+      .lean();
+
+    if (!interview) {
+      return res.status(404).json({ msg: "Entretien introuvable" });
+    }
+
+    res.json({
+      _id: interview._id,
+      interviewNumber: interview.interviewNumber,
+      type: interview.type,
+      scheduledAt: interview.scheduledAt,
+      duration: interview.duration,
+      location: interview.location,
+      meetingLink: interview.meetingLink,
+      phoneNumber: interview.phoneNumber,
+      schedulingMode: interview.schedulingMode,
+      proposedSlots: interview.proposedSlots,
+      chosenSlot: interview.chosenSlot,
+      preparationNotes: interview.preparationNotes,
+      status: interview.status,
+      proposedAlternative: interview.proposedAlternative,
+      cancellationReason: interview.cancellationReason,
+      cancelledBy: interview.cancelledBy,
+      declineReason: interview.declineReason,
+      recruiterNotes: interview.recruiterNotes,
+
+      // Feedback (only for recruiter)
+      feedback: interview.feedback,
+
+      candidate: {
+        _id: interview.candidateId?._id,
+        nom: interview.candidateId?.userId?.nom,
+        email: interview.candidateId?.userId?.email,
+        profilePicture: interview.candidateId?.profilePicture,
+        telephone: interview.candidateId?.telephone,
+      },
+
+      offer: {
+        _id: interview.offerId?._id,
+        titre: interview.offerId?.titre,
+        type: interview.offerId?.type,
+      },
+
+      needsAction: interview.status === "rescheduled_by_candidate",
+      isFeedbackDue:
+        interview.status === "pending_feedback" ||
+        (interview.status === "confirmed" &&
+          interview.scheduledAt &&
+          new Date(interview.scheduledAt) < new Date()),
+      isToday:
+        interview.scheduledAt &&
+        new Date(interview.scheduledAt).toDateString() ===
+          new Date().toDateString(),
+      isPast:
+        interview.scheduledAt && new Date(interview.scheduledAt) < new Date(),
+
+      applicationId: interview.applicationId,
+      conversationId: interview.conversationId,
+
+      createdAt: interview.createdAt,
+      updatedAt: interview.updatedAt,
+    });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }

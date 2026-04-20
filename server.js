@@ -1,5 +1,6 @@
-import "dotenv/config"; // Replaced dotenv.config() with the import version to handle ES Module hoisting
+import "dotenv/config";
 import express from "express";
+import http from "http"; // ← NEW
 import cors from "cors";
 import morgan from "morgan";
 import passport from "passport";
@@ -9,6 +10,7 @@ import { seedAdmin } from "./startup/seedAdmin.js";
 import { setupSecurity } from "./middleware/security.js";
 import SystemSettings from "./models/SystemSettings.js";
 import { verifySmtpConnection } from "./services/emailService.js";
+import { initializeSocket } from "./config/socket.js"; // ← NEW
 
 import "./config/passport.js";
 
@@ -24,8 +26,14 @@ import recruiterRoutes from "./routes/recruiterRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
 import anemRoutes from "./routes/anemRoutes.js";
 import candidateAnemRoutes from "./routes/candidateAnemRoutes.js";
+import recruitmentRoutes from "./routes/recruitmentRoutes.js";
 
 const app = express();
+const server = http.createServer(app); // ← NEW: explicit HTTP server
+
+// Initialize Socket.IO ← NEW
+const io = initializeSocket(server);
+console.log("🔌 Socket.IO initialized");
 
 try {
   setupSecurity(app);
@@ -113,6 +121,7 @@ async function startServer() {
     app.use("/api/recruiters", recruiterRoutes);
     app.use("/api/admin", adminRoutes);
     app.use("/api/anem", anemRoutes);
+    app.use("/api/recruitment", recruitmentRoutes);
 
     app.get("/", (req, res) =>
       res.json({
@@ -127,6 +136,7 @@ async function startServer() {
         status: "healthy",
         uptime: process.uptime(),
         timestamp: new Date().toISOString(),
+        socketConnections: io.engine.clientsCount,
       }),
     );
 
@@ -152,6 +162,22 @@ async function startServer() {
           res.status(500).json({ error: err.message });
         }
       });
+
+      app.get("/debug/sockets", (req, res) => {
+        const sockets = [];
+        for (const [id, socket] of io.sockets.sockets) {
+          sockets.push({
+            id,
+            userId: socket.user?.id,
+            role: socket.user?.role,
+            rooms: [...socket.rooms],
+          });
+        }
+        res.json({
+          totalConnections: io.engine.clientsCount,
+          sockets,
+        });
+      });
     }
 
     app.use((req, res) => {
@@ -176,9 +202,12 @@ async function startServer() {
       });
     });
 
+    startScheduledTasks();
+
     const PORT = process.env.PORT || 5000;
-    app.listen(PORT, () => {
+    server.listen(PORT, () => {
       console.log(`🚀 Serveur lancé sur le port ${PORT}`);
+      console.log(`🔌 Socket.IO ready on same port`);
       console.log(`📊 Environnement: ${process.env.NODE_ENV || "development"}`);
     });
   } catch (error) {
@@ -188,6 +217,75 @@ async function startServer() {
 }
 
 startServer();
+
+function startScheduledTasks() {
+  console.log("⏰ Starting scheduled tasks...");
+
+  const runScheduledTasks = async () => {
+    try {
+      // 1. Trigger pending feedback
+      const { triggerPendingFeedback } =
+        await import("./controllers/recruitmentFlowController.js");
+      const feedbackCount = await triggerPendingFeedback();
+      if (feedbackCount > 0) {
+        console.log(
+          `⏰ triggerPendingFeedback: ${feedbackCount} interview(s) updated`,
+        );
+      }
+
+      // 2. Send reminders
+      const { sendInterviewReminders } =
+        await import("./controllers/recruitmentFlowController.js");
+      const reminderCount = await sendInterviewReminders();
+      if (reminderCount > 0) {
+        console.log(
+          `⏰ sendInterviewReminders: ${reminderCount} reminder(s) sent`,
+        );
+      }
+
+      // 3. Announcements
+      const { publishScheduledAnnouncements } =
+        await import("./controllers/announcementController.js");
+      await publishScheduledAnnouncements();
+
+      // ── V2: ANEM Offer Cooldown Processing ──
+      try {
+        const { processExpiredCooldowns } =
+          await import("./controllers/anemOfferController.js");
+        const publishedCount = await processExpiredCooldowns();
+        if (publishedCount > 0) {
+          console.log(
+            `⏰ ANEM Cooldown: ${publishedCount} offre(s) publiée(s) automatiquement`,
+          );
+        }
+      } catch (err) {
+        console.error("⏰ ANEM cooldown processing error:", err.message);
+      }
+
+      // ── V2: ANEM Offer Auto-Cleanup ──
+      try {
+        const { processAutoCleanup } =
+          await import("./controllers/anemOfferController.js");
+        const cleanedCount = await processAutoCleanup();
+        if (cleanedCount > 0) {
+          console.log(
+            `⏰ ANEM Cleanup: ${cleanedCount} offre(s) en échec supprimée(s)`,
+          );
+        }
+      } catch (err) {
+        console.error("⏰ ANEM auto-cleanup error:", err.message);
+      }
+    } catch (err) {
+      console.error("⏰ Scheduled task error:", err.message);
+    }
+  };
+
+  const INTERVAL_MS = 5 * 60 * 1000;
+  setInterval(runScheduledTasks, INTERVAL_MS);
+  setTimeout(runScheduledTasks, 10000);
+
+  console.log("⏰ Scheduled tasks registered (runs every 5 minutes)");
+}
 
 process.on("uncaughtException", (err) => {
   console.error("❌ Uncaught Exception:", err);

@@ -1,4 +1,3 @@
-// models/Application.js
 import mongoose from "mongoose";
 
 const applicationSchema = new mongoose.Schema(
@@ -14,7 +13,6 @@ const applicationSchema = new mongoose.Schema(
       required: true,
     },
 
-    // === ORIGINE ===
     source: {
       type: String,
       enum: ["direct", "admin_proposal"],
@@ -22,24 +20,27 @@ const applicationSchema = new mongoose.Schema(
     },
     proposedBy: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "User", // Admin qui a proposé
+      ref: "User",
     },
     proposedAt: Date,
 
-    // === STATUTS ===
+    // --- Candidate-facing status ---
     candidateStatus: {
       type: String,
       enum: [
         "envoyee",
         "en_cours",
+        "entretien",
         "retenue",
-        "non_retenue", // le candidat est refusé poliment
-        "retiree", // le candidat est accepter par le recruteur
+        "embauchee",
+        "non_retenue",
+        "retiree",
         "cancelled",
       ],
       default: "envoyee",
     },
 
+    // --- Recruiter-facing status ---
     recruiterStatus: {
       type: String,
       enum: [
@@ -49,21 +50,24 @@ const applicationSchema = new mongoose.Schema(
         "en_discussion",
         "entretien_planifie",
         "entretien_termine",
-        "retenue", //le recruteur a choisi le candidat (le recruteur a une liste dedié au candidat accepter)
-        "refusee", //le recruteur a refusé le candidat
+        "pending_feedback",
+        "shortlisted",
+        "retenue",
+        "embauche",
+        "offer_declined",
+        "refusee",
         "retiree_par_candidat",
         "annulee_par_candidat",
       ],
       default: "nouvelle",
     },
 
-    // === CV ET LETTRE ===
     cvUrl: { type: String, required: true },
     coverLetter: { type: String },
 
     isRepostulation: { type: Boolean, default: false },
+    repostulationCount: { type: Number, default: 0 },
 
-    // === SNAPSHOT OFFRE ===
     offerSnapshot: {
       titre: String,
       entrepriseNom: String,
@@ -76,24 +80,34 @@ const applicationSchema = new mongoose.Schema(
       domaine: String,
     },
 
-    // === NOTES INTERNES RECRUTEUR ===
     recruiterNotes: {
       type: String,
       maxLength: 2000,
     },
 
-    // === MARQUEURS ===
-    isStarred: { type: Boolean, default: false }, // Favori recruteur
+    // FIX #13: Rejection message visible to candidate
+    rejectionMessage: {
+      type: String,
+      maxLength: 2000,
+    },
+
+    isStarred: { type: Boolean, default: false },
     seenByRecruiter: { type: Boolean, default: false },
     seenAt: Date,
 
-    // === DATES CLÉS ===
     datePostulation: { type: Date, default: Date.now },
-    dateDecision: Date, // Date de la décision finale
-    withdrawnAt: Date, // Date de retrait par candidat
+    dateDecision: Date,
+    withdrawnAt: Date,
     withdrawReason: String,
 
-    // === HISTORIQUE ===
+    // Hire flow dates
+    hireOfferedAt: Date,
+    hireAcceptedAt: Date,
+    hireDeclinedAt: Date,
+    hireDeclineReason: String,
+    hireCancelledAt: Date,
+    hireCancelReason: String,
+
     statusHistory: [
       {
         candidateStatus: String,
@@ -110,13 +124,18 @@ const applicationSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-// Index composé unique
 applicationSchema.index({ offerId: 1, candidateId: 1 }, { unique: true });
-
-// Index pour les requêtes fréquentes
 applicationSchema.index({ offerId: 1, recruiterStatus: 1 });
 applicationSchema.index({ candidateId: 1, candidateStatus: 1 });
 applicationSchema.index({ offerId: 1, datePostulation: -1 });
 applicationSchema.index({ recruiterStatus: 1, isStarred: 1 });
-
+// FIX #11: Missing indexes
+applicationSchema.index({ candidateId: 1, datePostulation: -1 });
+applicationSchema.index({ offerId: 1, seenByRecruiter: 1 });
+applicationSchema.index({ offerId: 1, source: 1 });
+applicationSchema.index({
+  candidateId: 1,
+  candidateStatus: 1,
+  datePostulation: -1,
+});
 export default mongoose.model("Application", applicationSchema);

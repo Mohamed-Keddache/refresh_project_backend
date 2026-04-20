@@ -15,6 +15,8 @@ import {
   resendConfirmationCode,
   changeEmail,
   getCompanies,
+  changePassword,
+  deleteMyAccount,
 } from "../controllers/authController.js";
 import {
   forgotPassword,
@@ -73,6 +75,18 @@ router.post(
   resetPassword,
 );
 router.get("/check-reset-token/:token", checkResetToken);
+
+// Changement de mot de passe (utilisateur connecté)
+router.post(
+  "/change-password",
+  auth,
+  authRateLimiter,
+  validators.changePassword,
+  changePassword,
+);
+
+// Suppression de compte
+router.delete("/delete-account", auth, authRateLimiter, deleteMyAccount);
 
 // ─── Companies (for registration) ──────────────────────────────────
 router.get("/companies", getCompanies);

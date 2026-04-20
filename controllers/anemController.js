@@ -903,10 +903,9 @@ export const getAnemDemandes = async (req, res) => {
     } = req.query;
 
     let query = {
-      status: { $ne: "draft" }, // Don't show drafts to admins
+      status: { $ne: "draft" },
     };
 
-    // Status filter
     if (status) {
       if (status === "new") {
         query.status = { $in: ["pending", "pending_verification"] };
@@ -919,17 +918,14 @@ export const getAnemDemandes = async (req, res) => {
       }
     }
 
-    // Registration type filter
     if (registrationType) {
       query.registrationType = registrationType;
     }
 
-    // Wilaya filter
     if (wilaya) {
       query["step2.wilaya"] = { $regex: new RegExp(wilaya, "i") };
     }
 
-    // Assignment filter
     if (assignedTo) {
       query.assignedTo = assignedTo;
     }
@@ -937,7 +933,6 @@ export const getAnemDemandes = async (req, res) => {
       query.assignedTo = { $exists: false };
     }
 
-    // Date range filter
     if (dateFrom || dateTo) {
       query.createdAt = {};
       if (dateFrom) query.createdAt.$gte = new Date(dateFrom);
@@ -948,11 +943,8 @@ export const getAnemDemandes = async (req, res) => {
       }
     }
 
-    // Search filter
     if (search) {
       const searchRegex = { $regex: search, $options: "i" };
-
-      // Find matching users
       const matchingUsers = await User.find({
         $or: [{ nom: searchRegex }, { email: searchRegex }],
       }).select("_id");
@@ -979,7 +971,11 @@ export const getAnemDemandes = async (req, res) => {
         .populate("userId", "nom email")
         .populate("companyId", "name logo")
         .populate("recruiterId", "position telephone")
-        .populate("assignedTo", "userId label")
+        .populate({
+          path: "assignedTo",
+          select: "userId label",
+          populate: { path: "userId", select: "nom" },
+        })
         .lean(),
       AnemRegistration.countDocuments(query),
       AnemRegistration.aggregate([
@@ -988,72 +984,46 @@ export const getAnemDemandes = async (req, res) => {
       ]),
     ]);
 
-    // Enrich with assigned admin names
-    const enrichedDemandes = await Promise.all(
-      demandes.map(async (d) => {
-        let assignedAdminName = null;
-        if (d.assignedTo?.userId) {
-          const adminUser = await User.findById(d.assignedTo.userId).select(
-            "nom",
-          );
-          assignedAdminName = adminUser?.nom;
-        }
+    // ▶ FIX N+1: Plus besoin de boucler pour chercher le nom de l'admin
+    // Le populate imbriqué ci-dessus le fait en une seule requête
+    const enrichedDemandes = demandes.map((d) => ({
+      _id: d._id,
+      registrationType: d.registrationType,
+      status: d.status,
+      currentStep: d.currentStep,
+      formCompleted: d.formCompleted,
+      formSubmittedAt: d.formSubmittedAt,
+      declaredAnemId: d.declaredAnemId,
+      verifiedAnemId: d.verifiedAnemId,
+      recruiter: {
+        _id: d.recruiterId?._id,
+        nom: d.userId?.nom,
+        email: d.userId?.email,
+        telephone: d.recruiterId?.telephone,
+      },
+      company: {
+        _id: d.companyId?._id,
+        name: d.companyId?.name,
+        logo: d.companyId?.logo,
+      },
+      wilaya: d.step2?.wilaya,
+      raisonSociale: d.step1?.raisonSociale,
+      assignedTo: d.assignedTo
+        ? {
+            _id: d.assignedTo._id,
+            name: d.assignedTo.userId?.nom || null,
+            label: d.assignedTo.label,
+          }
+        : null,
+      assignedAt: d.assignedAt,
+      pdfDownloadCount: d.pdfDownloads?.length || 0,
+      lastPdfDownload: d.pdfDownloads?.slice(-1)[0]?.downloadedAt,
+      failureReason: d.failureReason,
+      rejectionReason: d.rejectionReason,
+      createdAt: d.createdAt,
+      updatedAt: d.updatedAt,
+    }));
 
-        return {
-          _id: d._id,
-          registrationType: d.registrationType,
-          status: d.status,
-          currentStep: d.currentStep,
-          formCompleted: d.formCompleted,
-          formSubmittedAt: d.formSubmittedAt,
-
-          // IDs
-          declaredAnemId: d.declaredAnemId,
-          verifiedAnemId: d.verifiedAnemId,
-
-          // Recruiter/Company info
-          recruiter: {
-            _id: d.recruiterId?._id,
-            nom: d.userId?.nom,
-            email: d.userId?.email,
-            telephone: d.recruiterId?.telephone,
-          },
-          company: {
-            _id: d.companyId?._id,
-            name: d.companyId?.name,
-            logo: d.companyId?.logo,
-          },
-
-          // Location
-          wilaya: d.step2?.wilaya,
-          raisonSociale: d.step1?.raisonSociale,
-
-          // Assignment
-          assignedTo: d.assignedTo
-            ? {
-                _id: d.assignedTo._id,
-                name: assignedAdminName,
-                label: d.assignedTo.label,
-              }
-            : null,
-          assignedAt: d.assignedAt,
-
-          // PDF tracking
-          pdfDownloadCount: d.pdfDownloads?.length || 0,
-          lastPdfDownload: d.pdfDownloads?.slice(-1)[0]?.downloadedAt,
-
-          // Status info
-          failureReason: d.failureReason,
-          rejectionReason: d.rejectionReason,
-
-          // Timestamps
-          createdAt: d.createdAt,
-          updatedAt: d.updatedAt,
-        };
-      }),
-    );
-
-    // Build status counts map
     const countsMap = {};
     statusCounts.forEach((s) => {
       countsMap[s._id] = s.count;

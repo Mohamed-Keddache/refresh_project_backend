@@ -1,4 +1,3 @@
-// models/AdminLog.js
 import mongoose from "mongoose";
 
 const adminLogSchema = new mongoose.Schema(
@@ -59,7 +58,7 @@ const adminLogSchema = new mongoose.Schema(
         "anem_registration_failed",
         "anem_bulk_status_update",
         "anem_note_added",
-        // Skill system actions
+        // Skills
         "skill_created",
         "skill_updated",
         "skill_deleted",
@@ -67,6 +66,7 @@ const adminLogSchema = new mongoose.Schema(
         "skill_cluster_dismissed",
         "skill_feedback_reviewed",
         "skill_settings_updated",
+        // Candidate ANEM
         "candidate_anem_demande_viewed",
         "candidate_anem_demande_assigned",
         "candidate_anem_demande_in_progress",
@@ -76,6 +76,18 @@ const adminLogSchema = new mongoose.Schema(
         "candidate_anem_registration_success",
         "candidate_anem_registration_failed",
         "candidate_anem_note_added",
+        // ── V2 ANEM Offer Actions ──
+        "anem_offer_pdf_downloaded",
+        "anem_offer_bulk_pdf_downloaded",
+        "anem_offer_marked_depositing",
+        "anem_offer_bulk_marked_depositing",
+        "anem_offer_deposit_success",
+        "anem_offer_deposit_failed",
+        "anem_offer_auto_published",
+        "anem_offer_hard_deleted",
+        "anem_offer_bulk_hard_deleted",
+        "anem_offer_note_added",
+        "anem_offer_auto_cleanup",
       ],
       required: true,
       index: true,
@@ -97,6 +109,7 @@ const adminLogSchema = new mongoose.Schema(
         "skill_cluster",
         "skill_feedback",
         "system_settings",
+        "anem_offer", // V2
       ],
     },
     targetId: { type: mongoose.Schema.Types.ObjectId },

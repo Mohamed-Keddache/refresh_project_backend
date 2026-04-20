@@ -198,7 +198,37 @@ export const validators = {
       .withMessage("Catégorie invalide"),
     handleValidationErrors,
   ],
+  changePassword: [
+    body("currentPassword")
+      .notEmpty()
+      .withMessage("Mot de passe actuel requis"),
+    body("newPassword")
+      .isLength({ min: 8 })
+      .withMessage("Le mot de passe doit contenir au moins 8 caractères")
+      .matches(/[a-z]/)
+      .withMessage("Le mot de passe doit contenir une minuscule")
+      .matches(/[A-Z]/)
+      .withMessage("Le mot de passe doit contenir une majuscule")
+      .matches(/\d/)
+      .withMessage("Le mot de passe doit contenir un chiffre"),
+    body("confirmNewPassword")
+      .optional()
+      .custom((value, { req }) => {
+        if (value !== req.body.newPassword) {
+          throw new Error("Les mots de passe ne correspondent pas");
+        }
+        return true;
+      }),
+    handleValidationErrors,
+  ],
 
+  deleteAccount: [
+    body("confirmation")
+      .equals("SUPPRIMER MON COMPTE")
+      .withMessage("Confirmation invalide"),
+    body("password").optional().trim(),
+    handleValidationErrors,
+  ],
   replyToTicket: [
     body("content")
       .trim()

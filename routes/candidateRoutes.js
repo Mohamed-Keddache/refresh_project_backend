@@ -14,6 +14,7 @@ import {
 import {
   updateProfile,
   uploadProfilePicture,
+  deleteProfilePicture,
   uploadCandidateCV,
   deleteCV,
   applyToOffer,
@@ -22,6 +23,7 @@ import {
   addToFavorites,
   removeFromFavorites,
   getFavorites,
+  checkFavoritesInBatch,
   addSkill,
   updateSkill,
   deleteSkill,
@@ -51,29 +53,26 @@ import {
 
 import {
   getCandidateInterviews,
-  acceptInterview,
-  declineInterview,
-  proposeAlternativeDate,
+  getCandidateInterviewById,
 } from "../controllers/interviewController.js";
 
 import {
   getCandidateConversations,
   getConversationMessages,
   sendMessageAsCandidate,
+  getCandidateUnreadTotal,
 } from "../controllers/conversationController.js";
 
 const router = express.Router();
 
 router.use(auth, authRole(["candidat"]));
 
-// Profile
 router.get("/profil", getProfile);
 router.put("/profil", validators.updateProfile, updateProfile);
 router.put("/compte", updateAccount);
 router.get("/stats", getCandidateStats);
 router.get("/activity", getActivityTimeline);
 
-// File uploads with rate limiting
 router.post(
   "/upload-photo",
   uploadRateLimiter,
@@ -81,6 +80,9 @@ router.post(
   handleMulterError,
   uploadProfilePicture,
 );
+// FEATURE 2.2: Route pour supprimer la photo de profil
+router.delete("/delete-photo", deleteProfilePicture);
+
 router.post(
   "/upload-cv",
   uploadRateLimiter,
@@ -90,7 +92,6 @@ router.post(
 );
 router.delete("/delete-cv/:cvId", validators.mongoId("cvId"), deleteCV);
 
-// Skills
 router.post("/profil/skills", validators.addSkill, addSkill);
 router.put(
   "/profil/skills/:skillId",
@@ -114,7 +115,6 @@ router.post(
   submitSkillFeedback,
 );
 
-// Experience
 router.post("/profil/experiences", validators.addExperience, addExperience);
 router.put(
   "/profil/experiences/:experienceId",
@@ -127,7 +127,6 @@ router.delete(
   deleteExperience,
 );
 
-// Education
 router.post("/profil/education", validators.addEducation, addEducation);
 router.put(
   "/profil/education/:educationId",
@@ -140,7 +139,6 @@ router.delete(
   deleteEducation,
 );
 
-// Favorites
 router.get("/favorites", getFavorites);
 router.post(
   "/favorites/:offerId",
@@ -152,11 +150,11 @@ router.delete(
   validators.mongoId("offerId"),
   removeFromFavorites,
 );
+// FEATURE 3.1: Vérification des favoris en batch
+router.post("/favorites/check", checkFavoritesInBatch);
 
-// Recommendations
 router.get("/recommended-offers", getRecommendedOffers);
 
-// Applications
 router.post(
   "/postuler",
   requireEmailVerification,
@@ -185,26 +183,13 @@ router.delete(
   cancelApplication,
 );
 
-// Interviews
 router.get("/interviews", getCandidateInterviews);
-router.put(
-  "/interviews/:interviewId/accept",
-  validators.mongoId("interviewId"),
-  acceptInterview,
-);
-router.put(
-  "/interviews/:interviewId/decline",
-  validators.mongoId("interviewId"),
-  declineInterview,
-);
-router.put(
-  "/interviews/:interviewId/propose-date",
-  validators.mongoId("interviewId"),
-  proposeAlternativeDate,
-);
+router.get("/interviews/:interviewId", getCandidateInterviewById);
 
-// Conversations
 router.get("/conversations", getCandidateConversations);
+// FEATURE 2.7: Total des conversations non-lues
+router.get("/conversations/unread-total", getCandidateUnreadTotal);
+
 router.get(
   "/conversations/:conversationId",
   validators.mongoId("conversationId"),

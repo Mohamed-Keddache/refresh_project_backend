@@ -1,4 +1,3 @@
-// models/Interview.js
 import mongoose from "mongoose";
 
 const interviewSchema = new mongoose.Schema(
@@ -23,37 +22,76 @@ const interviewSchema = new mongoose.Schema(
       ref: "Recruiter",
       required: true,
     },
+    conversationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Conversation",
+    },
 
-    // === DÉTAILS ===
+    // Numéro d'entretien pour cette candidature (Entretien #1, #2, etc.)
+    interviewNumber: { type: Number, default: 1 },
+
+    // Format
     type: {
       type: String,
       enum: ["phone", "video", "in_person"],
       default: "video",
     },
-    scheduledAt: { type: Date, required: true },
-    duration: { type: Number, default: 30 }, // minutes
+
+    // Durée
+    duration: {
+      type: Number,
+      enum: [15, 30, 45, 60],
+      default: 30,
+    },
+
+    // Infos de localisation selon le type
     location: String, // Pour in_person
     meetingLink: String, // Pour video
     phoneNumber: String, // Pour phone
 
-    // === STATUT ===
+    // Mode de planification
+    schedulingMode: {
+      type: String,
+      enum: ["fixed_date", "propose_slots"],
+      default: "fixed_date",
+    },
+
+    // Date fixe
+    scheduledAt: { type: Date },
+
+    // Créneaux proposés (max 3)
+    proposedSlots: [
+      {
+        date: { type: Date, required: true },
+        chosen: { type: Boolean, default: false },
+      },
+    ],
+
+    // Le créneau choisi par le candidat
+    chosenSlot: { type: Date },
+
+    // Notes de préparation (visibles par le candidat)
+    preparationNotes: String,
+
+    // Statuts de l'entretien
     status: {
       type: String,
       enum: [
-        "proposed", // Proposé par recruteur, en attente réponse candidat
-        "confirmed", // Accepté par candidat
-        "rescheduled_by_candidate", // Candidat propose nouvelle date
-        "rescheduled_by_recruiter", // Recruteur propose nouvelle date
-        "cancelled_by_candidate",
-        "cancelled_by_recruiter",
-        "completed", // Entretien passé
-        "no_show_candidate", // Candidat absent
-        "no_show_recruiter", // Recruteur absent (rare mais possible)
+        "proposed", // Proposé par le recruteur, en attente du candidat
+        "confirmed", // Confirmé par les deux parties
+        "rescheduled_by_candidate", // Le candidat propose une autre date
+        "rescheduled_by_recruiter", // Le recruteur propose une autre date
+        "cancelled_by_candidate", // Annulé par le candidat
+        "cancelled_by_recruiter", // Annulé par le recruteur
+        "pending_feedback", // L'entretien est passé, en attente du feedback
+        "completed", // Feedback donné, entretien terminé
+        "no_show_candidate", // Le candidat ne s'est pas présenté
+        "no_show_recruiter", // Le recruteur ne s'est pas présenté
       ],
       default: "proposed",
     },
 
-    // === PROPOSITION ALTERNATIVE ===
+    // Alternative proposée (pour négociation)
     proposedAlternative: {
       date: Date,
       proposedBy: {
@@ -64,35 +102,78 @@ const interviewSchema = new mongoose.Schema(
       proposedAt: Date,
     },
 
-    // === NOTES ===
-    recruiterNotes: String, // Notes privées recruteur
-    preparationNotes: String, // Notes partagées avec candidat (optionnel)
+    // Raison d'annulation (obligatoire)
+    cancellationReason: String,
+    cancelledBy: {
+      type: String,
+      enum: ["candidate", "recruiter"],
+    },
+    cancelledAt: Date,
 
-    // === FEEDBACK POST-ENTRETIEN ===
+    // Raison de refus par le candidat
+    declineReason: String,
+
+    // Notes privées du recruteur
+    recruiterNotes: String,
+
+    // Feedback post-entretien
     feedback: {
+      interviewHappened: { type: Boolean },
+      noShowReason: {
+        type: String,
+        enum: ["candidate_absent", "technical_issue", "other"],
+      },
+      noShowDetails: String,
       rating: { type: Number, min: 1, max: 5 },
-      notes: String,
+      privateNotes: String, // Visible uniquement par l'équipe recrutement
       strengths: [String],
       concerns: [String],
-      recommendation: {
+      decision: {
         type: String,
-        enum: ["strong_yes", "yes", "maybe", "no", "strong_no"],
+        enum: ["next_round", "shortlist", "reject", "hire"],
       },
       completedAt: Date,
     },
 
-    // === RAPPELS ===
+    // Rappels
     reminderSentToCandidate: { type: Boolean, default: false },
     reminderSentToRecruiter: { type: Boolean, default: false },
+    reminderSentAt: Date,
+
+    // Référence au message dans la conversation (pour le sticky bar)
+    interviewMessageId: { type: mongoose.Schema.Types.ObjectId },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
-// Index
 interviewSchema.index({ applicationId: 1 });
 interviewSchema.index({ candidateId: 1, status: 1 });
 interviewSchema.index({ recruiterId: 1, scheduledAt: 1 });
 interviewSchema.index({ status: 1, scheduledAt: 1 });
-interviewSchema.index({ scheduledAt: 1 }); // Pour les rappels
+interviewSchema.index({ scheduledAt: 1 });
+interviewSchema.index({ recruiterId: 1, status: 1 });
+interviewSchema.index({ conversationId: 1 });
+
+// Méthode pour obtenir la date effective de l'entretien
+interviewSchema.methods.getEffectiveDate = function () {
+  if (this.chosenSlot) return this.chosenSlot;
+  if (this.scheduledAt) return this.scheduledAt;
+  return null;
+};
+
+// Méthode pour calculer la date de fin de l'entretien
+interviewSchema.methods.getEndTime = function () {
+  const start = this.getEffectiveDate();
+  if (!start) return null;
+  return new Date(start.getTime() + this.duration * 60 * 1000);
+};
+
+// Méthode pour vérifier si le feedback est dû (1h après fin prévue)
+interviewSchema.methods.isFeedbackDue = function () {
+  const endTime = this.getEndTime();
+  if (!endTime) return false;
+  const feedbackDueTime = new Date(endTime.getTime() + 60 * 60 * 1000);
+  return new Date() >= feedbackDueTime && this.status === "confirmed";
+};
 
 export default mongoose.model("Interview", interviewSchema);
