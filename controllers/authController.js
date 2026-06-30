@@ -12,18 +12,40 @@ import Offer from "../models/Offer.js";
 import {
   sendVerificationEmail,
   sendWelcomeEmail,
+  sendPasswordChangedNotification,
 } from "../services/emailService.js";
 
-const generateToken = (user) => {
-  return jwt.sign(
-    {
-      id: user._id,
-      role: user.role,
-      emailVerified: user.emailVerified,
-    },
-    process.env.JWT_SECRET,
-    { expiresIn: "1d" },
-  );
+import { generateToken } from "../utils/generateToken.js";
+
+// ─── HELPER: contexte requête pour notifications ───
+const getRequestContext = (req) => ({
+  ipAddress: req.ip || req.connection?.remoteAddress || null,
+  userAgent: req.get?.("User-Agent") || req.headers?.["user-agent"] || null,
+});
+
+// ─── HELPER: envoi notification email (silencieux) ───
+const notifyPasswordChange = async (user, action, req, logoutAll) => {
+  if (process.env.NODE_ENV !== "production") {
+    console.log(
+      `📧 [DEV] Skip password ${action} notification email for ${user.email}`,
+    );
+    return;
+  }
+  try {
+    const { ipAddress, userAgent } = getRequestContext(req);
+    await sendPasswordChangedNotification(user.email, {
+      userName: user.nom,
+      action,
+      ipAddress,
+      userAgent,
+      logoutAll,
+    });
+  } catch (err) {
+    console.error(
+      "Password change notification failed (non-blocking):",
+      err.message,
+    );
+  }
 };
 
 function getRecruiterStatusMessage(status) {
@@ -56,6 +78,8 @@ export const register = async (req, res) => {
       nom,
       email: email.toLowerCase(),
       motDePasse: hash,
+      hasPassword: true, // compte classique : possède un vrai mot de passe
+      tokenVersion: 0,
       role,
       emailVerified: false,
       accountStatus: "active",
@@ -63,23 +87,14 @@ export const register = async (req, res) => {
 
     try {
       if (role === "recruteur") {
-        await Recruiter.create({
-          userId: user._id,
-          status: "incomplete",
-        });
+        await Recruiter.create({ userId: user._id, status: "incomplete" });
       } else if (role === "candidat") {
-        await Candidate.create({
-          userId: user._id,
-        });
+        await Candidate.create({ userId: user._id });
       }
 
       const verificationMode = await SystemSettings.getSetting(
         "email_verification_mode",
         "development",
-      );
-
-      console.log(
-        `📧 Registration - Email verification mode: ${verificationMode}`,
       );
 
       if (verificationMode === "smtp") {
@@ -89,17 +104,10 @@ export const register = async (req, res) => {
             "email_verification",
             15,
           );
-
-          console.log(`📧 Sending verification email to ${user.email}`);
           await sendVerificationEmail(user.email, code, user.nom);
-          console.log(`✅ Verification email sent successfully`);
         } catch (emailError) {
           console.error("❌ Failed to send verification email:", emailError);
         }
-      } else {
-        console.log(
-          `📨 [DEV MODE] User Registered: ${user.email}. Use code: 123456`,
-        );
       }
 
       const token = generateToken(user);
@@ -139,6 +147,14 @@ export const login = async (req, res) => {
         .json({ msg: GENERIC_ERROR, code: "INVALID_CREDENTIALS" });
     }
 
+    // Si compte OAuth-only, refuser le login par mot de passe
+    if (!user.hasPassword) {
+      return res.status(401).json({
+        msg: "Ce compte utilise une connexion externe (Google/Facebook). Connectez-vous via cette méthode ou définissez un mot de passe depuis les paramètres.",
+        code: "OAUTH_ONLY_ACCOUNT",
+      });
+    }
+
     const ok = await bcrypt.compare(motDePasse, user.motDePasse);
     if (!ok) {
       return res
@@ -155,11 +171,7 @@ export const login = async (req, res) => {
       }
       if (user.accountStatus === "suspended") {
         return res.status(403).json({
-          msg: `Votre compte est suspendu${
-            user.suspendedUntil
-              ? ` jusqu'au ${user.suspendedUntil.toLocaleDateString("fr-FR")}`
-              : ""
-          }.`,
+          msg: `Votre compte est suspendu${user.suspendedUntil ? ` jusqu'au ${user.suspendedUntil.toLocaleDateString("fr-FR")}` : ""}.`,
           code: "ACCOUNT_SUSPENDED",
           reason: user.suspensionReason,
         });
@@ -234,15 +246,10 @@ export const login = async (req, res) => {
 export const resendConfirmationCode = async (req, res) => {
   try {
     const userId = req.user.id;
-
     const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ msg: "Utilisateur introuvable" });
-    }
-
-    if (user.emailVerified) {
+    if (!user) return res.status(404).json({ msg: "Utilisateur introuvable" });
+    if (user.emailVerified)
       return res.status(400).json({ msg: "Email déjà vérifié" });
-    }
 
     const verificationMode = await SystemSettings.getSetting(
       "email_verification_mode",
@@ -257,21 +264,11 @@ export const resendConfirmationCode = async (req, res) => {
             "email_verification",
             15,
           );
-
         await sendVerificationEmail(user.email, code, user.nom);
-
-        res.json({
-          msg: "Code de confirmation envoyé 📨",
-          expiresAt,
-        });
+        res.json({ msg: "Code de confirmation envoyé 📨", expiresAt });
       } catch (emailError) {
-        console.error("❌ Failed to send verification email:", emailError);
         res.status(500).json({
           msg: "Erreur lors de l'envoi de l'email. Veuillez réessayer.",
-          error:
-            process.env.NODE_ENV !== "production"
-              ? emailError.message
-              : undefined,
         });
       }
     } else {
@@ -288,15 +285,10 @@ export const verifyEmail = async (req, res) => {
   try {
     const { code } = req.body;
     const userId = req.user.id;
-
     const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ msg: "Utilisateur introuvable" });
-    }
-
-    if (user.emailVerified) {
+    if (!user) return res.status(404).json({ msg: "Utilisateur introuvable" });
+    if (user.emailVerified)
       return res.status(400).json({ msg: "Email déjà vérifié" });
-    }
 
     const verificationMode = await SystemSettings.getSetting(
       "email_verification_mode",
@@ -318,7 +310,6 @@ export const verifyEmail = async (req, res) => {
         code,
         "email_verification",
       );
-
       if (!result.valid) {
         return res.status(400).json({
           msg: result.error,
@@ -339,7 +330,6 @@ export const verifyEmail = async (req, res) => {
       }
 
       const newToken = generateToken(user);
-
       return res.json({
         msg: "E-mail confirmé avec succès ! 🎉",
         token: newToken,
@@ -361,11 +351,8 @@ export const changeEmail = async (req, res) => {
   try {
     const { newEmail } = req.body;
     const userId = req.user.id;
-
     const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ msg: "Utilisateur introuvable" });
-    }
+    if (!user) return res.status(404).json({ msg: "Utilisateur introuvable" });
 
     if (user.emailVerified) {
       return res.status(400).json({
@@ -378,9 +365,8 @@ export const changeEmail = async (req, res) => {
       email: normalizedEmail,
       _id: { $ne: userId },
     });
-    if (exist) {
+    if (exist)
       return res.status(400).json({ msg: "Cet email est déjà utilisé." });
-    }
 
     user.email = normalizedEmail;
     await user.save();
@@ -396,23 +382,126 @@ export const changeEmail = async (req, res) => {
   }
 };
 
-export const changePassword = async (req, res) => {
+// ─────────────────────────────────────────────────────────
+// NEW: setPassword — utilisateur OAuth-only définit un MDP
+// ─────────────────────────────────────────────────────────
+export const setPassword = async (req, res) => {
   try {
     const userId = req.user.id;
-    const { currentPassword, newPassword, confirmNewPassword } = req.body;
+    const { newPassword, confirmNewPassword, logoutAllDevices } = req.body;
 
-    if (!currentPassword || !newPassword) {
-      return res.status(400).json({
-        msg: "Le mot de passe actuel et le nouveau mot de passe sont requis.",
-      });
+    if (!newPassword) {
+      return res
+        .status(400)
+        .json({ msg: "Le nouveau mot de passe est requis." });
     }
 
+    // Validations cohérentes avec changePassword
     if (newPassword.length < 8) {
       return res.status(400).json({
-        msg: "Le nouveau mot de passe doit contenir au moins 8 caractères.",
+        msg: "Le mot de passe doit contenir au moins 8 caractères.",
+      });
+    }
+    if (
+      !/[a-z]/.test(newPassword) ||
+      !/[A-Z]/.test(newPassword) ||
+      !/\d/.test(newPassword)
+    ) {
+      return res.status(400).json({
+        msg: "Le mot de passe doit contenir une minuscule, une majuscule et un chiffre.",
+      });
+    }
+    if (confirmNewPassword && newPassword !== confirmNewPassword) {
+      return res
+        .status(400)
+        .json({ msg: "Les mots de passe ne correspondent pas." });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ msg: "Utilisateur introuvable." });
+
+    if (user.hasPassword) {
+      return res.status(400).json({
+        msg: "Un mot de passe est déjà défini sur votre compte. Utilisez la fonction « Changer le mot de passe ».",
+        code: "PASSWORD_ALREADY_SET",
       });
     }
 
+    const hash = await bcrypt.hash(newPassword, 12);
+    user.motDePasse = hash;
+    user.hasPassword = true;
+
+    // Option : déconnexion globale (cochée par défaut côté UI). Si activée, on incrémente tokenVersion.
+    const shouldLogoutAll = !!logoutAllDevices;
+    if (shouldLogoutAll) {
+      user.tokenVersion = (user.tokenVersion || 0) + 1;
+    }
+
+    await user.save();
+
+    // Émettre un nouveau token (la version actuelle, après incrément éventuel)
+    const newToken = generateToken(user);
+
+    // Notification email (production uniquement)
+    notifyPasswordChange(user, "set", req, shouldLogoutAll);
+
+    res.json({
+      msg: "Mot de passe défini avec succès ✅. Vous pouvez désormais vous connecter via email + mot de passe.",
+      token: newToken,
+      logoutAllDevices: shouldLogoutAll,
+    });
+  } catch (err) {
+    console.error("Set password error:", err);
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════════════
+// 🔄 PUT /api/auth/change-password
+// Gère deux cas :
+//   - L'utilisateur a déjà un mot de passe → exige currentPassword
+//   - L'utilisateur n'en a pas (OAuth)     → currentPassword non requis
+//
+// Body:
+//   {
+//     currentPassword?: string,   // requis si hasPassword === true
+//     newPassword: string,
+//     confirmNewPassword: string,
+//     logoutAllDevices?: boolean  // par défaut true
+//   }
+//
+// Réponse :
+//   - Si logoutAllDevices = true (par défaut) :
+//       Toutes les autres sessions sont invalidées et un nouveau token
+//       est renvoyé pour la session courante (l'utilisateur reste connecté
+//       sur l'appareil actuel mais devra se reconnecter ailleurs).
+//   - Si logoutAllDevices = false :
+//       Le mot de passe est modifié sans invalider les autres sessions.
+// ═══════════════════════════════════════════════════════════════════════
+export const changePassword = async (req, res) => {
+  try {
+    const {
+      currentPassword,
+      newPassword,
+      confirmNewPassword,
+      logoutAllDevices = true,
+    } = req.body || {};
+
+    if (!newPassword || !confirmNewPassword) {
+      return res.status(400).json({ msg: "Tous les champs sont requis." });
+    }
+    if (newPassword !== confirmNewPassword) {
+      return res
+        .status(400)
+        .json({ msg: "Les mots de passe ne correspondent pas." });
+    }
+
+    // inline strength check (replaces missing validatePasswordStrength)
+    if (newPassword.length < 8) {
+      return res
+        .status(400)
+        .json({ msg: "Le mot de passe doit contenir au moins 8 caractères." });
+    }
     if (
       !/[a-z]/.test(newPassword) ||
       !/[A-Z]/.test(newPassword) ||
@@ -423,48 +512,125 @@ export const changePassword = async (req, res) => {
       });
     }
 
-    if (confirmNewPassword && newPassword !== confirmNewPassword) {
-      return res
-        .status(400)
-        .json({ msg: "Les mots de passe ne correspondent pas." });
-    }
-
-    const user = await User.findById(userId);
+    const user = await User.findById(req.user.id);
     if (!user) {
       return res.status(404).json({ msg: "Utilisateur introuvable." });
     }
 
-    const isMatch = await bcrypt.compare(currentPassword, user.motDePasse);
-    if (!isMatch) {
-      return res.status(401).json({ msg: "Mot de passe actuel incorrect." });
+    const isAddingPassword = !user.hasPassword;
+
+    if (!isAddingPassword) {
+      if (!currentPassword) {
+        return res.status(400).json({ msg: "Mot de passe actuel requis." });
+      }
+      const isMatch = await bcrypt.compare(currentPassword, user.motDePasse);
+      if (!isMatch) {
+        return res.status(400).json({ msg: "Mot de passe actuel incorrect." });
+      }
+      const isSame = await bcrypt.compare(newPassword, user.motDePasse);
+      if (isSame) {
+        return res.status(400).json({
+          msg: "Le nouveau mot de passe doit être différent de l'ancien.",
+        });
+      }
     }
 
-    const isSame = await bcrypt.compare(newPassword, user.motDePasse);
-    if (isSame) {
-      return res.status(400).json({
-        msg: "Le nouveau mot de passe doit être différent de l'ancien.",
-      });
+    user.motDePasse = await bcrypt.hash(newPassword, 12);
+    user.hasPassword = true;
+
+    if (logoutAllDevices) {
+      user.tokenVersion = (user.tokenVersion || 0) + 1;
     }
 
-    const hash = await bcrypt.hash(newPassword, 12);
-    user.motDePasse = hash;
     await user.save();
 
-    const token = generateToken(user);
+    const newToken = generateToken(user);
 
-    res.json({
-      msg: "Mot de passe modifié avec succès ✅",
-      token,
+    // reuse existing helper instead of the broken getRequestMeta / sendPasswordChangedEmail
+    notifyPasswordChange(
+      user,
+      isAddingPassword ? "set" : "change",
+      req,
+      !!logoutAllDevices,
+    );
+
+    return res.json({
+      msg: isAddingPassword
+        ? "Mot de passe ajouté avec succès."
+        : "Mot de passe modifié avec succès.",
+      token: newToken,
+      action: isAddingPassword ? "added" : "changed",
+      loggedOutOtherDevices: !!logoutAllDevices,
     });
   } catch (err) {
-    res.status(500).json({ msg: err.message });
+    console.error("changePassword error:", err);
+    res
+      .status(500)
+      .json({ msg: "Erreur lors de la modification du mot de passe." });
   }
 };
 
-// ══════════════════════════════════════════════════════════════
-// BUG 4 FIX: Nettoyage des conversations et tickets de support
-// lors de la suppression du compte.
-// ══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════
+// 🆕 GET /api/auth/password-status
+// Retourne si l'utilisateur a un mot de passe défini.
+// Utilisé par le frontend pour afficher "Changer" ou "Appliquer".
+// ═══════════════════════════════════════════════════════════════════════
+export const getPasswordStatus = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select(
+      "hasPassword oauthProviders",
+    );
+    if (!user) {
+      return res.status(404).json({ msg: "Utilisateur introuvable." });
+    }
+    res.json({
+      hasPassword: !!user.hasPassword,
+      hasOAuth: (user.oauthProviders || []).length > 0,
+      providers: (user.oauthProviders || []).map((p) => p.provider),
+    });
+  } catch (err) {
+    console.error("getPasswordStatus error:", err);
+    res.status(500).json({ msg: "Erreur serveur." });
+  }
+};
+// ═══════════════════════════════════════════════════════════════════════
+// 🆕 POST /api/auth/logout-all-devices
+// Invalide TOUTES les sessions de l'utilisateur (y compris la courante).
+// Renvoie aussi un nouveau token si keepCurrentSession=true (rare,
+// mais utile pour quelques workflows). Par défaut, l'utilisateur est
+// totalement déconnecté
+//
+// Body (optionnel):
+//   { keepCurrentSession?: boolean }
+// ═══════════════════════════════════════════════════════════════════════
+export const logoutAllDevices = async (req, res) => {
+  try {
+    const { keepCurrentSession = false } = req.body || {};
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ msg: "Utilisateur introuvable." });
+    }
+
+    user.tokenVersion = (user.tokenVersion || 0) + 1;
+    await user.save();
+
+    let token = null;
+    if (keepCurrentSession) {
+      token = generateToken(user);
+    }
+
+    res.json({
+      msg: keepCurrentSession
+        ? "Toutes les autres sessions ont été déconnectées."
+        : "Toutes vos sessions ont été déconnectées.",
+      token,
+    });
+  } catch (err) {
+    console.error("logoutAllDevices error:", err);
+    res.status(500).json({ msg: "Erreur serveur." });
+  }
+};
+
 export const deleteMyAccount = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -477,22 +643,18 @@ export const deleteMyAccount = async (req, res) => {
     }
 
     const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ msg: "Utilisateur introuvable." });
-    }
+    if (!user) return res.status(404).json({ msg: "Utilisateur introuvable." });
 
-    const hasOAuthOnly = user.oauthProviders && user.oauthProviders.length > 0;
-
-    if (!hasOAuthOnly) {
+    // Si l'utilisateur a un vrai mot de passe, on l'exige
+    if (user.hasPassword) {
       if (!password) {
         return res
           .status(400)
           .json({ msg: "Mot de passe requis pour confirmer." });
       }
       const isMatch = await bcrypt.compare(password, user.motDePasse);
-      if (!isMatch) {
+      if (!isMatch)
         return res.status(401).json({ msg: "Mot de passe incorrect." });
-      }
     }
 
     if (user.role === "admin") {
@@ -552,16 +714,12 @@ export const deleteMyAccount = async (req, res) => {
               { session },
             );
 
-            // ── BUG 4 FIX: Fermer proprement les conversations ──
             const Conversation = (await import("../models/Conversation.js"))
               .default;
             await Conversation.updateMany(
               { candidateId: candidate._id, isClosed: { $ne: true } },
               {
-                $set: {
-                  isClosed: true,
-                  closedReason: "application_closed",
-                },
+                $set: { isClosed: true, closedReason: "application_closed" },
                 $push: {
                   messages: {
                     senderId: userId,
@@ -576,17 +734,11 @@ export const deleteMyAccount = async (req, res) => {
               { session },
             );
 
-            // ── BUG 4 FIX: Fermer les tickets de support ouverts ──
             const SupportTicket = (await import("../models/SupportTicket.js"))
               .default;
             await SupportTicket.updateMany(
               { userId, status: { $nin: ["closed", "resolved"] } },
-              {
-                $set: {
-                  status: "closed",
-                  closedAt: new Date(),
-                },
-              },
+              { $set: { status: "closed", closedAt: new Date() } },
               { session },
             );
 
@@ -598,9 +750,7 @@ export const deleteMyAccount = async (req, res) => {
               } = await import("../config/cloudinary.js");
 
               const cvUrls = candidate.cvs.map((cv) => cv.url).filter(Boolean);
-              if (cvUrls.length > 0) {
-                await deleteMultipleFromCloudinary(cvUrls);
-              }
+              if (cvUrls.length > 0) await deleteMultipleFromCloudinary(cvUrls);
               if (candidate.profilePicture) {
                 const pubId = getPublicIdFromUrl(candidate.profilePicture);
                 if (pubId) await deleteFromCloudinary(pubId, "image");
@@ -684,7 +834,6 @@ export const getCompanies = async (req, res) => {
       .select("_id name")
       .sort({ name: 1 })
       .lean();
-
     res.json(companies);
   } catch (err) {
     res.status(500).json({ msg: err.message });

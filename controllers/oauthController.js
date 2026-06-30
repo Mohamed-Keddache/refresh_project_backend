@@ -1,27 +1,17 @@
-import jwt from "jsonwebtoken";
+// controllers/oauthController.js
 import { OAuth2Client } from "google-auth-library";
+import crypto from "crypto";
+import bcrypt from "bcryptjs";
 import User from "../models/User.js";
 import Candidate from "../models/Candidate.js";
 import Recruiter from "../models/Recruiter.js";
+import { generateToken } from "../utils/generateToken.js"; // 🆕 helper centralisé
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
-// ─── Generate JWT (same as your authController) ─────────────────────
-const generateToken = (user) => {
-  return jwt.sign(
-    {
-      id: user._id,
-      role: user.role,
-      emailVerified: user.emailVerified,
-    },
-    process.env.JWT_SECRET,
-    { expiresIn: "1d" },
-  );
-};
-
-// ─── Build user response (shared helper) ────────────────────────────
+// ─── Build user response (shared helper) ──────────────────────────────
 const buildUserResponse = async (user, isNew = false) => {
-  const token = generateToken(user);
+  const token = generateToken(user); // 🆕 inclut tokenVersion
   const response = {
     token,
     user: {
@@ -30,6 +20,7 @@ const buildUserResponse = async (user, isNew = false) => {
       email: user.email,
       role: user.role,
       emailVerified: user.emailVerified,
+      hasPassword: !!user.hasPassword, // 🆕 utile pour le frontend
     },
     isNewUser: isNew,
   };
@@ -39,20 +30,19 @@ const buildUserResponse = async (user, isNew = false) => {
     if (recruiter) {
       response.recruiterStatus = recruiter.status;
       response.limitedAccess = recruiter.status !== "validated";
-      response.needsOnboarding = recruiter.status === "incomplete"; // Indique au frontend d'afficher l'onboarding
+      response.needsOnboarding = recruiter.status === "incomplete";
     }
   }
+
   return response;
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-//  METHOD 1: Google One-Tap / ID Token verification (recommended for SPA)
-//  The frontend sends the Google ID token, backend verifies it directly.
+// METHOD 1: Google One-Tap / ID Token verification (recommended for SPA)
 // ═══════════════════════════════════════════════════════════════════════
 export const googleTokenLogin = async (req, res) => {
   try {
     const { credential, role } = req.body;
-
     if (!credential) {
       return res.status(400).json({ msg: "Token Google manquant." });
     }
@@ -76,18 +66,15 @@ export const googleTokenLogin = async (req, res) => {
 
     let user = await User.findOne({ email });
 
-    // Si l'utilisateur existe déjà, on le connecte directement
+    // ── Utilisateur existant → connexion ─────────────────────────────
     if (user) {
       if (!user.canLogin()) {
-        return res
-          .status(403)
-          .json({
-            msg: "Votre compte est suspendu ou banni.",
-            code: "ACCOUNT_SUSPENDED",
-          });
+        return res.status(403).json({
+          msg: "Votre compte est suspendu ou banni.",
+          code: "ACCOUNT_SUSPENDED",
+        });
       }
 
-      // Ajout du provider s'il n'existait pas
       const hasGoogle = user.oauthProviders?.some(
         (p) => p.provider === "google",
       );
@@ -99,6 +86,7 @@ export const googleTokenLogin = async (req, res) => {
           linkedAt: new Date(),
         });
       }
+
       user.emailVerified = true;
       user.derniereConnexion = new Date();
       await user.save();
@@ -108,7 +96,7 @@ export const googleTokenLogin = async (req, res) => {
       return res.json(response);
     }
 
-    // Si l'utilisateur n'existe pas et qu'aucun rôle n'est fourni, on demande au Frontend de lui poser la question
+    // ── Nouvel utilisateur sans rôle → demander le rôle au frontend ──
     if (!role) {
       return res.status(200).json({
         isNewUser: true,
@@ -119,16 +107,15 @@ export const googleTokenLogin = async (req, res) => {
       });
     }
 
-    // Création du nouvel utilisateur avec le rôle choisi
-    const crypto = await import("crypto");
-    const bcrypt = await import("bcryptjs");
+    // ── Création du nouvel utilisateur ───────────────────────────────
     const randomPassword = crypto.randomBytes(32).toString("hex");
-    const hashedPassword = await bcrypt.default.hash(randomPassword, 12);
+    const hashedPassword = await bcrypt.hash(randomPassword, 12);
 
     user = await User.create({
       nom,
       email,
       motDePasse: hashedPassword,
+      hasPassword: false, // 🆕 mot de passe aléatoire → l'utilisateur n'en a pas vraiment défini
       role,
       emailVerified: true,
       accountStatus: "active",
@@ -146,19 +133,18 @@ export const googleTokenLogin = async (req, res) => {
 
     const response = await buildUserResponse(user, true);
     response.msg = "Compte créé avec succès via Google ! 🎉";
-
     if (role === "recruteur") {
       response.needsOnboarding = true;
     }
-
     res.json(response);
   } catch (err) {
+    console.error("googleTokenLogin error:", err);
     res.status(500).json({ msg: "Erreur lors de la connexion avec Google." });
   }
 };
+
 // ═══════════════════════════════════════════════════════════════════════
-//  METHOD 2: Passport OAuth callback handler (redirect-based flow)
-//  Used as the callback after Google/Facebook redirects back.
+// METHOD 2: Passport OAuth callback handler (redirect-based flow)
 // ═══════════════════════════════════════════════════════════════════════
 export const oauthCallbackHandler = (provider) => {
   return async (req, res) => {
@@ -173,16 +159,14 @@ export const oauthCallbackHandler = (provider) => {
 
       const { user, isNew } = req.user;
 
-      // Check account restrictions
       if (!user.canLogin()) {
         return res.redirect(
           `${FRONTEND_URL}/auth/oauth-error?error=account_restricted&status=${user.accountStatus}`,
         );
       }
 
-      const token = generateToken(user);
+      const token = generateToken(user); // 🆕
 
-      // Build redirect URL with token
       const params = new URLSearchParams({
         token,
         isNew: isNew ? "true" : "false",
@@ -197,36 +181,31 @@ export const oauthCallbackHandler = (provider) => {
     } catch (err) {
       console.error(`${provider} OAuth callback error:`, err);
       const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
-
       if (err.message === "ACCOUNT_RESTRICTED") {
         return res.redirect(
           `${FRONTEND_URL}/auth/oauth-error?error=account_restricted&status=${err.accountStatus}`,
         );
       }
-
       res.redirect(`${FRONTEND_URL}/auth/oauth-error?error=server_error`);
     }
   };
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-//  Facebook Token Login (for Facebook JS SDK)
+// Facebook Token Login
 // ═══════════════════════════════════════════════════════════════════════
 export const facebookTokenLogin = async (req, res) => {
   try {
     const { accessToken, role } = req.body;
-
     if (!accessToken) {
       return res.status(400).json({ msg: "Token Facebook manquant." });
     }
 
-    // Verify Facebook access token by calling Facebook Graph API
     let fbResponse;
     try {
       const fbUrl = `https://graph.facebook.com/me?fields=id,name,email,picture.type(large)&access_token=${accessToken}`;
       const response = await fetch(fbUrl);
       fbResponse = await response.json();
-
       if (fbResponse.error) {
         console.error("Facebook token error:", fbResponse.error);
         return res.status(401).json({ msg: "Token Facebook invalide." });
@@ -246,12 +225,10 @@ export const facebookTokenLogin = async (req, res) => {
     const nom = fbResponse.name || email.split("@")[0];
     const profilePicture = fbResponse.picture?.data?.url || null;
 
-    // Check if user exists
     let user = await User.findOne({ email });
     let isNew = false;
 
     if (user) {
-      // ── Existing user ──────────────────────────────────────────────
       if (!user.canLogin()) {
         if (user.accountStatus === "banned") {
           return res.status(403).json({
@@ -261,15 +238,13 @@ export const facebookTokenLogin = async (req, res) => {
         }
         if (user.accountStatus === "suspended") {
           return res.status(403).json({
-            msg: `Votre compte est suspendu.`,
+            msg: "Votre compte est suspendu.",
             code: "ACCOUNT_SUSPENDED",
           });
         }
       }
 
-      if (!user.oauthProviders) {
-        user.oauthProviders = [];
-      }
+      if (!user.oauthProviders) user.oauthProviders = [];
 
       const hasFacebook = user.oauthProviders.some(
         (p) => p.provider === "facebook",
@@ -282,27 +257,20 @@ export const facebookTokenLogin = async (req, res) => {
         });
       }
 
-      if (!user.emailVerified) {
-        user.emailVerified = true;
-      }
-
+      if (!user.emailVerified) user.emailVerified = true;
       user.derniereConnexion = new Date();
       await user.save();
     } else {
-      // ── New user ───────────────────────────────────────────────────
       isNew = true;
-
       const selectedRole = role === "recruteur" ? "recruteur" : "candidat";
-
-      const crypto = await import("crypto");
-      const bcrypt = await import("bcryptjs");
       const randomPassword = crypto.randomBytes(32).toString("hex");
-      const hashedPassword = await bcrypt.default.hash(randomPassword, 12);
+      const hashedPassword = await bcrypt.hash(randomPassword, 12);
 
       user = await User.create({
         nom,
         email,
         motDePasse: hashedPassword,
+        hasPassword: false, // 🆕
         role: selectedRole,
         emailVerified: true,
         accountStatus: "active",
@@ -325,11 +293,9 @@ export const facebookTokenLogin = async (req, res) => {
     }
 
     const response = await buildUserResponse(user, isNew);
-
     if (isNew) {
       response.msg = "Compte créé avec succès via Facebook ! 🎉";
       response.needsProfileCompletion = true;
-
       if (user.role === "recruteur") {
         response.needsCompanySelection = true;
       }
@@ -345,7 +311,7 @@ export const facebookTokenLogin = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-//  Complete recruiter OAuth registration (select/create company)
+// Complete recruiter OAuth registration (select/create company)
 // ═══════════════════════════════════════════════════════════════════════
 export const completeOAuthRecruiterSetup = async (req, res) => {
   try {
@@ -354,17 +320,13 @@ export const completeOAuthRecruiterSetup = async (req, res) => {
       req.body;
 
     const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ msg: "Utilisateur introuvable." });
-    }
-
+    if (!user) return res.status(404).json({ msg: "Utilisateur introuvable." });
     if (user.role !== "recruteur") {
       return res
         .status(400)
         .json({ msg: "Cette action est réservée aux recruteurs." });
     }
 
-    // Check if recruiter profile already exists
     const existingRecruiter = await Recruiter.findOne({ userId });
     if (existingRecruiter) {
       return res.status(400).json({ msg: "Profil recruteur déjà configuré." });
@@ -373,12 +335,10 @@ export const completeOAuthRecruiterSetup = async (req, res) => {
     const Company = (await import("../models/Company.js")).default;
 
     let finalCompanyId;
-
     if (companyId) {
       const comp = await Company.findById(companyId);
-      if (!comp) {
+      if (!comp)
         return res.status(400).json({ msg: "Entreprise introuvable." });
-      }
       finalCompanyId = comp._id;
     } else if (nouveauNomEntreprise) {
       const newComp = await Company.create({
@@ -398,10 +358,10 @@ export const completeOAuthRecruiterSetup = async (req, res) => {
       companyId: finalCompanyId,
       position: position || "Recruteur",
       status: "pending_validation",
-      isAdmin: !companyId, // Admin if creating new company
+      isAdmin: !companyId,
     });
 
-    const token = generateToken(user);
+    const token = generateToken(user); // 🆕
 
     res.json({
       msg: "Profil recruteur configuré avec succès ! En attente de validation.",
@@ -422,15 +382,14 @@ export const completeOAuthRecruiterSetup = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-//  Get linked OAuth providers for current user
+// Get linked OAuth providers for current user
 // ═══════════════════════════════════════════════════════════════════════
 export const getLinkedProviders = async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select("oauthProviders");
-
-    if (!user) {
-      return res.status(404).json({ msg: "Utilisateur introuvable." });
-    }
+    const user = await User.findById(req.user.id).select(
+      "oauthProviders hasPassword",
+    );
+    if (!user) return res.status(404).json({ msg: "Utilisateur introuvable." });
 
     const providers = (user.oauthProviders || []).map((p) => ({
       provider: p.provider,
@@ -439,7 +398,8 @@ export const getLinkedProviders = async (req, res) => {
 
     res.json({
       providers,
-      hasPassword: !user.oauthProviders || user.oauthProviders.length === 0,
+      // 🆕 hasPassword reflète maintenant le vrai état
+      hasPassword: !!user.hasPassword,
     });
   } catch (err) {
     res.status(500).json({ msg: err.message });
@@ -447,7 +407,7 @@ export const getLinkedProviders = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-//  Unlink an OAuth provider
+// Unlink an OAuth provider
 // ═══════════════════════════════════════════════════════════════════════
 export const unlinkProvider = async (req, res) => {
   try {
@@ -459,17 +419,13 @@ export const unlinkProvider = async (req, res) => {
     }
 
     const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ msg: "Utilisateur introuvable." });
-    }
+    if (!user) return res.status(404).json({ msg: "Utilisateur introuvable." });
 
     const providerCount = user.oauthProviders?.length || 0;
 
-    // Don't allow unlinking if it's the only auth method
-    // (user has no "real" password — they signed up via OAuth)
-    if (providerCount <= 1) {
-      // Check if user has a "real" password they set themselves.
-      // Since we can't truly know, we prevent unlinking the last provider.
+    // 🆕 Empêcher la dissociation si c'est la seule méthode d'auth.
+    //    On vérifie maintenant le VRAI hasPassword (plus fiable).
+    if (providerCount <= 1 && !user.hasPassword) {
       return res.status(400).json({
         msg: "Impossible de dissocier le dernier fournisseur. Définissez d'abord un mot de passe.",
       });

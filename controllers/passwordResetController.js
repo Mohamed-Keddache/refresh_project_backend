@@ -245,6 +245,7 @@ export const resetPassword = async (req, res) => {
     // Update password
     user.motDePasse = hashedPassword;
     user.emailVerified = true;
+    user.hasPassword = true;
     await user.save();
 
     // Consume (delete) the reset token

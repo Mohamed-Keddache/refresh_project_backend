@@ -219,6 +219,35 @@ export const validators = {
         }
         return true;
       }),
+    body("logoutAllDevices")
+      .optional()
+      .isBoolean()
+      .withMessage("logoutAllDevices doit être un booléen"),
+    handleValidationErrors,
+  ],
+
+  setPassword: [
+    body("newPassword")
+      .isLength({ min: 8 })
+      .withMessage("Le mot de passe doit contenir au moins 8 caractères")
+      .matches(/[a-z]/)
+      .withMessage("Le mot de passe doit contenir une minuscule")
+      .matches(/[A-Z]/)
+      .withMessage("Le mot de passe doit contenir une majuscule")
+      .matches(/\d/)
+      .withMessage("Le mot de passe doit contenir un chiffre"),
+    body("confirmNewPassword")
+      .optional()
+      .custom((value, { req }) => {
+        if (value !== req.body.newPassword) {
+          throw new Error("Les mots de passe ne correspondent pas");
+        }
+        return true;
+      }),
+    body("logoutAllDevices")
+      .optional()
+      .isBoolean()
+      .withMessage("logoutAllDevices doit être un booléen"),
     handleValidationErrors,
   ],
 
