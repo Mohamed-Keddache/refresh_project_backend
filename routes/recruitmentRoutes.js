@@ -38,6 +38,7 @@ import {
   // Gestion embauchés
   getMyHires,
   removeHire,
+  deleteOrphanedConversation,
 } from "../controllers/recruitmentFlowController.js";
 
 const router = express.Router();
@@ -98,6 +99,12 @@ router.post("/offers/:offerId/close", ...recruiterAuth, closeOffer);
 
 // Gestion embauchés
 router.get("/my-hires", ...recruiterAuth, getMyHires);
+
+router.delete(
+  "/conversations/:conversationId/orphaned",
+  ...recruiterAuth,
+  deleteOrphanedConversation,
+);
 
 // ============================================
 // ROUTES CANDIDAT

@@ -403,60 +403,19 @@ export const deactivateOffer = async (req, res) => {
 export const updateRecruiterProfile = async (req, res) => {
   try {
     const userId = req.user.id;
-
-    const { nom, motDePasse, ancienMotDePasse, telephone } = req.body;
+    const { nom, telephone } = req.body;
 
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ msg: "Utilisateur introuvable" });
 
     if (nom) user.nom = nom;
-
-    if (motDePasse) {
-      if (!ancienMotDePasse) {
-        return res.status(400).json({
-          msg: "L'ancien mot de passe est requis pour changer de mot de passe.",
-        });
-      }
-
-      const isMatch = await bcrypt.compare(ancienMotDePasse, user.motDePasse);
-      if (!isMatch) {
-        return res.status(401).json({ msg: "Ancien mot de passe incorrect." });
-      }
-
-      const isSame = await bcrypt.compare(motDePasse, user.motDePasse);
-      if (isSame) {
-        return res.status(400).json({
-          msg: "Le nouveau mot de passe doit être différent de l'ancien.",
-        });
-      }
-
-      if (motDePasse.length < 8) {
-        return res.status(400).json({
-          msg: "Le mot de passe doit contenir au moins 8 caractères.",
-        });
-      }
-      if (
-        !/[a-z]/.test(motDePasse) ||
-        !/[A-Z]/.test(motDePasse) ||
-        !/\d/.test(motDePasse)
-      ) {
-        return res.status(400).json({
-          msg: "Le mot de passe doit contenir une minuscule, une majuscule et un chiffre.",
-        });
-      }
-
-      const hash = await bcrypt.hash(motDePasse, 12);
-      user.motDePasse = hash;
-    }
-
     await user.save();
 
     const recruiter = await Recruiter.findOne({ userId });
     if (!recruiter)
       return res.status(404).json({ msg: "Profil recruteur introuvable" });
 
-    if (telephone) recruiter.telephone = telephone;
-
+    if (telephone !== undefined) recruiter.telephone = telephone;
     await recruiter.save();
 
     res.json({

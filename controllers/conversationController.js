@@ -213,13 +213,18 @@ export const getRecruiterConversations = async (req, res) => {
       applicationId: c.applicationId,
       offer: { _id: c.offerId?._id, titre: c.offerId?.titre },
       candidate: {
-        nom: c.candidateId?.userId?.nom,
+        nom:
+          c.candidateId?.userId?.nom ||
+          c.candidateNameSnapshot ||
+          "Candidat supprimé",
         profilePicture: c.candidateId?.profilePicture,
+        deleted: c.candidateDeleted || !c.candidateId,
       },
       lastMessage: c.messages?.slice(-1)[0],
       unreadCount: c.unreadByRecruiter,
       lastMessageAt: c.lastMessageAt,
       isClosed: c.isClosed,
+      candidateDeleted: c.candidateDeleted || !c.candidateId,
     }));
 
     res.json({
@@ -551,8 +556,12 @@ export const getRecruiterConversationMessages = async (req, res) => {
       candidateId: conversation.candidateId?._id,
       offer: { titre: conversation.offerId?.titre },
       candidate: {
-        nom: conversation.candidateId?.userId?.nom,
+        nom:
+          conversation.candidateId?.userId?.nom ||
+          conversation.candidateNameSnapshot ||
+          "Candidat supprimé",
         profilePicture: conversation.candidateId?.profilePicture,
+        deleted: conversation.candidateDeleted || !conversation.candidateId,
       },
       messages: paginatedMessages,
       status: conversation.status,

@@ -2097,3 +2097,37 @@ export const sendInterviewReminders = async () => {
 
   return sentCount;
 };
+/* ════════════════════════════════════════════════════════
+   Suppression définitive d'une conversation/entretien lié à
+   un candidat supprimé (nettoyage de l'historique recruteur).
+   ════════════════════════════════════════════════════════ */
+export const deleteOrphanedConversation = async (req, res) => {
+  try {
+    const recruiter = await getRecruiterProfile(req.user.id);
+    const { conversationId } = req.params;
+
+    const conversation = await Conversation.findOne({
+      _id: conversationId,
+      recruiterId: recruiter._id,
+    });
+
+    if (!conversation) {
+      return res.status(404).json({ msg: "Conversation introuvable" });
+    }
+
+    if (!conversation.candidateDeleted) {
+      return res.status(400).json({
+        msg: "Seules les conversations liées à un candidat supprimé peuvent être supprimées.",
+      });
+    }
+
+    // Supprime les entretiens liés (déjà flaggés candidateDeleted) puis la conversation.
+    await Interview.deleteMany({ conversationId: conversation._id });
+    await Conversation.deleteOne({ _id: conversation._id });
+
+    res.json({ msg: "Conversation supprimée de votre historique." });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ msg: err.msg });
+    res.status(500).json({ msg: err.message });
+  }
+};

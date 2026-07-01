@@ -382,13 +382,13 @@ export const changeEmail = async (req, res) => {
   }
 };
 
-// ─────────────────────────────────────────────────────────
-// NEW: setPassword — utilisateur OAuth-only définit un MDP
-// ─────────────────────────────────────────────────────────
+/* ════════════════════════════════════════════════════════
+   SET PASSWORD — première création (compte OAuth sans mot de passe)
+   ════════════════════════════════════════════════════════ */
 export const setPassword = async (req, res) => {
   try {
     const userId = req.user.id;
-    const { newPassword, confirmNewPassword, logoutAllDevices } = req.body;
+    const { newPassword, confirmNewPassword } = req.body;
 
     if (!newPassword) {
       return res
@@ -396,7 +396,6 @@ export const setPassword = async (req, res) => {
         .json({ msg: "Le nouveau mot de passe est requis." });
     }
 
-    // Validations cohérentes avec changePassword
     if (newPassword.length < 8) {
       return res.status(400).json({
         msg: "Le mot de passe doit contenir au moins 8 caractères.",
@@ -427,28 +426,20 @@ export const setPassword = async (req, res) => {
       });
     }
 
-    const hash = await bcrypt.hash(newPassword, 12);
-    user.motDePasse = hash;
+    user.motDePasse = await bcrypt.hash(newPassword, 12);
     user.hasPassword = true;
-
-    // Option : déconnexion globale (cochée par défaut côté UI). Si activée, on incrémente tokenVersion.
-    const shouldLogoutAll = !!logoutAllDevices;
-    if (shouldLogoutAll) {
-      user.tokenVersion = (user.tokenVersion || 0) + 1;
-    }
-
+    // La création d'un premier mot de passe n'invalide PAS les autres sessions :
+    // l'utilisateur n'avait aucun mot de passe à compromettre auparavant.
     await user.save();
 
-    // Émettre un nouveau token (la version actuelle, après incrément éventuel)
     const newToken = generateToken(user);
 
-    // Notification email (production uniquement)
-    notifyPasswordChange(user, "set", req, shouldLogoutAll);
+    // Notification de sécurité (non-bloquante)
+    notifyPasswordChange(user, "set", req, false);
 
     res.json({
-      msg: "Mot de passe défini avec succès ✅. Vous pouvez désormais vous connecter via email + mot de passe.",
+      msg: "Mot de passe défini avec succès ✅. Vous pouvez désormais vous connecter avec votre email et ce mot de passe.",
       token: newToken,
-      logoutAllDevices: shouldLogoutAll,
     });
   } catch (err) {
     console.error("Set password error:", err);
@@ -456,38 +447,11 @@ export const setPassword = async (req, res) => {
   }
 };
 
-// ═══════════════════════════════════════════════════════════════════════
-// 🔄 PUT /api/auth/change-password
-// Gère deux cas :
-//   - L'utilisateur a déjà un mot de passe → exige currentPassword
-//   - L'utilisateur n'en a pas (OAuth)     → currentPassword non requis
-//
-// Body:
-//   {
-//     currentPassword?: string,   // requis si hasPassword === true
-//     newPassword: string,
-//     confirmNewPassword: string,
-//     logoutAllDevices?: boolean  // par défaut true
-//   }
-//
-// Réponse :
-//   - Si logoutAllDevices = true (par défaut) :
-//       Toutes les autres sessions sont invalidées et un nouveau token
-//       est renvoyé pour la session courante (l'utilisateur reste connecté
-//       sur l'appareil actuel mais devra se reconnecter ailleurs).
-//   - Si logoutAllDevices = false :
-//       Le mot de passe est modifié sans invalider les autres sessions.
-// ═══════════════════════════════════════════════════════════════════════
 export const changePassword = async (req, res) => {
   try {
-    const {
-      currentPassword,
-      newPassword,
-      confirmNewPassword,
-      logoutAllDevices = true,
-    } = req.body || {};
+    const { currentPassword, newPassword, confirmNewPassword } = req.body || {};
 
-    if (!newPassword || !confirmNewPassword) {
+    if (!currentPassword || !newPassword || !confirmNewPassword) {
       return res.status(400).json({ msg: "Tous les champs sont requis." });
     }
     if (newPassword !== confirmNewPassword) {
@@ -495,8 +459,6 @@ export const changePassword = async (req, res) => {
         .status(400)
         .json({ msg: "Les mots de passe ne correspondent pas." });
     }
-
-    // inline strength check (replaces missing validatePasswordStrength)
     if (newPassword.length < 8) {
       return res
         .status(400)
@@ -517,50 +479,40 @@ export const changePassword = async (req, res) => {
       return res.status(404).json({ msg: "Utilisateur introuvable." });
     }
 
-    const isAddingPassword = !user.hasPassword;
+    // Garde-fou : un compte sans mot de passe doit passer par /set-password.
+    if (!user.hasPassword) {
+      return res.status(400).json({
+        msg: "Aucun mot de passe n'est défini. Utilisez « Créer un mot de passe ».",
+        code: "NO_PASSWORD_SET",
+      });
+    }
 
-    if (!isAddingPassword) {
-      if (!currentPassword) {
-        return res.status(400).json({ msg: "Mot de passe actuel requis." });
-      }
-      const isMatch = await bcrypt.compare(currentPassword, user.motDePasse);
-      if (!isMatch) {
-        return res.status(400).json({ msg: "Mot de passe actuel incorrect." });
-      }
-      const isSame = await bcrypt.compare(newPassword, user.motDePasse);
-      if (isSame) {
-        return res.status(400).json({
-          msg: "Le nouveau mot de passe doit être différent de l'ancien.",
-        });
-      }
+    const isMatch = await bcrypt.compare(currentPassword, user.motDePasse);
+    if (!isMatch) {
+      return res.status(400).json({ msg: "Mot de passe actuel incorrect." });
+    }
+
+    const isSame = await bcrypt.compare(newPassword, user.motDePasse);
+    if (isSame) {
+      return res.status(400).json({
+        msg: "Le nouveau mot de passe doit être différent de l'ancien.",
+      });
     }
 
     user.motDePasse = await bcrypt.hash(newPassword, 12);
     user.hasPassword = true;
-
-    if (logoutAllDevices) {
-      user.tokenVersion = (user.tokenVersion || 0) + 1;
-    }
-
+    // Invalidation systématique des autres sessions par sécurité.
+    user.tokenVersion = (user.tokenVersion || 0) + 1;
     await user.save();
 
+    // Nouveau token pour conserver UNIQUEMENT la session courante.
     const newToken = generateToken(user);
 
-    // reuse existing helper instead of the broken getRequestMeta / sendPasswordChangedEmail
-    notifyPasswordChange(
-      user,
-      isAddingPassword ? "set" : "change",
-      req,
-      !!logoutAllDevices,
-    );
+    notifyPasswordChange(user, "change", req, true);
 
     return res.json({
-      msg: isAddingPassword
-        ? "Mot de passe ajouté avec succès."
-        : "Mot de passe modifié avec succès.",
+      msg: "Mot de passe modifié avec succès. Toutes vos autres sessions ont été déconnectées.",
       token: newToken,
-      action: isAddingPassword ? "added" : "changed",
-      loggedOutOtherDevices: !!logoutAllDevices,
     });
   } catch (err) {
     console.error("changePassword error:", err);
@@ -638,14 +590,14 @@ export const deleteMyAccount = async (req, res) => {
 
     if (confirmation !== "SUPPRIMER MON COMPTE") {
       return res.status(400).json({
-        msg: "Veuillez confirmer en écrivant 'SUPPRIMER MON COMPTE'.",
+        msg: "Veuillez confirmer en écrivant « SUPPRIMER MON COMPTE ».",
       });
     }
 
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ msg: "Utilisateur introuvable." });
 
-    // Si l'utilisateur a un vrai mot de passe, on l'exige
+    // Vérification du mot de passe uniquement si le compte en possède un.
     if (user.hasPassword) {
       if (!password) {
         return res
@@ -668,11 +620,14 @@ export const deleteMyAccount = async (req, res) => {
 
     try {
       await session.withTransaction(async () => {
+        /* ══════════ CANDIDAT ══════════ */
         if (user.role === "candidat") {
           const candidate = await Candidate.findOne({ userId }).session(
             session,
           );
+
           if (candidate) {
+            // 1. Retrait des candidatures actives
             const activeApps = await Application.find({
               candidateId: candidate._id,
               candidateStatus: {
@@ -687,13 +642,14 @@ export const deleteMyAccount = async (req, res) => {
               app.withdrawReason = "Compte supprimé par l'utilisateur";
               await app.save({ session });
 
-              await Offer.findByIdAndUpdate(
-                app.offerId,
+              await Offer.findOneAndUpdate(
+                { _id: app.offerId, nombreCandidatures: { $gt: 0 } },
                 { $inc: { nombreCandidatures: -1 } },
                 { session },
               );
             }
 
+            // 2. Annulation des entretiens actifs + marquage "candidat supprimé"
             await Interview.updateMany(
               {
                 candidateId: candidate._id,
@@ -709,17 +665,47 @@ export const deleteMyAccount = async (req, res) => {
               {
                 status: "cancelled_by_candidate",
                 cancellationReason: "Compte supprimé",
+                cancelledBy: "candidate",
                 cancelledAt: new Date(),
               },
               { session },
             );
 
+            // Snapshot du nom + flag de suppression sur TOUS les entretiens
+            // (actifs ou passés) pour éviter tout affichage "undefined".
+            await Interview.updateMany(
+              { candidateId: candidate._id },
+              {
+                candidateNameSnapshot: user.nom,
+                candidateDeleted: true,
+                candidateDeletedAt: new Date(),
+              },
+              { session },
+            );
+
+            // 3. Fermeture des conversations + snapshot
             const Conversation = (await import("../models/Conversation.js"))
               .default;
+
+            await Conversation.updateMany(
+              { candidateId: candidate._id },
+              {
+                $set: {
+                  candidateNameSnapshot: user.nom,
+                  candidateDeleted: true,
+                  candidateDeletedAt: new Date(),
+                },
+              },
+              { session },
+            );
+
             await Conversation.updateMany(
               { candidateId: candidate._id, isClosed: { $ne: true } },
               {
-                $set: { isClosed: true, closedReason: "application_closed" },
+                $set: {
+                  isClosed: true,
+                  closedReason: "candidate_deleted",
+                },
                 $push: {
                   messages: {
                     senderId: userId,
@@ -734,6 +720,7 @@ export const deleteMyAccount = async (req, res) => {
               { session },
             );
 
+            // 4. Fermeture des tickets support ouverts
             const SupportTicket = (await import("../models/SupportTicket.js"))
               .default;
             await SupportTicket.updateMany(
@@ -742,6 +729,7 @@ export const deleteMyAccount = async (req, res) => {
               { session },
             );
 
+            // 5. Nettoyage Cloudinary (non-bloquant)
             try {
               const {
                 deleteMultipleFromCloudinary,
@@ -772,13 +760,20 @@ export const deleteMyAccount = async (req, res) => {
             session,
           );
         } else if (user.role === "recruteur") {
+
+        /* ══════════ RECRUTEUR ══════════ */
           const recruiter = await Recruiter.findOne({ userId }).session(
             session,
           );
+
           if (recruiter) {
             const myOfferIds = await Offer.find({
               recruteurId: recruiter._id,
-            }).distinct("_id");
+            })
+              .distinct("_id")
+              .session(session);
+
+            // Blocage si candidatures actives en cours de traitement.
             const activeOfferApps = await Application.countDocuments({
               offerId: { $in: myOfferIds },
               recruiterStatus: {
@@ -790,13 +785,46 @@ export const deleteMyAccount = async (req, res) => {
                   "offer_declined",
                 ],
               },
-            });
+            }).session(session);
 
             if (activeOfferApps > 0) {
               throw new Error(
-                "Vous avez des candidatures actives en cours. Veuillez d'abord les traiter.",
+                "Vous avez des candidatures actives en cours. Veuillez d'abord les traiter avant de supprimer votre compte.",
               );
             }
+
+            // Les offres ne sont PAS supprimées : elles deviennent inactives
+            // et invisibles, mais conservent leur historique pour les anciennes
+            // candidatures.
+            await Offer.updateMany(
+              { recruteurId: recruiter._id },
+              {
+                $set: {
+                  actif: false,
+                  isRecruiterDeleted: true,
+                  recruiterDeletedAt: new Date(),
+                },
+              },
+              { session },
+            );
+
+            // Annulation propre des offres ANEM encore dans le pipeline.
+            const AnemOffer = (await import("../models/AnemOffer.js")).default;
+            await AnemOffer.updateMany(
+              {
+                recruiterId: recruiter._id,
+                status: {
+                  $in: ["pending_review", "depositing", "in_cooldown"],
+                },
+              },
+              {
+                $set: {
+                  status: "deleted_by_recruiter",
+                  deletedByRecruiterAt: new Date(),
+                },
+              },
+              { session },
+            );
 
             await Recruiter.deleteOne({ _id: recruiter._id }).session(session);
           }
@@ -807,6 +835,7 @@ export const deleteMyAccount = async (req, res) => {
           await AnemRegistration.deleteMany({ userId }).session(session);
         }
 
+        /* ══════════ COMMUN ══════════ */
         const Notification = (await import("../models/Notification.js"))
           .default;
         await Notification.deleteMany({ userId }).session(session);
@@ -821,9 +850,10 @@ export const deleteMyAccount = async (req, res) => {
       await session.endSession();
     }
   } catch (err) {
-    if (err.message.includes("candidatures actives")) {
+    if (err.message && err.message.includes("candidatures actives")) {
       return res.status(400).json({ msg: err.message });
     }
+    console.error("deleteMyAccount error:", err);
     res.status(500).json({ msg: err.message });
   }
 };

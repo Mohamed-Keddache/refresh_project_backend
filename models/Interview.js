@@ -27,6 +27,11 @@ const interviewSchema = new mongoose.Schema(
       ref: "Conversation",
     },
 
+    // NEW: snapshot + deletion flag for resilient recruiter views
+    candidateNameSnapshot: { type: String },
+    candidateDeleted: { type: Boolean, default: false },
+    candidateDeletedAt: { type: Date },
+
     // Numéro d'entretien pour cette candidature (Entretien #1, #2, etc.)
     interviewNumber: { type: Number, default: 1 },
 

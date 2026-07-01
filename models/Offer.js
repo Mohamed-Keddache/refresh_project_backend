@@ -37,19 +37,17 @@ const offerSchema = new mongoose.Schema(
     skills: [{ type: String, index: true }],
     wilaya: { type: String },
 
-    // ── Repostulation Settings ──
     allowRepostulation: { type: Boolean, default: true },
     repostulationCooldownDays: { type: Number, default: 30 },
     maxRepostulations: { type: Number, default: 2 },
     hiresNeeded: { type: Number },
 
-    // ── Validation Status (V2: added "pending_anem") ──
     validationStatus: {
       type: String,
       enum: [
         "draft",
-        "pending", // Classic validation by admin
-        "pending_anem", // V2: In ANEM pipeline
+        "pending",
+        "pending_anem",
         "approved",
         "rejected",
         "changes_requested",
@@ -81,12 +79,15 @@ const offerSchema = new mongoose.Schema(
     datePublication: { type: Date },
     nombreCandidatures: { type: Number, default: 0 },
 
-    // ── V2: ANEM Flag ──
     isAnem: { type: Boolean, default: false },
 
-    // ── V2: Soft Delete ──
     isDeletedByRecruiter: { type: Boolean, default: false },
     deletedByRecruiterAt: { type: Date },
+
+    // NEW: marks offers whose owning recruiter account was deleted.
+    // Keeps the document for application history but removes it from public surfaces.
+    isRecruiterDeleted: { type: Boolean, default: false },
+    recruiterDeletedAt: { type: Date },
   },
   { timestamps: true },
 );
@@ -95,7 +96,8 @@ offerSchema.methods.isVisible = function () {
   return (
     this.validationStatus === "approved" &&
     this.actif &&
-    !this.isDeletedByRecruiter
+    !this.isDeletedByRecruiter &&
+    !this.isRecruiterDeleted
   );
 };
 
@@ -107,5 +109,6 @@ offerSchema.index({ validationStatus: 1, datePublication: -1 });
 offerSchema.index({ candidateSearchMode: 1, actif: 1, validationStatus: 1 });
 offerSchema.index({ isAnem: 1, validationStatus: 1 });
 offerSchema.index({ isDeletedByRecruiter: 1 });
+offerSchema.index({ isRecruiterDeleted: 1 });
 
 export default mongoose.model("Offer", offerSchema);

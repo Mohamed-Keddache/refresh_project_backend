@@ -43,6 +43,11 @@ export const getRecruiterInterviews = async (req, res) => {
 
     const enriched = interviews.map((i) => ({
       ...i,
+      candidateName:
+        i.candidateId?.userId?.nom ||
+        i.candidateNameSnapshot ||
+        "Candidat supprimé",
+      candidateDeleted: i.candidateDeleted || !i.candidateId,
       needsAction: i.status === "rescheduled_by_candidate",
       isToday:
         new Date(i.scheduledAt).toDateString() === new Date().toDateString(),
@@ -112,9 +117,14 @@ export const getRecruiterInterviewsGrouped = async (req, res) => {
         location: interview.location,
         meetingLink: interview.meetingLink,
         candidate: {
-          nom: interview.candidateId?.userId?.nom,
+          nom:
+            interview.candidateId?.userId?.nom ||
+            interview.candidateNameSnapshot ||
+            "Candidat supprimé",
           profilePicture: interview.candidateId?.profilePicture,
+          deleted: interview.candidateDeleted || !interview.candidateId,
         },
+
         offer: {
           _id: interview.offerId?._id,
           titre: interview.offerId?.titre,
@@ -321,10 +331,14 @@ export const getRecruiterInterviewById = async (req, res) => {
 
       candidate: {
         _id: interview.candidateId?._id,
-        nom: interview.candidateId?.userId?.nom,
+        nom:
+          interview.candidateId?.userId?.nom ||
+          interview.candidateNameSnapshot ||
+          "Candidat supprimé",
         email: interview.candidateId?.userId?.email,
         profilePicture: interview.candidateId?.profilePicture,
         telephone: interview.candidateId?.telephone,
+        deleted: interview.candidateDeleted || !interview.candidateId,
       },
 
       offer: {
