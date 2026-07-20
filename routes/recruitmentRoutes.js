@@ -12,7 +12,6 @@ import {
   getPredefinedMessages,
   // Phase 2
   proposeInterview,
-  forceNewInterview,
   // Phase 3
   acceptInterview,
   proposeAlternativeDate,
@@ -38,6 +37,7 @@ import {
   // Gestion embauchés
   getMyHires,
   removeHire,
+  deleteOrphanedConversation,
 } from "../controllers/recruitmentFlowController.js";
 
 const router = express.Router();
@@ -53,11 +53,6 @@ router.post("/contact/:applicationId", ...recruiterAuth, initiateContact);
 
 // Phase 2 : Proposer un entretien
 router.post("/interviews/:applicationId", ...recruiterAuth, proposeInterview);
-router.post(
-  "/interviews/:applicationId/force",
-  ...recruiterAuth,
-  forceNewInterview,
-);
 
 // Phase 4 : Actions recruteur sur entretien
 router.put(
@@ -98,6 +93,12 @@ router.post("/offers/:offerId/close", ...recruiterAuth, closeOffer);
 
 // Gestion embauchés
 router.get("/my-hires", ...recruiterAuth, getMyHires);
+
+router.delete(
+  "/conversations/:conversationId/orphaned",
+  ...recruiterAuth,
+  deleteOrphanedConversation,
+);
 
 // ============================================
 // ROUTES CANDIDAT

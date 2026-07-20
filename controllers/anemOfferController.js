@@ -6,14 +6,56 @@ import Company from "../models/Company.js";
 import Notification from "../models/Notification.js";
 import { logAdminAction } from "../models/AdminLog.js";
 import SystemSettings from "../models/SystemSettings.js";
+import {
+  emitAnemOfferUpdate,
+  emitAnemOfferAdminUpdate,
+} from "../services/anemSocketEvents.js";
 
-// ════════════════════════════════════════════════════════════════
-//  RECRUITER ENDPOINTS
-// ════════════════════════════════════════════════════════════════
+// Helper: build a lightweight pipeline payload for socket emissions
+const buildAnemOfferPayload = (anemOffer, offer = null) => ({
+  _id: anemOffer._id,
+  offerId: anemOffer.offerId,
+  anemId: anemOffer.anemId,
+  status: anemOffer.status,
+  pdfDownloaded: anemOffer.pdfDownloaded,
+  cooldownStartedAt: anemOffer.cooldownStartedAt,
+  cooldownEndsAt: anemOffer.cooldownEndsAt,
+  cooldownDays: anemOffer.cooldownDays,
+  cooldownMs: anemOffer.cooldownMs,
+  failureReason: anemOffer.failureReason,
+  failureOption: anemOffer.failureOption,
+  failedAt: anemOffer.failedAt,
+  publishedAt: anemOffer.publishedAt,
+  recruiterAction: anemOffer.recruiterAction,
+  offerTitle: offer?.titre,
+  offerActif: offer?.actif,
+  offerValidationStatus: offer?.validationStatus,
+  updatedAt: new Date(),
+});
 
-/**
- * Check if the recruiter is eligible to create an ANEM offer
- */
+// Helper: resolve default cooldown (ms + days) from settings
+const resolveDefaultCooldown = async () => {
+  const defaultMs = await SystemSettings.getSetting(
+    "anem_offer_cooldown_ms",
+    null,
+  );
+  if (defaultMs !== null && defaultMs !== undefined) {
+    const ms = Number(defaultMs);
+    return {
+      ms,
+      days: Math.max(0, Math.round(ms / (24 * 60 * 60 * 1000))),
+    };
+  }
+  const defaultDays = await SystemSettings.getSetting(
+    "anem_offer_cooldown_days",
+    21,
+  );
+  return {
+    ms: Number(defaultDays) * 24 * 60 * 60 * 1000,
+    days: Number(defaultDays),
+  };
+};
+
 export const checkAnemEligibility = async (req, res) => {
   try {
     const recruiter = await Recruiter.findOne({ userId: req.user.id });
@@ -34,9 +76,6 @@ export const checkAnemEligibility = async (req, res) => {
   }
 };
 
-/**
- * Get all ANEM offers for the logged-in recruiter with their pipeline status
- */
 export const getRecruiterAnemOffers = async (req, res) => {
   try {
     const recruiter = await Recruiter.findOne({ userId: req.user.id });
@@ -46,7 +85,7 @@ export const getRecruiterAnemOffers = async (req, res) => {
 
     const anemOffers = await AnemOffer.find({
       recruiterId: recruiter._id,
-      status: { $ne: "deleted_by_recruiter" }, // hide soft-deleted
+      status: { $ne: "deleted_by_recruiter" },
     })
       .populate(
         "offerId",
@@ -64,7 +103,10 @@ export const getRecruiterAnemOffers = async (req, res) => {
       anemId: ao.anemId,
       status: ao.status,
       pdfDownloaded: ao.pdfDownloaded,
+      cooldownStartedAt: ao.cooldownStartedAt,
       cooldownEndsAt: ao.cooldownEndsAt,
+      cooldownDays: ao.cooldownDays,
+      cooldownMs: ao.cooldownMs,
       cooldownRemaining:
         ao.status === "in_cooldown" && ao.cooldownEndsAt
           ? Math.max(
@@ -88,9 +130,6 @@ export const getRecruiterAnemOffers = async (req, res) => {
   }
 };
 
-/**
- * Get ANEM offer status for a specific offer
- */
 export const getOfferAnemStatus = async (req, res) => {
   try {
     const { offerId } = req.params;
@@ -122,7 +161,10 @@ export const getOfferAnemStatus = async (req, res) => {
         status: anemOffer.status,
         anemId: anemOffer.anemId,
         pdfDownloaded: anemOffer.pdfDownloaded,
+        cooldownStartedAt: anemOffer.cooldownStartedAt,
         cooldownEndsAt: anemOffer.cooldownEndsAt,
+        cooldownDays: anemOffer.cooldownDays,
+        cooldownMs: anemOffer.cooldownMs,
         cooldownRemaining:
           anemOffer.status === "in_cooldown" && anemOffer.cooldownEndsAt
             ? Math.max(
@@ -145,9 +187,6 @@ export const getOfferAnemStatus = async (req, res) => {
   }
 };
 
-/**
- * Phase 4 - Recruiter publishes directly (Option B1 only)
- */
 export const recruiterPublishDirect = async (req, res) => {
   try {
     const { offerId } = req.params;
@@ -180,7 +219,15 @@ export const recruiterPublishDirect = async (req, res) => {
       });
     }
 
-    // Update AnemOffer
+    const offer = await Offer.findById(offerId);
+    if (!offer) {
+      anemOffer.status = "deleted_by_recruiter";
+      await anemOffer.save();
+      return res.status(400).json({
+        msg: "Impossible de publier une offre supprimée",
+      });
+    }
+
     anemOffer.status = "bypassed";
     anemOffer.recruiterActionAt = new Date();
     anemOffer.recruiterAction = "published_direct";
@@ -188,18 +235,9 @@ export const recruiterPublishDirect = async (req, res) => {
     anemOffer.addAuditEntry("recruiter_published_direct", req.user.id, {}, req);
     await anemOffer.save();
 
-    // Publish the offer
-    const offer = await Offer.findById(offerId);
-    if (!offer || offer.actif === false) {
-      anemOffer.status = "deleted_by_recruiter";
-      await anemOffer.save();
-
-      return res.status(400).json({
-        msg: "Impossible de publier une offre fermée ou supprimée",
-      });
-    }
     offer.validationStatus = "approved";
     offer.actif = true;
+    offer.isAnem = false;
     offer.datePublication = new Date();
     offer.validationHistory.push({
       status: "approved",
@@ -207,6 +245,10 @@ export const recruiterPublishDirect = async (req, res) => {
       date: new Date(),
     });
     await offer.save();
+
+    const payload = buildAnemOfferPayload(anemOffer, offer);
+    emitAnemOfferUpdate(recruiter.userId.toString(), payload);
+    emitAnemOfferAdminUpdate(payload);
 
     res.json({
       msg: "Offre publiée avec succès ✅",
@@ -222,9 +264,6 @@ export const recruiterPublishDirect = async (req, res) => {
   }
 };
 
-/**
- * Phase 4 - Recruiter submits to classic validation (Option B2)
- */
 export const recruiterSubmitClassic = async (req, res) => {
   try {
     const { offerId } = req.params;
@@ -250,7 +289,6 @@ export const recruiterSubmitClassic = async (req, res) => {
       });
     }
 
-    // Update AnemOffer
     anemOffer.status = "redirected_classic";
     anemOffer.recruiterActionAt = new Date();
     anemOffer.recruiterAction = "submitted_classic";
@@ -262,10 +300,9 @@ export const recruiterSubmitClassic = async (req, res) => {
     );
     await anemOffer.save();
 
-    // Send offer to classic validation pipeline
     const offer = await Offer.findById(offerId);
     offer.validationStatus = "pending";
-    offer.isAnem = false; // No longer ANEM
+    offer.isAnem = false;
     offer.validationHistory.push({
       status: "pending",
       message: "Soumis au circuit classique après échec ANEM",
@@ -273,7 +310,6 @@ export const recruiterSubmitClassic = async (req, res) => {
     });
     await offer.save();
 
-    // Notify admins
     const admins = await User.find({ role: "admin" });
     const notifPromises = admins.map((admin) =>
       Notification.create({
@@ -283,6 +319,10 @@ export const recruiterSubmitClassic = async (req, res) => {
       }),
     );
     await Promise.all(notifPromises);
+
+    const payload = buildAnemOfferPayload(anemOffer, offer);
+    emitAnemOfferUpdate(recruiter.userId.toString(), payload);
+    emitAnemOfferAdminUpdate(payload);
 
     res.json({
       msg: "Offre soumise au circuit de validation classique ✅",
@@ -297,9 +337,6 @@ export const recruiterSubmitClassic = async (req, res) => {
   }
 };
 
-/**
- * Phase 4 - Recruiter soft deletes offer
- */
 export const recruiterDeleteAnemOffer = async (req, res) => {
   try {
     const { offerId } = req.params;
@@ -318,7 +355,6 @@ export const recruiterDeleteAnemOffer = async (req, res) => {
       return res.status(404).json({ msg: "Offre ANEM introuvable" });
     }
 
-    // Allow deletion from failed status or pending_review
     const deletableStatuses = ["failed", "pending_review"];
     if (!deletableStatuses.includes(anemOffer.status)) {
       return res.status(400).json({
@@ -327,7 +363,6 @@ export const recruiterDeleteAnemOffer = async (req, res) => {
       });
     }
 
-    // Soft delete AnemOffer
     anemOffer.status = "deleted_by_recruiter";
     anemOffer.deletedByRecruiterAt = new Date();
     anemOffer.recruiterActionAt = new Date();
@@ -335,12 +370,15 @@ export const recruiterDeleteAnemOffer = async (req, res) => {
     anemOffer.addAuditEntry("recruiter_deleted", req.user.id, {}, req);
     await anemOffer.save();
 
-    // Soft delete the Offer
     const offer = await Offer.findById(offerId);
     offer.isDeletedByRecruiter = true;
     offer.deletedByRecruiterAt = new Date();
     offer.actif = false;
     await offer.save();
+
+    const payload = buildAnemOfferPayload(anemOffer, offer);
+    emitAnemOfferUpdate(recruiter.userId.toString(), payload);
+    emitAnemOfferAdminUpdate(payload);
 
     res.json({ msg: "Offre supprimée avec succès" });
   } catch (err) {
@@ -348,13 +386,6 @@ export const recruiterDeleteAnemOffer = async (req, res) => {
   }
 };
 
-// ════════════════════════════════════════════════════════════════
-//  ADMIN ENDPOINTS
-// ════════════════════════════════════════════════════════════════
-
-/**
- * Phase 5 - Admin: Get ANEM offers with advanced filters
- */
 export const getAdminAnemOffers = async (req, res) => {
   try {
     const {
@@ -373,40 +404,34 @@ export const getAdminAnemOffers = async (req, res) => {
 
     let query = {};
 
-    // Status filter
     if (status) {
       if (status === "all") {
-        // Show everything except hard-deleted
+        // no filter
       } else if (status === "active_pipeline") {
         query.status = { $in: ["pending_review", "depositing", "in_cooldown"] };
       } else {
         query.status = status;
       }
     } else {
-      // Default: exclude deleted_by_recruiter from main view unless explicitly requested
       query.status = { $ne: "deleted_by_recruiter" };
     }
 
-    // Search by ANEM ID
     if (anemId) {
       query.anemId = { $regex: anemId, $options: "i" };
     }
 
-    // PDF filter
     if (pdfDownloaded === "true") {
       query.pdfDownloaded = true;
     } else if (pdfDownloaded === "false") {
       query.pdfDownloaded = false;
     }
 
-    // Failed since X days
     if (failedSinceDays && status === "failed") {
       const cutoff = new Date();
       cutoff.setDate(cutoff.getDate() - parseInt(failedSinceDays));
       query.failedAt = { $lte: cutoff };
     }
 
-    // Date range
     if (dateFrom || dateTo) {
       query.createdAt = {};
       if (dateFrom) query.createdAt.$gte = new Date(dateFrom);
@@ -417,26 +442,17 @@ export const getAdminAnemOffers = async (req, res) => {
       }
     }
 
-    // Text search (offer title, company name)
     if (search) {
       const searchRegex = { $regex: search, $options: "i" };
-
-      // Find matching offers
-      const matchingOffers = await Offer.find({
-        titre: searchRegex,
-      }).select("_id");
+      const matchingOffers = await Offer.find({ titre: searchRegex }).select(
+        "_id",
+      );
       const offerIds = matchingOffers.map((o) => o._id);
-
-      // Find matching companies
       const matchingCompanies = await Company.find({
         name: searchRegex,
       }).select("_id");
       const companyIds = matchingCompanies.map((c) => c._id);
-
-      // Find matching recruiters by user name
-      const matchingUsers = await User.find({
-        nom: searchRegex,
-      }).select("_id");
+      const matchingUsers = await User.find({ nom: searchRegex }).select("_id");
       const userIds = matchingUsers.map((u) => u._id);
       const matchingRecruiters = await Recruiter.find({
         userId: { $in: userIds },
@@ -499,7 +515,10 @@ export const getAdminAnemOffers = async (req, res) => {
       },
       depositedAt: ao.depositedAt,
       depositedBy: ao.depositedBy?.nom,
+      cooldownStartedAt: ao.cooldownStartedAt,
       cooldownEndsAt: ao.cooldownEndsAt,
+      cooldownDays: ao.cooldownDays,
+      cooldownMs: ao.cooldownMs,
       cooldownRemaining:
         ao.status === "in_cooldown" && ao.cooldownEndsAt
           ? Math.max(
@@ -547,9 +566,6 @@ export const getAdminAnemOffers = async (req, res) => {
   }
 };
 
-/**
- * Admin: Get PDF data for a single ANEM offer
- */
 export const getAnemOfferPdfData = async (req, res) => {
   try {
     const { anemOfferId } = req.params;
@@ -559,7 +575,6 @@ export const getAnemOfferPdfData = async (req, res) => {
       return res.status(404).json({ msg: "Offre ANEM introuvable" });
     }
 
-    // Track download
     anemOffer.pdfDownloaded = true;
     anemOffer.pdfDownloads.push({
       downloadedBy: req.user.id,
@@ -579,15 +594,14 @@ export const getAnemOfferPdfData = async (req, res) => {
       req,
     );
 
+    emitAnemOfferAdminUpdate(buildAnemOfferPayload(anemOffer));
+
     res.json(pdfData);
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
 };
 
-/**
- * Admin: Bulk get PDF data for multiple ANEM offers
- */
 export const bulkGetAnemOfferPdfData = async (req, res) => {
   try {
     const { anemOfferIds } = req.body;
@@ -614,7 +628,6 @@ export const bulkGetAnemOfferPdfData = async (req, res) => {
           continue;
         }
 
-        // Track download
         anemOffer.pdfDownloaded = true;
         anemOffer.pdfDownloads.push({
           downloadedBy: req.user.id,
@@ -631,6 +644,7 @@ export const bulkGetAnemOfferPdfData = async (req, res) => {
 
         const pdfData = await anemOffer.generatePdfData();
         results.push({ id, success: true, data: pdfData });
+        emitAnemOfferAdminUpdate(buildAnemOfferPayload(anemOffer));
       } catch (err) {
         results.push({ id, success: false, error: err.message });
       }
@@ -656,9 +670,6 @@ export const bulkGetAnemOfferPdfData = async (req, res) => {
   }
 };
 
-/**
- * Phase 2 - Admin: Mark offer(s) as depositing
- */
 export const markAsDepositing = async (req, res) => {
   try {
     const { anemOfferIds } = req.body;
@@ -696,6 +707,13 @@ export const markAsDepositing = async (req, res) => {
         await anemOffer.save();
 
         results.success.push(id);
+
+        const offer = await Offer.findById(anemOffer.offerId);
+        const payload = buildAnemOfferPayload(anemOffer, offer);
+        const recruiter = await Recruiter.findById(anemOffer.recruiterId);
+        if (recruiter)
+          emitAnemOfferUpdate(recruiter.userId.toString(), payload);
+        emitAnemOfferAdminUpdate(payload);
       } catch (err) {
         results.failed.push({ id, reason: err.message });
       }
@@ -720,9 +738,6 @@ export const markAsDepositing = async (req, res) => {
   }
 };
 
-/**
- * Shortcut: Mark all downloaded PDFs as depositing
- */
 export const markDownloadedAsDepositing = async (req, res) => {
   try {
     const downloadedOffers = await AnemOffer.find({
@@ -731,15 +746,10 @@ export const markDownloadedAsDepositing = async (req, res) => {
     });
 
     if (downloadedOffers.length === 0) {
-      return res.json({
-        msg: "Aucune offre téléchargée en attente",
-        count: 0,
-      });
+      return res.json({ msg: "Aucune offre téléchargée en attente", count: 0 });
     }
 
     const ids = downloadedOffers.map((o) => o._id);
-
-    // Reuse the bulk function logic
     req.body = { anemOfferIds: ids };
     return markAsDepositing(req, res);
   } catch (err) {
@@ -747,13 +757,10 @@ export const markDownloadedAsDepositing = async (req, res) => {
   }
 };
 
-/**
- * Phase 3A - Admin: Mark deposit as successful (starts cooldown)
- */
 export const markDepositSuccess = async (req, res) => {
   try {
     const { anemOfferId } = req.params;
-    const { cooldownDays, comment } = req.body;
+    const { cooldownDays, cooldownMs, comment } = req.body;
 
     const anemOffer = await AnemOffer.findById(anemOfferId);
     if (!anemOffer) {
@@ -767,18 +774,33 @@ export const markDepositSuccess = async (req, res) => {
       });
     }
 
-    const days = cooldownDays || 21;
-    const cooldownEnd = new Date();
-    cooldownEnd.setDate(cooldownEnd.getDate() + days);
+    let durationMs;
+    if (cooldownMs !== undefined && cooldownMs !== null) {
+      durationMs = Number(cooldownMs);
+    } else if (cooldownDays !== undefined && cooldownDays !== null) {
+      durationMs = Number(cooldownDays) * 24 * 60 * 60 * 1000;
+    } else {
+      const def = await resolveDefaultCooldown();
+      durationMs = def.ms;
+    }
+
+    if (isNaN(durationMs) || durationMs < 0) {
+      durationMs = 21 * 24 * 60 * 60 * 1000;
+    }
+
+    const now = new Date();
+    const cooldownEnd = new Date(now.getTime() + durationMs);
+    const days = Math.max(0, Math.round(durationMs / (24 * 60 * 60 * 1000)));
 
     anemOffer.status = "in_cooldown";
-    anemOffer.cooldownStartedAt = new Date();
+    anemOffer.cooldownStartedAt = now;
     anemOffer.cooldownEndsAt = cooldownEnd;
     anemOffer.cooldownDays = days;
+    anemOffer.cooldownMs = durationMs;
     anemOffer.addAuditEntry(
       "deposit_success",
       req.user.id,
-      { cooldownDays: days },
+      { cooldownMs: durationMs, cooldownDays: days },
       req,
     );
 
@@ -792,13 +814,32 @@ export const markDepositSuccess = async (req, res) => {
 
     await anemOffer.save();
 
-    // Notify recruiter
+    // Immediate publish if cooldown is zero/negative
+    let publishedImmediately = false;
+    if (durationMs <= 0 || cooldownEnd <= new Date()) {
+      try {
+        await publishSingleAnemOffer(anemOffer);
+        publishedImmediately = true;
+      } catch (pubErr) {
+        console.error("Immediate publish error:", pubErr);
+      }
+    }
+
     const recruiter = await Recruiter.findById(anemOffer.recruiterId);
-    if (recruiter) {
+    if (recruiter && !publishedImmediately) {
       const offer = await Offer.findById(anemOffer.offerId);
+      const humanDelay =
+        durationMs < 60 * 1000
+          ? `${Math.round(durationMs / 1000)} seconde(s)`
+          : durationMs < 60 * 60 * 1000
+            ? `${Math.round(durationMs / 60000)} minute(s)`
+            : durationMs < 24 * 60 * 60 * 1000
+              ? `${Math.round(durationMs / 3600000)} heure(s)`
+              : `${days} jour(s)`;
+
       await Notification.create({
         userId: recruiter.userId,
-        message: `Bonne nouvelle ! Votre offre "${offer?.titre}" a été déposée à l'ANEM avec succès. Elle sera publiée automatiquement dans ${days} jours.`,
+        message: `Bonne nouvelle ! Votre offre "${offer?.titre}" a été déposée à l'ANEM avec succès. Elle sera publiée automatiquement dans ${humanDelay}.`,
         type: "validation",
       });
     }
@@ -807,23 +848,34 @@ export const markDepositSuccess = async (req, res) => {
       req.user.id,
       "anem_offer_deposit_success",
       { type: "anem_offer", id: anemOffer._id },
-      { cooldownDays: days, cooldownEndsAt: cooldownEnd },
+      {
+        cooldownMs: durationMs,
+        cooldownDays: days,
+        cooldownEndsAt: cooldownEnd,
+      },
       req,
     );
 
+    // Emit real-time update (fetch fresh if published immediately)
+    const freshOffer = await Offer.findById(anemOffer.offerId);
+    const payload = buildAnemOfferPayload(anemOffer, freshOffer);
+    if (recruiter) emitAnemOfferUpdate(recruiter.userId.toString(), payload);
+    emitAnemOfferAdminUpdate(payload);
+
     res.json({
-      msg: `Dépôt réussi. L'offre sera publiée automatiquement dans ${days} jours.`,
+      msg: publishedImmediately
+        ? "Dépôt réussi. L'offre a été publiée immédiatement."
+        : "Dépôt réussi. L'offre sera publiée automatiquement.",
       cooldownEndsAt: cooldownEnd,
+      cooldownStartedAt: now,
       cooldownDays: days,
+      cooldownMs: durationMs,
     });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
 };
 
-/**
- * Phase 3B - Admin: Mark deposit as failed
- */
 export const markDepositFailed = async (req, res) => {
   try {
     const { anemOfferId } = req.params;
@@ -874,10 +926,9 @@ export const markDepositFailed = async (req, res) => {
 
     await anemOffer.save();
 
-    // Notify recruiter with appropriate message
     const recruiter = await Recruiter.findById(anemOffer.recruiterId);
+    const offer = await Offer.findById(anemOffer.offerId);
     if (recruiter) {
-      const offer = await Offer.findById(anemOffer.offerId);
       const optionMsg =
         failureOption === "allow_direct_publish"
           ? "Vous pouvez publier votre offre directement ou la supprimer."
@@ -898,6 +949,10 @@ export const markDepositFailed = async (req, res) => {
       req,
     );
 
+    const payload = buildAnemOfferPayload(anemOffer, offer);
+    if (recruiter) emitAnemOfferUpdate(recruiter.userId.toString(), payload);
+    emitAnemOfferAdminUpdate(payload);
+
     res.json({
       msg: "Échec du dépôt enregistré. Le recruteur a été notifié.",
       failureOption,
@@ -907,9 +962,6 @@ export const markDepositFailed = async (req, res) => {
   }
 };
 
-/**
- * Admin: Add note to ANEM offer
- */
 export const addAnemOfferNote = async (req, res) => {
   try {
     const { anemOfferId } = req.params;
@@ -932,7 +984,6 @@ export const addAnemOfferNote = async (req, res) => {
     anemOffer.addAuditEntry("note_added", req.user.id, { isPublic }, req);
     await anemOffer.save();
 
-    // If public note, notify recruiter
     if (isPublic) {
       const recruiter = await Recruiter.findById(anemOffer.recruiterId);
       if (recruiter) {
@@ -968,9 +1019,6 @@ export const addAnemOfferNote = async (req, res) => {
   }
 };
 
-/**
- * Admin: Get details of a single ANEM offer
- */
 export const getAnemOfferDetails = async (req, res) => {
   try {
     const { anemOfferId } = req.params;
@@ -1002,9 +1050,6 @@ export const getAnemOfferDetails = async (req, res) => {
   }
 };
 
-/**
- * Admin: View soft-deleted offers (with "Supprimée par le recruteur" tag)
- */
 export const getDeletedAnemOffers = async (req, res) => {
   try {
     const { page = 1, limit = 20 } = req.query;
@@ -1049,9 +1094,6 @@ export const getDeletedAnemOffers = async (req, res) => {
   }
 };
 
-/**
- * Phase 6 - Admin: Hard delete ANEM offer(s)
- */
 export const hardDeleteAnemOffers = async (req, res) => {
   try {
     const { anemOfferIds } = req.body;
@@ -1074,10 +1116,8 @@ export const hardDeleteAnemOffers = async (req, res) => {
           continue;
         }
 
-        // Also delete the associated offer
         await Offer.findByIdAndDelete(anemOffer.offerId);
         await AnemOffer.findByIdAndDelete(id);
-
         results.success.push(id);
       } catch (err) {
         results.failed.push({ id, reason: err.message });
@@ -1103,9 +1143,6 @@ export const hardDeleteAnemOffers = async (req, res) => {
   }
 };
 
-/**
- * Admin: Get ANEM offer stats for dashboard
- */
 export const getAnemOfferStats = async (req, res) => {
   try {
     const [
@@ -1115,8 +1152,6 @@ export const getAnemOfferStats = async (req, res) => {
       staleFailures30,
     ] = await Promise.all([
       AnemOffer.aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }]),
-
-      // Offers expiring in next 3 days
       AnemOffer.countDocuments({
         status: "in_cooldown",
         cooldownEndsAt: {
@@ -1124,8 +1159,6 @@ export const getAnemOfferStats = async (req, res) => {
           $gte: new Date(),
         },
       }),
-
-      // Failures > 7 days
       (() => {
         const d = new Date();
         d.setDate(d.getDate() - 7);
@@ -1134,8 +1167,6 @@ export const getAnemOfferStats = async (req, res) => {
           failedAt: { $lte: d },
         });
       })(),
-
-      // Failures > 30 days
       (() => {
         const d = new Date();
         d.setDate(d.getDate() - 30);
@@ -1151,7 +1182,6 @@ export const getAnemOfferStats = async (req, res) => {
       countsMap[s._id] = s.count;
     });
 
-    // Get auto-cleanup setting
     const autoCleanupEnabled = await SystemSettings.getSetting(
       "anem_offer_auto_cleanup_enabled",
       false,
@@ -1160,6 +1190,9 @@ export const getAnemOfferStats = async (req, res) => {
       "anem_offer_auto_cleanup_days",
       90,
     );
+
+    // Resolve default cooldown to expose to admin UI
+    const defaultCooldown = await resolveDefaultCooldown();
 
     res.json({
       overview: {
@@ -1180,6 +1213,8 @@ export const getAnemOfferStats = async (req, res) => {
       settings: {
         autoCleanupEnabled,
         autoCleanupDays,
+        defaultCooldownMs: defaultCooldown.ms,
+        defaultCooldownDays: defaultCooldown.days,
       },
       statusCounts: countsMap,
     });
@@ -1188,9 +1223,6 @@ export const getAnemOfferStats = async (req, res) => {
   }
 };
 
-/**
- * Admin: Toggle auto-cleanup setting
- */
 export const toggleAutoCleanup = async (req, res) => {
   try {
     const { enabled, days } = req.body;
@@ -1235,13 +1267,45 @@ export const toggleAutoCleanup = async (req, res) => {
   }
 };
 
-// ════════════════════════════════════════════════════════════════
-//  SCHEDULED TASKS (called from server.js)
-// ════════════════════════════════════════════════════════════════
+export const publishSingleAnemOffer = async (anemOffer, byUser = null) => {
+  const offer = await Offer.findById(anemOffer.offerId);
+  if (!offer) return false;
 
-/**
- * Auto-publish offers whose cooldown has expired
- */
+  offer.validationStatus = "approved";
+  offer.actif = true;
+  offer.datePublication = new Date();
+  offer.validationHistory.push({
+    status: "approved",
+    message: "Publication automatique après délai ANEM",
+    date: new Date(),
+  });
+  await offer.save();
+
+  anemOffer.status = "published";
+  anemOffer.publishedAt = new Date();
+  anemOffer.addAuditEntry("auto_published", byUser, {
+    cooldownDays: anemOffer.cooldownDays,
+    cooldownMs: anemOffer.cooldownMs,
+  });
+  await anemOffer.save();
+
+  const recruiter = await Recruiter.findById(anemOffer.recruiterId);
+  if (recruiter) {
+    await Notification.create({
+      userId: recruiter.userId,
+      message: `Votre offre "${offer.titre}" est maintenant publiée après le délai ANEM ! 🎉`,
+      type: "validation",
+    });
+    emitAnemOfferUpdate(
+      recruiter.userId.toString(),
+      buildAnemOfferPayload(anemOffer, offer),
+    );
+  }
+  emitAnemOfferAdminUpdate(buildAnemOfferPayload(anemOffer, offer));
+
+  return true;
+};
+
 export const processExpiredCooldowns = async () => {
   try {
     const expiredOffers = await AnemOffer.getExpiredCooldowns();
@@ -1249,39 +1313,8 @@ export const processExpiredCooldowns = async () => {
 
     for (const anemOffer of expiredOffers) {
       try {
-        // Publish the offer
-        const offer = await Offer.findById(anemOffer.offerId);
-        if (!offer) continue;
-
-        offer.validationStatus = "approved";
-        offer.actif = true;
-        offer.datePublication = new Date();
-        offer.validationHistory.push({
-          status: "approved",
-          message: "Publication automatique après délai ANEM de 21 jours",
-          date: new Date(),
-        });
-        await offer.save();
-
-        // Update AnemOffer
-        anemOffer.status = "published";
-        anemOffer.publishedAt = new Date();
-        anemOffer.addAuditEntry("auto_published", null, {
-          cooldownDays: anemOffer.cooldownDays,
-        });
-        await anemOffer.save();
-
-        // Notify recruiter
-        const recruiter = await Recruiter.findById(anemOffer.recruiterId);
-        if (recruiter) {
-          await Notification.create({
-            userId: recruiter.userId,
-            message: `Votre offre "${offer.titre}" est maintenant publiée après le délai ANEM ! 🎉`,
-            type: "validation",
-          });
-        }
-
-        publishedCount++;
+        const ok = await publishSingleAnemOffer(anemOffer);
+        if (ok) publishedCount++;
       } catch (err) {
         console.error(
           `Error auto-publishing ANEM offer ${anemOffer._id}:`,
@@ -1297,9 +1330,6 @@ export const processExpiredCooldowns = async () => {
   }
 };
 
-/**
- * Auto-cleanup stale failures (hard delete)
- */
 export const processAutoCleanup = async () => {
   try {
     const enabled = await SystemSettings.getSetting(
@@ -1341,13 +1371,6 @@ export const processAutoCleanup = async () => {
   }
 };
 
-// ════════════════════════════════════════════════════════════════
-//  INTERNAL HELPER (called from recruiterController.createOffer)
-// ════════════════════════════════════════════════════════════════
-
-/**
- * Create a V2 AnemOffer entry when recruiter creates an offer with ANEM
- */
 export const createAnemOfferV2 = async (
   offerId,
   recruiterId,
@@ -1366,5 +1389,9 @@ export const createAnemOfferV2 = async (
 
   anemOffer.addAuditEntry("created", null, { anemId });
   await anemOffer.save();
+
+  // Notify admins live of a new ANEM offer in the pipeline
+  emitAnemOfferAdminUpdate(buildAnemOfferPayload(anemOffer));
+
   return anemOffer;
 };

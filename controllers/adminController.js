@@ -1110,7 +1110,13 @@ export const proposeCandidateToOffer = async (req, res) => {
       },
     });
 
-    offer.nombreCandidatures += 1;
+    // Nouvelle candidature via proposition admin : historique +1, recompute actif
+    const { syncNombreCandidatures } =
+      await import("./recruitmentFlowController.js");
+    await Offer.findByIdAndUpdate(offer._id, {
+      $inc: { candidaturesRecues: 1 },
+    });
+    await syncNombreCandidatures(offer._id);
     await offer.save();
 
     if (offer.recruteurId?.userId) {

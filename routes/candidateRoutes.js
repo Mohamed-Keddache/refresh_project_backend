@@ -36,6 +36,8 @@ import {
   getCandidateStats,
   getActivityTimeline,
   getRecommendedOffers,
+  getFinalizationStatus,
+  finalizeAccount,
 } from "../controllers/candidateController.js";
 
 import {
@@ -49,6 +51,7 @@ import {
   withdrawApplication,
   cancelApplication,
   checkApplicationStatus,
+  getCandidateBadgeCounts,
 } from "../controllers/candidateApplicationController.js";
 
 import {
@@ -71,6 +74,10 @@ router.get("/profil", getProfile);
 router.put("/profil", validators.updateProfile, updateProfile);
 router.put("/compte", updateAccount);
 router.get("/stats", getCandidateStats);
+router.get("/finalization-status", getFinalizationStatus);
+router.post("/finalize-account", finalizeAccount);
+
+router.get("/badge-counts", getCandidateBadgeCounts);
 router.get("/activity", getActivityTimeline);
 
 router.post(

@@ -111,6 +111,14 @@ systemSettingsSchema.statics.initializeDefaults = async function () {
       category: "general",
     },
     {
+      key: "anem_offer_cooldown_ms",
+      value: 21 * 24 * 60 * 60 * 1000,
+      description:
+        "Durée de cooldown ANEM en millisecondes (permet réglage fin: minutes/secondes pour tests). Prioritaire sur anem_offer_cooldown_days.",
+      category: "general",
+    },
+
+    {
       key: "storage_mode",
       value: "cloudinary", //"local_storage"
       description:

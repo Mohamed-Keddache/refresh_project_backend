@@ -1,4 +1,3 @@
-//recruitmentFlowController.js
 import Application from "../models/Application.js";
 import Interview from "../models/Interview.js";
 import Conversation from "../models/Conversation.js";
@@ -16,13 +15,15 @@ import {
 import {
   emitInterviewNew,
   emitInterviewUpdate,
+  emitInterviewCardUpdate,
   emitApplicationUpdate,
   emitNewMessage,
+  emitConversationClosed,
+  emitConversationUpdate,
+  emitUnreadCount,
 } from "../services/socketEvents.js";
 
-// ============================================================
-// HELPERS
-// ============================================================
+/* ═══════════════════ HELPERS ═══════════════════ */
 
 const getRecruiterProfile = async (userId) => {
   const recruiter = await Recruiter.findOne({ userId }).populate("companyId");
@@ -55,40 +56,79 @@ const pushStatusHistory = (
     note,
   });
 };
-// ▶ NOUVELLE FONCTION UTILITAIRE: Reconciliation de nombreCandidatures
-// Appelez cette fonction périodiquement ou après des opérations critiques
-export const syncNombreCandidatures = async (offerId) => {
-  const activeCount = await Application.countDocuments({
-    offerId,
-    candidateStatus: { $nin: ["cancelled", "retiree"] },
-  });
 
-  await Offer.findByIdAndUpdate(offerId, {
+// Statuts considérés comme ACTIFS pour nombreCandidatures
+const ACTIVE_CANDIDATE_STATUSES = [
+  "envoyee",
+  "en_cours",
+  "entretien",
+  "retenue",
+];
+
+/**
+ * Recalcule nombreCandidatures = candidatures ACTIVES.
+ * Source unique de vérité. À appeler après toute transition de statut.
+ * Accepte une session optionnelle pour usage transactionnel.
+ */
+export const syncNombreCandidatures = async (offerId, session = null) => {
+  const query = Application.countDocuments({
+    offerId,
+    candidateStatus: { $in: ACTIVE_CANDIDATE_STATUSES },
+  });
+  if (session) query.session(session);
+  const activeCount = await query;
+
+  const update = Offer.findByIdAndUpdate(offerId, {
     nombreCandidatures: activeCount,
   });
+  if (session) update.session(session);
+  await update;
 
   return activeCount;
 };
-// ============================================================
-// PHASE 1 : PREMIER CONTACT
-// ============================================================
 
-/**
- * POST /api/recruitment/contact/:applicationId
- * Le recruteur contacte un candidat via un message pré-défini
- */
+/* Helper pour pousser un message système + resync unread + socket */
+const pushSystemMessage = async (
+  conversation,
+  {
+    senderId,
+    content,
+    messageType = "system",
+    metadata = {},
+    toCandidate = true,
+  },
+) => {
+  if (!conversation) return null;
+  conversation.messages.push({
+    senderId,
+    senderType: "system",
+    content,
+    messageType,
+    metadata,
+  });
+  if (toCandidate) conversation.unreadByCandidate += 1;
+  else conversation.unreadByRecruiter += 1;
+  conversation.lastMessageAt = new Date();
+  await conversation.save();
+
+  const lastMsg = conversation.messages[conversation.messages.length - 1];
+  emitNewMessage(conversation._id.toString(), lastMsg);
+  return lastMsg;
+};
+
+/* ═══════════════════ PHASE 1 : CONTACT ═══════════════════ */
+
 export const initiateContact = async (req, res) => {
   try {
     const recruiter = await getRecruiterProfile(req.user.id);
     const { applicationId } = req.params;
-    const { templateId } = req.body; // greeting, availability, interest, quick_chat
+    const { templateId, customMessage } = req.body;
 
     const application = await findOrFailApplication(
       applicationId,
       recruiter._id,
     );
 
-    // Vérifier si une conversation existe déjà
     const existingConversation = await Conversation.findOne({ applicationId });
     if (existingConversation) {
       return res.json({
@@ -98,50 +138,57 @@ export const initiateContact = async (req, res) => {
       });
     }
 
-    // Récupérer les infos du candidat
     const candidate = await Candidate.findById(
       application.candidateId,
     ).populate("userId", "nom");
     if (!candidate)
       return res.status(404).json({ msg: "Candidat introuvable" });
 
-    // Valider le template
-    const template = PREDEFINED_MESSAGES[templateId];
-    if (!template) {
-      return res.status(400).json({
-        msg: "Template de message invalide",
-        availableTemplates: Object.keys(PREDEFINED_MESSAGES),
-      });
+    // Determine message content: custom takes precedence
+    let messageContent;
+    let createdWith = "predefined_message";
+    let usedTemplateId = null;
+
+    if (customMessage && customMessage.trim().length > 0) {
+      messageContent = customMessage.trim().slice(0, 5000);
+      createdWith = "custom_message";
+    } else {
+      const template = PREDEFINED_MESSAGES[templateId];
+      if (!template) {
+        return res.status(400).json({
+          msg: "Template de message invalide",
+          availableTemplates: Object.keys(PREDEFINED_MESSAGES),
+        });
+      }
+      messageContent = template.template(
+        candidate.userId.nom,
+        application.offerId.titre,
+      );
+      usedTemplateId = templateId;
     }
 
-    // Générer le message
-    const messageContent = template.template(
-      candidate.userId.nom,
-      application.offerId.titre,
-    );
-
-    // Créer la conversation
     const conversation = await Conversation.create({
       applicationId,
       offerId: application.offerId._id,
       candidateId: application.candidateId,
       recruiterId: recruiter._id,
       openedBy: req.user.id,
-      createdWith: "predefined_message",
+      createdWith,
       messages: [
         {
           senderId: req.user.id,
           senderType: "recruiter",
           content: messageContent,
-          messageType: "predefined",
-          metadata: { predefinedTemplateId: templateId },
+          messageType: createdWith === "custom_message" ? "text" : "predefined",
+          metadata: usedTemplateId
+            ? { predefinedTemplateId: usedTemplateId }
+            : {},
         },
       ],
       unreadByCandidate: 1,
       lastMessageAt: new Date(),
     });
 
-    // Mettre à jour le statut de la candidature → en_discussion
     if (
       ![
         "en_discussion",
@@ -161,7 +208,6 @@ export const initiateContact = async (req, res) => {
         req.user.id,
         "Premier contact initié",
       );
-
       if (!application.seenByRecruiter) {
         application.seenByRecruiter = true;
         application.seenAt = new Date();
@@ -169,11 +215,26 @@ export const initiateContact = async (req, res) => {
       await application.save();
     }
 
-    // Notifier le candidat
+    const firstMsg = conversation.messages[conversation.messages.length - 1];
+    emitNewMessage(conversation._id.toString(), firstMsg, { applicationId });
+    emitConversationUpdate(candidate.userId._id.toString(), {
+      _id: conversation._id,
+      applicationId,
+      lastMessage: firstMsg,
+      unreadCount: 1,
+      lastMessageAt: conversation.lastMessageAt,
+    });
+    emitUnreadCount(candidate.userId._id.toString(), { conversations: 1 });
+
     await Notification.create({
       userId: candidate.userId._id,
       message: `Un recruteur essaye de vous contacter pour "${application.offerId.titre}"`,
       type: "info",
+      meta: {
+        category: "message",
+        conversationId: conversation._id,
+        applicationId: application._id,
+      },
     });
 
     res.status(201).json({
@@ -187,10 +248,6 @@ export const initiateContact = async (req, res) => {
   }
 };
 
-/**
- * GET /api/recruitment/predefined-messages
- * Retourne les templates de messages pré-définis
- */
 export const getPredefinedMessages = async (req, res) => {
   const templates = Object.entries(PREDEFINED_MESSAGES).map(([id, t]) => ({
     id,
@@ -199,27 +256,25 @@ export const getPredefinedMessages = async (req, res) => {
   res.json(templates);
 };
 
-// ============================================================
-// PHASE 2 : PROPOSER UN ENTRETIEN
-// ============================================================
-
+/* ═══════════════════ PHASE 2 : PROPOSITION D'ENTRETIEN ═══════════════════ */
 /**
- * POST /api/recruitment/interviews/:applicationId
- * Le recruteur propose un entretien
+ * Crée TOUJOURS un entretien (pas de blocage). Permet plusieurs entretiens
+ * actifs en parallèle (ex : plusieurs candidats). Le numéro est calculé
+ * globalement sur la candidature. Anti-double-clic géré côté frontend.
  */
 export const proposeInterview = async (req, res) => {
   try {
     const recruiter = await getRecruiterProfile(req.user.id);
     const { applicationId } = req.params;
     const {
-      type, // "video" | "phone" | "in_person"
+      type,
       meetingLink,
       phoneNumber,
       location,
-      duration, // 15, 30, 45, 60
-      schedulingMode, // "fixed_date" | "propose_slots"
-      scheduledAt, // Date fixe
-      proposedSlots, // [{date: "..."}] (max 3)
+      duration,
+      schedulingMode,
+      scheduledAt,
+      proposedSlots,
       preparationNotes,
     } = req.body;
 
@@ -228,11 +283,11 @@ export const proposeInterview = async (req, res) => {
       recruiter._id,
     );
 
-    // Statuts autorisés pour proposer un entretien
     const allowedStatuses = [
       "consultee",
       "preselection",
       "en_discussion",
+      "entretien_planifie",
       "entretien_termine",
       "pending_feedback",
       "shortlisted",
@@ -244,7 +299,6 @@ export const proposeInterview = async (req, res) => {
       });
     }
 
-    // Validation des champs selon le type
     if (type === "video" && !meetingLink) {
       return res
         .status(400)
@@ -259,7 +313,6 @@ export const proposeInterview = async (req, res) => {
         .json({ msg: "L'adresse est requise pour un entretien présentiel" });
     }
 
-    // Validation du mode de planification
     if (schedulingMode === "fixed_date" && !scheduledAt) {
       return res
         .status(400)
@@ -275,43 +328,17 @@ export const proposeInterview = async (req, res) => {
       }
     }
 
-    // Vérifier s'il existe un entretien actif
-    const activeInterview = await Interview.findOne({
-      applicationId,
-      status: {
-        $in: [
-          "proposed",
-          "confirmed",
-          "rescheduled_by_candidate",
-          "rescheduled_by_recruiter",
-        ],
-      },
-    });
+    // Numéro d'entretien = nombre total d'entretiens déjà créés + 1
+    const totalInterviews = await Interview.countDocuments({ applicationId });
+    const interviewNumber = totalInterviews + 1;
 
-    if (activeInterview) {
-      return res.status(400).json({
-        msg: "Un entretien est déjà planifié avec ce candidat. Voulez-vous créer un nouvel entretien ?",
-        existingInterviewId: activeInterview._id,
-        existingInterviewNumber: activeInterview.interviewNumber,
-        requiresConfirmation: true,
-      });
-    }
-
-    // Calculer le numéro d'entretien
-    const completedInterviews = await Interview.countDocuments({
-      applicationId,
-      status: { $in: ["completed", "no_show_candidate", "no_show_recruiter"] },
-    });
-    const interviewNumber = completedInterviews + 1;
-
-    // S'assurer qu'une conversation existe (initialiser si nécessaire)
+    // Conversation : créée si absente
     let conversation = await Conversation.findOne({ applicationId });
     const candidate = await Candidate.findById(
       application.candidateId,
     ).populate("userId", "nom");
 
     if (!conversation) {
-      // Envoyer un message pré-défini d'abord
       const initMessage = INTERVIEW_INIT_MESSAGE.template(candidate.userId.nom);
       conversation = await Conversation.create({
         applicationId,
@@ -333,7 +360,6 @@ export const proposeInterview = async (req, res) => {
       });
     }
 
-    // Créer l'entretien
     const interview = await Interview.create({
       applicationId,
       offerId: application.offerId._id,
@@ -360,42 +386,50 @@ export const proposeInterview = async (req, res) => {
       status: "proposed",
     });
 
-    // Ajouter le message "Carte d'entretien" dans la conversation
     const interviewCardMessage = {
       senderId: req.user.id,
       senderType: "system",
       content: `📅 Entretien #${interviewNumber} proposé`,
       messageType: "interview_card",
-      metadata: {
-        interviewId: interview._id,
-        interviewNumber,
-      },
+      metadata: { interviewId: interview._id, interviewNumber },
     };
-
     conversation.messages.push(interviewCardMessage);
     conversation.unreadByCandidate += 1;
     conversation.lastMessageAt = new Date();
     conversation.activeInterviewIds.push(interview._id);
-
-    // Stocker l'ID du message pour le sticky bar
     await conversation.save();
+
     const lastMsg = conversation.messages[conversation.messages.length - 1];
     interview.interviewMessageId = lastMsg._id;
     await interview.save();
 
-    // Mettre à jour le statut de la candidature
-    application.recruiterStatus = "entretien_planifie";
-    application.candidateStatus = "entretien";
-    pushStatusHistory(
-      application,
-      "entretien_planifie",
-      "entretien",
-      req.user.id,
-      `Entretien #${interviewNumber} proposé`,
-    );
-    await application.save();
+    // La candidature passe à "entretien planifié" (sans régresser un statut avancé)
+    if (
+      [
+        "consultee",
+        "preselection",
+        "en_discussion",
+        "shortlisted",
+        "entretien_termine",
+        "pending_feedback",
+      ].includes(application.recruiterStatus)
+    ) {
+      application.recruiterStatus = "entretien_planifie";
+      application.candidateStatus = "entretien";
+      pushStatusHistory(
+        application,
+        "entretien_planifie",
+        "entretien",
+        req.user.id,
+        `Entretien #${interviewNumber} proposé`,
+      );
+      await application.save();
+    }
 
-    // ─── NEW: Real-time push ───
+    // Real-time — emit a fully populated interview card so both parties
+    // render the card instantly without an extra fetch.
+    const freshInterview = await Interview.findById(interview._id).lean();
+
     emitInterviewNew(candidate.userId._id.toString(), {
       _id: interview._id,
       interviewNumber,
@@ -406,18 +440,25 @@ export const proposeInterview = async (req, res) => {
       offerTitle: application.offerId.titre,
     });
 
-    // Push the interview card message to the conversation
-    emitNewMessage(conversation._id.toString(), interviewCardMessage);
+    // Ship the message to the room, then immediately patch the card with full data
+    emitNewMessage(conversation._id.toString(), lastMsg);
+    emitInterviewCardUpdate(conversation._id.toString(), freshInterview);
 
-    // Notifier le candidat
     await Notification.create({
       userId: candidate.userId._id,
       message: `Un entretien #${interviewNumber} vous est proposé pour "${application.offerId.titre}"`,
       type: "validation",
+      meta: {
+        category: "interview",
+        interviewId: interview._id,
+        conversationId: conversation._id,
+        applicationId: application._id,
+        interviewScheduled: !!interview.scheduledAt,
+      },
     });
 
     res.status(201).json({
-      msg: "Entretien proposé",
+      msg: `Entretien #${interviewNumber} proposé`,
       interview,
       interviewNumber,
       conversationId: conversation._id,
@@ -428,59 +469,22 @@ export const proposeInterview = async (req, res) => {
   }
 };
 
-/**
- * POST /api/recruitment/interviews/:applicationId/force
- * Forcer la création d'un nouvel entretien (quand un existe déjà)
- */
-export const forceNewInterview = async (req, res) => {
-  try {
-    const recruiter = await getRecruiterProfile(req.user.id);
-    const { applicationId } = req.params;
+/* ═══════════════════ PHASE 3 : RÉPONSES CANDIDAT ═══════════════════ */
 
-    // Vérifier qu'il n'y a pas d'entretien confirmé à venir
-    const activeInterview = await Interview.findOne({
-      applicationId,
-      status: {
-        $in: [
-          "proposed",
-          "confirmed",
-          "rescheduled_by_candidate",
-          "rescheduled_by_recruiter",
-        ],
-      },
-      recruiterId: recruiter._id,
-    });
-
-    if (activeInterview) {
-      // Annuler l'ancien automatiquement si le recruteur force
-      activeInterview.status = "cancelled_by_recruiter";
-      activeInterview.cancellationReason = "Remplacé par un nouvel entretien";
-      activeInterview.cancelledBy = "recruiter";
-      activeInterview.cancelledAt = new Date();
-      await activeInterview.save();
-    }
-
-    // Réutiliser proposeInterview avec le forçage
-    return proposeInterview(req, res);
-  } catch (err) {
-    if (err.status) return res.status(err.status).json({ msg: err.msg });
-    res.status(500).json({ msg: err.message });
+// Recharge l'interview populée puis émet le patch de carte aux deux participants
+const emitCardRefresh = async (interviewId, conversationId) => {
+  const fresh = await Interview.findById(interviewId).lean();
+  if (fresh && conversationId) {
+    emitInterviewCardUpdate(conversationId.toString(), fresh);
   }
+  return fresh;
 };
 
-// ============================================================
-// PHASE 3 : CANDIDAT RÉPOND À L'ENTRETIEN
-// ============================================================
-
-/**
- * PUT /api/recruitment/interviews/:interviewId/accept
- * Le candidat accepte l'entretien
- */
 export const acceptInterview = async (req, res) => {
   try {
     const candidate = await Candidate.findOne({ userId: req.user.id });
     const { interviewId } = req.params;
-    const { chosenSlotIndex } = req.body; // Si propose_slots, l'index du créneau choisi
+    const { chosenSlotIndex } = req.body;
 
     const interview = await Interview.findOne({
       _id: interviewId,
@@ -494,7 +498,6 @@ export const acceptInterview = async (req, res) => {
         .json({ msg: "Entretien introuvable ou déjà traité" });
     }
 
-    // Si créneaux proposés, le candidat doit choisir
     if (interview.schedulingMode === "propose_slots") {
       if (
         chosenSlotIndex === undefined ||
@@ -513,22 +516,17 @@ export const acceptInterview = async (req, res) => {
     interview.status = "confirmed";
     await interview.save();
 
-    // Ajouter un message dans la conversation
     const conversation = await Conversation.findById(interview.conversationId);
     if (conversation) {
-      conversation.messages.push({
+      await pushSystemMessage(conversation, {
         senderId: req.user.id,
-        senderType: "system",
         content: `✅ Entretien #${interview.interviewNumber} confirmé`,
         messageType: "interview_response",
         metadata: { interviewId: interview._id },
+        toCandidate: false,
       });
-      conversation.unreadByRecruiter += 1;
-      conversation.lastMessageAt = new Date();
-      await conversation.save();
     }
 
-    // Notifier le recruteur
     const recruiter = await Recruiter.findById(interview.recruiterId);
     await Notification.create({
       userId: recruiter.userId,
@@ -536,19 +534,13 @@ export const acceptInterview = async (req, res) => {
       type: "validation",
     });
 
-    // ─── NEW ───
     emitInterviewUpdate(recruiter.userId.toString(), {
       _id: interview._id,
       interviewNumber: interview.interviewNumber,
       status: "confirmed",
       scheduledAt: interview.scheduledAt,
     });
-    if (conversation) {
-      emitNewMessage(
-        conversation._id.toString(),
-        conversation.messages[conversation.messages.length - 1],
-      );
-    }
+    await emitCardRefresh(interview._id, interview.conversationId);
 
     res.json({ msg: "Entretien confirmé", interview });
   } catch (err) {
@@ -556,10 +548,6 @@ export const acceptInterview = async (req, res) => {
   }
 };
 
-/**
- * PUT /api/recruitment/interviews/:interviewId/propose-alternative
- * Le candidat propose une date alternative (Option B)
- */
 export const proposeAlternativeDate = async (req, res) => {
   try {
     const candidate = await Candidate.findOne({ userId: req.user.id });
@@ -596,7 +584,6 @@ export const proposeAlternativeDate = async (req, res) => {
     };
     await interview.save();
 
-    // Ajouter un message "negotiate" dans la conversation
     const conversation = await Conversation.findById(interview.conversationId);
     if (conversation) {
       conversation.messages.push({
@@ -604,17 +591,15 @@ export const proposeAlternativeDate = async (req, res) => {
         senderType: "candidate",
         content: message.trim(),
         messageType: "negotiate",
-        metadata: {
-          interviewId: interview._id,
-          negotiateTag: true,
-        },
+        metadata: { interviewId: interview._id, negotiateTag: true },
       });
       conversation.unreadByRecruiter += 1;
       conversation.lastMessageAt = new Date();
       await conversation.save();
+      const lastMsg = conversation.messages[conversation.messages.length - 1];
+      emitNewMessage(conversation._id.toString(), lastMsg);
     }
 
-    // Notifier le recruteur
     const recruiter = await Recruiter.findById(interview.recruiterId);
     await Notification.create({
       userId: recruiter.userId,
@@ -622,18 +607,12 @@ export const proposeAlternativeDate = async (req, res) => {
       type: "validation",
     });
 
-    // ─── NEW ───
     emitInterviewUpdate(recruiter.userId.toString(), {
       _id: interview._id,
       status: "rescheduled_by_candidate",
       proposedAlternative: interview.proposedAlternative,
     });
-    if (conversation) {
-      emitNewMessage(
-        conversation._id.toString(),
-        conversation.messages[conversation.messages.length - 1],
-      );
-    }
+    await emitCardRefresh(interview._id, interview.conversationId);
 
     res.json({ msg: "Proposition envoyée", interview });
   } catch (err) {
@@ -641,10 +620,6 @@ export const proposeAlternativeDate = async (req, res) => {
   }
 };
 
-/**
- * PUT /api/recruitment/interviews/:interviewId/decline
- * Le candidat décline l'entretien (Option C)
- */
 export const declineInterview = async (req, res) => {
   try {
     const candidate = await Candidate.findOne({ userId: req.user.id });
@@ -669,27 +644,20 @@ export const declineInterview = async (req, res) => {
     interview.cancelledAt = new Date();
     await interview.save();
 
-    // Ajouter un message dans la conversation
     const conversation = await Conversation.findById(interview.conversationId);
     if (conversation) {
-      conversation.messages.push({
-        senderId: req.user.id,
-        senderType: "system",
-        content: `❌ Le candidat a décliné l'entretien #${interview.interviewNumber}${reason ? ` - Raison: ${reason}` : ""}`,
-        messageType: "interview_response",
-        metadata: { interviewId: interview._id },
-      });
-      conversation.unreadByRecruiter += 1;
-      conversation.lastMessageAt = new Date();
-
-      // Retirer de la liste des entretiens actifs
       conversation.activeInterviewIds = conversation.activeInterviewIds.filter(
         (id) => id.toString() !== interview._id.toString(),
       );
-      await conversation.save();
+      await pushSystemMessage(conversation, {
+        senderId: req.user.id,
+        content: `❌ Le candidat a décliné l'entretien #${interview.interviewNumber}${reason ? ` — Raison: ${reason}` : ""}`,
+        messageType: "interview_response",
+        metadata: { interviewId: interview._id },
+        toCandidate: false,
+      });
     }
 
-    // Note: Décliner un entretien ne retire PAS la candidature
     const recruiter = await Recruiter.findById(interview.recruiterId);
     await Notification.create({
       userId: recruiter.userId,
@@ -697,11 +665,11 @@ export const declineInterview = async (req, res) => {
       type: "info",
     });
 
-    // ─── NEW ───
     emitInterviewUpdate(recruiter.userId.toString(), {
       _id: interview._id,
       status: "cancelled_by_candidate",
     });
+    await emitCardRefresh(interview._id, interview.conversationId);
 
     res.json({ msg: "Entretien décliné", interview });
   } catch (err) {
@@ -709,14 +677,8 @@ export const declineInterview = async (req, res) => {
   }
 };
 
-// ============================================================
-// PHASE 4 : ANNULATION & REPROGRAMMATION
-// ============================================================
+/* ═══════════════════ PHASE 4 : GESTION RECRUTEUR ═══════════════════ */
 
-/**
- * PUT /api/recruitment/interviews/:interviewId/cancel-by-recruiter
- * Le recruteur annule un entretien confirmé (raison obligatoire)
- */
 export const cancelInterviewByRecruiter = async (req, res) => {
   try {
     const recruiter = await getRecruiterProfile(req.user.id);
@@ -754,22 +716,18 @@ export const cancelInterviewByRecruiter = async (req, res) => {
     interview.cancelledAt = new Date();
     await interview.save();
 
-    // Message dans la conversation
     const conversation = await Conversation.findById(interview.conversationId);
     if (conversation) {
-      conversation.messages.push({
-        senderId: req.user.id,
-        senderType: "system",
-        content: `⚠️ L'entretien #${interview.interviewNumber} a été annulé par le recruteur. Raison: ${reason.trim()}`,
-        messageType: "system",
-        metadata: { interviewId: interview._id },
-      });
-      conversation.unreadByCandidate += 1;
-      conversation.lastMessageAt = new Date();
       conversation.activeInterviewIds = conversation.activeInterviewIds.filter(
         (id) => id.toString() !== interview._id.toString(),
       );
-      await conversation.save();
+      await pushSystemMessage(conversation, {
+        senderId: req.user.id,
+        content: `⚠️ L'entretien #${interview.interviewNumber} a été annulé par le recruteur. Raison: ${reason.trim()}`,
+        messageType: "system",
+        metadata: { interviewId: interview._id },
+        toCandidate: true,
+      });
     }
 
     const candidate = await Candidate.findById(interview.candidateId);
@@ -777,7 +735,20 @@ export const cancelInterviewByRecruiter = async (req, res) => {
       userId: candidate.userId,
       message: `L'entretien prévu a été annulé par le recruteur`,
       type: "info",
+      meta: {
+        category: "interview",
+        interviewId: interview._id,
+        conversationId: interview.conversationId,
+        applicationId: interview.applicationId,
+        interviewScheduled: !!interview.scheduledAt,
+      },
     });
+
+    emitInterviewUpdate(candidate.userId.toString(), {
+      _id: interview._id,
+      status: "cancelled_by_recruiter",
+    });
+    await emitCardRefresh(interview._id, interview.conversationId);
 
     res.json({ msg: "Entretien annulé", interview });
   } catch (err) {
@@ -785,10 +756,6 @@ export const cancelInterviewByRecruiter = async (req, res) => {
   }
 };
 
-/**
- * PUT /api/recruitment/interviews/:interviewId/cancel-by-candidate
- * Le candidat annule un entretien confirmé (raison obligatoire)
- */
 export const cancelInterviewByCandidate = async (req, res) => {
   try {
     const candidate = await Candidate.findOne({ userId: req.user.id });
@@ -821,19 +788,16 @@ export const cancelInterviewByCandidate = async (req, res) => {
 
     const conversation = await Conversation.findById(interview.conversationId);
     if (conversation) {
-      conversation.messages.push({
-        senderId: req.user.id,
-        senderType: "system",
-        content: `⚠️ L'entretien #${interview.interviewNumber} a été annulé par le candidat. Raison: ${reason.trim()}`,
-        messageType: "system",
-        metadata: { interviewId: interview._id },
-      });
-      conversation.unreadByRecruiter += 1;
-      conversation.lastMessageAt = new Date();
       conversation.activeInterviewIds = conversation.activeInterviewIds.filter(
         (id) => id.toString() !== interview._id.toString(),
       );
-      await conversation.save();
+      await pushSystemMessage(conversation, {
+        senderId: req.user.id,
+        content: `⚠️ L'entretien #${interview.interviewNumber} a été annulé par le candidat. Raison: ${reason.trim()}`,
+        messageType: "system",
+        metadata: { interviewId: interview._id },
+        toCandidate: false,
+      });
     }
 
     const recruiter = await Recruiter.findById(interview.recruiterId);
@@ -843,16 +807,18 @@ export const cancelInterviewByCandidate = async (req, res) => {
       type: "info",
     });
 
+    emitInterviewUpdate(recruiter.userId.toString(), {
+      _id: interview._id,
+      status: "cancelled_by_candidate",
+    });
+    await emitCardRefresh(interview._id, interview.conversationId);
+
     res.json({ msg: "Entretien annulé", interview });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
 };
 
-/**
- * PUT /api/recruitment/interviews/:interviewId/reschedule
- * Le recruteur reprogramme un entretien (propose une nouvelle date)
- */
 export const rescheduleByRecruiter = async (req, res) => {
   try {
     const recruiter = await getRecruiterProfile(req.user.id);
@@ -885,19 +851,16 @@ export const rescheduleByRecruiter = async (req, res) => {
 
     const conversation = await Conversation.findById(interview.conversationId);
     if (conversation) {
-      conversation.messages.push({
+      await pushSystemMessage(conversation, {
         senderId: req.user.id,
-        senderType: "system",
         content: `🔄 L'entretien #${interview.interviewNumber} a été reprogrammé par le recruteur`,
         messageType: "interview_card",
         metadata: {
           interviewId: interview._id,
           interviewNumber: interview.interviewNumber,
         },
+        toCandidate: true,
       });
-      conversation.unreadByCandidate += 1;
-      conversation.lastMessageAt = new Date();
-      await conversation.save();
     }
 
     const candidate = await Candidate.findById(interview.candidateId);
@@ -905,7 +868,21 @@ export const rescheduleByRecruiter = async (req, res) => {
       userId: candidate.userId,
       message: `L'entretien #${interview.interviewNumber} a été reprogrammé, veuillez confirmer la nouvelle date`,
       type: "validation",
+      meta: {
+        category: "interview",
+        interviewId: interview._id,
+        conversationId: interview.conversationId,
+        applicationId: interview.applicationId,
+        interviewScheduled: !!interview.scheduledAt,
+      },
     });
+
+    emitInterviewUpdate(candidate.userId.toString(), {
+      _id: interview._id,
+      status: "rescheduled_by_recruiter",
+      scheduledAt: interview.scheduledAt,
+    });
+    await emitCardRefresh(interview._id, interview.conversationId);
 
     res.json({ msg: "Entretien reprogrammé", interview });
   } catch (err) {
@@ -913,10 +890,6 @@ export const rescheduleByRecruiter = async (req, res) => {
   }
 };
 
-/**
- * PUT /api/recruitment/interviews/:interviewId/accept-alternative
- * Le recruteur accepte la date alternative proposée par le candidat
- */
 export const acceptAlternativeDate = async (req, res) => {
   try {
     const recruiter = await getRecruiterProfile(req.user.id);
@@ -941,16 +914,13 @@ export const acceptAlternativeDate = async (req, res) => {
 
     const conversation = await Conversation.findById(interview.conversationId);
     if (conversation) {
-      conversation.messages.push({
+      await pushSystemMessage(conversation, {
         senderId: req.user.id,
-        senderType: "system",
         content: `✅ La nouvelle date pour l'entretien #${interview.interviewNumber} a été confirmée`,
         messageType: "interview_response",
         metadata: { interviewId: interview._id },
+        toCandidate: true,
       });
-      conversation.unreadByCandidate += 1;
-      conversation.lastMessageAt = new Date();
-      await conversation.save();
     }
 
     const candidate = await Candidate.findById(interview.candidateId);
@@ -958,7 +928,21 @@ export const acceptAlternativeDate = async (req, res) => {
       userId: candidate.userId,
       message: `Votre nouvelle date d'entretien #${interview.interviewNumber} a été confirmée`,
       type: "validation",
+      meta: {
+        category: "interview",
+        interviewId: interview._id,
+        conversationId: interview.conversationId,
+        applicationId: interview.applicationId,
+        interviewScheduled: true,
+      },
     });
+
+    emitInterviewUpdate(candidate.userId.toString(), {
+      _id: interview._id,
+      status: "confirmed",
+      scheduledAt: interview.scheduledAt,
+    });
+    await emitCardRefresh(interview._id, interview.conversationId);
 
     res.json({ msg: "Nouvelle date acceptée", interview });
   } catch (err) {
@@ -966,10 +950,6 @@ export const acceptAlternativeDate = async (req, res) => {
   }
 };
 
-/**
- * PUT /api/recruitment/interviews/:interviewId/mark-completed
- * Le recruteur marque un entretien comme terminé avant la date prévue
- */
 export const markInterviewCompleted = async (req, res) => {
   try {
     const recruiter = await getRecruiterProfile(req.user.id);
@@ -990,9 +970,14 @@ export const markInterviewCompleted = async (req, res) => {
     interview.status = "pending_feedback";
     await interview.save();
 
-    // Mettre à jour la candidature
+    // Garde : ne pas régresser un statut déjà avancé
     const application = await Application.findById(interview.applicationId);
-    if (application) {
+    if (
+      application &&
+      ["entretien_planifie", "entretien_termine"].includes(
+        application.recruiterStatus,
+      )
+    ) {
       application.recruiterStatus = "pending_feedback";
       application.candidateStatus = mapRecruiterToCandidate("pending_feedback");
       pushStatusHistory(
@@ -1005,6 +990,8 @@ export const markInterviewCompleted = async (req, res) => {
       await application.save();
     }
 
+    await emitCardRefresh(interview._id, interview.conversationId);
+
     res.json({
       msg: "Entretien marqué comme terminé, veuillez donner votre feedback",
       interview,
@@ -1014,14 +1001,8 @@ export const markInterviewCompleted = async (req, res) => {
   }
 };
 
-// ============================================================
-// PHASE 5 : FEEDBACK POST-ENTRETIEN
-// ============================================================
+/* ═══════════════════ PHASE 5 : FEEDBACK ═══════════════════ */
 
-/**
- * POST /api/recruitment/interviews/:interviewId/feedback
- * Le recruteur donne son feedback après l'entretien
- */
 export const submitInterviewFeedback = async (req, res) => {
   try {
     const recruiter = await getRecruiterProfile(req.user.id);
@@ -1033,7 +1014,7 @@ export const submitInterviewFeedback = async (req, res) => {
       rating,
       privateNotes,
       decision,
-      rejectionMessage, // FIX #13: Accept optional rejection message
+      rejectionMessage,
     } = req.body;
 
     const interview = await Interview.findOne({
@@ -1058,21 +1039,16 @@ export const submitInterviewFeedback = async (req, res) => {
           msg: "La raison est requise si l'entretien n'a pas eu lieu",
         });
       }
-
       interview.feedback = {
         interviewHappened: false,
         noShowReason,
         noShowDetails,
         completedAt: new Date(),
       };
-
-      if (noShowReason === "candidate_absent") {
-        interview.status = "no_show_candidate";
-      } else {
-        interview.status = "completed";
-      }
-
+      interview.status =
+        noShowReason === "candidate_absent" ? "no_show_candidate" : "completed";
       await interview.save();
+      await emitCardRefresh(interview._id, interview.conversationId);
 
       return res.json({
         msg: "Feedback enregistré (entretien non tenu)",
@@ -1081,12 +1057,9 @@ export const submitInterviewFeedback = async (req, res) => {
       });
     }
 
-    if (!rating) {
-      return res.status(400).json({ msg: "La note est requise" });
-    }
-    if (!decision) {
+    if (!rating) return res.status(400).json({ msg: "La note est requise" });
+    if (!decision)
       return res.status(400).json({ msg: "La décision est requise" });
-    }
 
     interview.feedback = {
       interviewHappened: true,
@@ -1117,7 +1090,7 @@ export const submitInterviewFeedback = async (req, res) => {
           `Entretien #${interview.interviewNumber} terminé - Round suivant prévu`,
         );
         await application.save();
-
+        await emitCardRefresh(interview._id, interview.conversationId);
         res.json({
           msg: "Feedback enregistré. Vous pouvez proposer un nouvel entretien.",
           interview,
@@ -1126,7 +1099,6 @@ export const submitInterviewFeedback = async (req, res) => {
         });
         break;
       }
-
       case "shortlist": {
         application.recruiterStatus = "shortlisted";
         application.candidateStatus = mapRecruiterToCandidate("shortlisted");
@@ -1138,22 +1110,15 @@ export const submitInterviewFeedback = async (req, res) => {
           "Ajouté à la shortlist",
         );
         await application.save();
-
-        res.json({
-          msg: "Candidat ajouté à la shortlist",
-          interview,
-        });
+        await emitCardRefresh(interview._id, interview.conversationId);
+        res.json({ msg: "Candidat ajouté à la shortlist", interview });
         break;
       }
-
       case "reject": {
         application.recruiterStatus = "refusee";
         application.candidateStatus = "non_retenue";
         application.dateDecision = new Date();
-        // FIX #13: Store rejection message
-        if (rejectionMessage) {
-          application.rejectionMessage = rejectionMessage;
-        }
+        if (rejectionMessage) application.rejectionMessage = rejectionMessage;
         pushStatusHistory(
           application,
           "refusee",
@@ -1162,12 +1127,13 @@ export const submitInterviewFeedback = async (req, res) => {
           "Rejeté après entretien",
         );
         await application.save();
+        await syncNombreCandidatures(application.offerId._id);
 
         if (conversation) {
           conversation.messages.push({
             senderId: req.user.id,
             senderType: "system",
-            content: `Votre candidature pour "${application.offerId.titre}" n'a pas été retenue.`,
+            content: `Votre candidature pour "${application.offerId.titre}" n'a pas été retenue.${rejectionMessage ? ` Message : ${rejectionMessage}` : ""}`,
             messageType: "rejection",
           });
           conversation.isClosed = true;
@@ -1175,18 +1141,36 @@ export const submitInterviewFeedback = async (req, res) => {
           conversation.unreadByCandidate += 1;
           conversation.lastMessageAt = new Date();
           await conversation.save();
+          const lastMsg =
+            conversation.messages[conversation.messages.length - 1];
+          emitNewMessage(conversation._id.toString(), lastMsg);
+          emitConversationClosed(conversation._id.toString(), {
+            isClosed: true,
+            closedBy: "recruiter",
+            reason: "application_rejected",
+          });
         }
 
         await Notification.create({
           userId: candidate.userId,
           message: `Votre candidature pour "${application.offerId.titre}" n'a pas été retenue.${rejectionMessage ? ` Raison: ${rejectionMessage}` : ""}`,
           type: "info",
+          meta: {
+            category: "application",
+            applicationId: application._id,
+            conversationId: interview.conversationId,
+          },
         });
 
+        emitApplicationUpdate(candidate.userId.toString(), {
+          _id: application._id,
+          candidateStatus: "non_retenue",
+          offerTitle: application.offerId.titre,
+        });
+        await emitCardRefresh(interview._id, interview.conversationId);
         res.json({ msg: "Candidat rejeté", interview });
         break;
       }
-
       case "hire": {
         application.recruiterStatus = "retenue";
         application.candidateStatus = "retenue";
@@ -1201,22 +1185,27 @@ export const submitInterviewFeedback = async (req, res) => {
         await application.save();
 
         if (conversation) {
-          conversation.messages.push({
+          await pushSystemMessage(conversation, {
             senderId: req.user.id,
-            senderType: "system",
             content: `🎉 Félicitations ! Le recruteur souhaite vous embaucher pour le poste "${application.offerId.titre}".`,
             messageType: "hire_offer",
-            metadata: { interviewId: interview._id },
+            metadata: {
+              interviewId: interview._id,
+              applicationId: application._id,
+            },
+            toCandidate: true,
           });
-          conversation.unreadByCandidate += 1;
-          conversation.lastMessageAt = new Date();
-          await conversation.save();
         }
 
         await Notification.create({
           userId: candidate.userId,
           message: `Félicitations ! Vous avez une proposition d'embauche pour "${application.offerId.titre}" !`,
           type: "validation",
+          meta: {
+            category: "application",
+            applicationId: application._id,
+            conversationId: interview.conversationId,
+          },
         });
 
         emitApplicationUpdate(candidate.userId.toString(), {
@@ -1224,13 +1213,7 @@ export const submitInterviewFeedback = async (req, res) => {
           candidateStatus: "retenue",
           offerTitle: application.offerId.titre,
         });
-        if (conversation) {
-          emitNewMessage(
-            conversation._id.toString(),
-            conversation.messages[conversation.messages.length - 1],
-          );
-        }
-
+        await emitCardRefresh(interview._id, interview.conversationId);
         res.json({
           msg: "Proposition d'embauche envoyée au candidat",
           interview,
@@ -1243,14 +1226,9 @@ export const submitInterviewFeedback = async (req, res) => {
     res.status(500).json({ msg: err.message });
   }
 };
-// ============================================================
-// PHASE 6 : EMBAUCHE
-// ============================================================
 
-/**
- * POST /api/recruitment/hire/:applicationId
- * Le recruteur propose l'embauche (depuis la fiche candidature directement)
- */
+/* ═══════════════════ PHASE 6 : EMBAUCHE ═══════════════════ */
+
 export const proposeHire = async (req, res) => {
   try {
     const recruiter = await getRecruiterProfile(req.user.id);
@@ -1264,7 +1242,6 @@ export const proposeHire = async (req, res) => {
       application.candidateId,
     ).populate("userId", "nom");
 
-    // Vérifier que le statut permet l'embauche
     const allowedStatuses = [
       "shortlisted",
       "entretien_termine",
@@ -1291,24 +1268,31 @@ export const proposeHire = async (req, res) => {
     );
     await application.save();
 
-    // Message dans la conversation
     let conversation = await Conversation.findOne({ applicationId });
     if (conversation) {
-      conversation.messages.push({
+      await pushSystemMessage(conversation, {
         senderId: req.user.id,
-        senderType: "system",
         content: `🎉 Félicitations ! Le recruteur souhaite vous embaucher pour le poste "${application.offerId.titre}".`,
         messageType: "hire_offer",
+        metadata: { applicationId: application._id },
+        toCandidate: true,
       });
-      conversation.unreadByCandidate += 1;
-      conversation.lastMessageAt = new Date();
-      await conversation.save();
     }
 
     await Notification.create({
       userId: candidate.userId._id,
       message: `Félicitations ! Vous avez une proposition d'embauche pour "${application.offerId.titre}" !`,
       type: "validation",
+      meta: {
+        category: "application",
+        applicationId: application._id,
+      },
+    });
+
+    emitApplicationUpdate(candidate.userId._id.toString(), {
+      _id: application._id,
+      candidateStatus: "retenue",
+      offerTitle: application.offerId.titre,
     });
 
     res.json({ msg: "Proposition d'embauche envoyée", application });
@@ -1318,10 +1302,6 @@ export const proposeHire = async (req, res) => {
   }
 };
 
-/**
- * PUT /api/recruitment/hire/:applicationId/cancel
- * Le recruteur annule la proposition d'embauche
- */
 export const cancelHireOffer = async (req, res) => {
   try {
     const recruiter = await getRecruiterProfile(req.user.id);
@@ -1339,7 +1319,7 @@ export const cancelHireOffer = async (req, res) => {
         .json({ msg: "Pas de proposition d'embauche active" });
     }
 
-    application.recruiterStatus = "shortlisted"; // Revient en shortlist
+    application.recruiterStatus = "shortlisted";
     application.candidateStatus = "en_cours";
     application.hireCancelledAt = new Date();
     application.hireCancelReason = reason;
@@ -1354,15 +1334,12 @@ export const cancelHireOffer = async (req, res) => {
 
     const conversation = await Conversation.findOne({ applicationId });
     if (conversation) {
-      conversation.messages.push({
+      await pushSystemMessage(conversation, {
         senderId: req.user.id,
-        senderType: "system",
         content: `La proposition d'embauche a été annulée par le recruteur.`,
         messageType: "hire_cancelled",
+        toCandidate: true,
       });
-      conversation.unreadByCandidate += 1;
-      conversation.lastMessageAt = new Date();
-      await conversation.save();
     }
 
     const candidate = await Candidate.findById(application.candidateId);
@@ -1370,6 +1347,10 @@ export const cancelHireOffer = async (req, res) => {
       userId: candidate.userId,
       message: "La proposition d'embauche a été annulée par le recruteur.",
       type: "info",
+    });
+    emitApplicationUpdate(candidate.userId.toString(), {
+      _id: application._id,
+      candidateStatus: "en_cours",
     });
 
     res.json({ msg: "Proposition d'embauche annulée", application });
@@ -1379,10 +1360,6 @@ export const cancelHireOffer = async (req, res) => {
   }
 };
 
-/**
- * PUT /api/recruitment/hire/:applicationId/accept
- * Le candidat accepte l'embauche
- */
 export const acceptHire = async (req, res) => {
   try {
     const candidate = await Candidate.findOne({ userId: req.user.id });
@@ -1413,22 +1390,18 @@ export const acceptHire = async (req, res) => {
       "Embauche acceptée",
     );
     await application.save();
+    await syncNombreCandidatures(application.offerId._id);
 
-    // Message dans la conversation
     const conversation = await Conversation.findOne({ applicationId });
     if (conversation) {
-      conversation.messages.push({
+      await pushSystemMessage(conversation, {
         senderId: req.user.id,
-        senderType: "system",
         content: `🎉 Le candidat a accepté l'embauche pour "${application.offerId.titre}" !`,
         messageType: "hire_response",
+        toCandidate: false,
       });
-      conversation.unreadByRecruiter += 1;
-      conversation.lastMessageAt = new Date();
-      await conversation.save();
     }
 
-    // Notifier le recruteur
     const offer = application.offerId;
     const recruiter = await Recruiter.findById(offer.recruteurId);
     await Notification.create({
@@ -1437,14 +1410,12 @@ export const acceptHire = async (req, res) => {
       type: "validation",
     });
 
-    // Vérifier le quota (hiresNeeded)
     let quotaInfo = null;
     if (offer.hiresNeeded) {
       const hiredCount = await Application.countDocuments({
         offerId: offer._id,
         recruiterStatus: "embauche",
       });
-
       if (hiredCount >= offer.hiresNeeded) {
         quotaInfo = {
           quotaReached: true,
@@ -1454,18 +1425,12 @@ export const acceptHire = async (req, res) => {
         };
       }
     }
-    // ─── NEW ───
+
     emitApplicationUpdate(recruiter.userId.toString(), {
       _id: application._id,
       recruiterStatus: "embauche",
-      offerTitle: application.offerId.titre,
+      offerTitle: offer.titre,
     });
-    if (conversation) {
-      emitNewMessage(
-        conversation._id.toString(),
-        conversation.messages[conversation.messages.length - 1],
-      );
-    }
 
     res.json({
       msg: "Embauche acceptée ! Félicitations !",
@@ -1477,10 +1442,6 @@ export const acceptHire = async (req, res) => {
   }
 };
 
-/**
- * PUT /api/recruitment/hire/:applicationId/decline
- * Le candidat décline l'embauche
- */
 export const declineHire = async (req, res) => {
   try {
     const candidate = await Candidate.findOne({ userId: req.user.id });
@@ -1501,7 +1462,7 @@ export const declineHire = async (req, res) => {
     }
 
     application.recruiterStatus = "offer_declined";
-    application.candidateStatus = "en_cours"; // Reste en cours, pas refusée
+    application.candidateStatus = "en_cours";
     application.hireDeclinedAt = new Date();
     application.hireDeclineReason = reason;
     pushStatusHistory(
@@ -1515,15 +1476,12 @@ export const declineHire = async (req, res) => {
 
     const conversation = await Conversation.findOne({ applicationId });
     if (conversation) {
-      conversation.messages.push({
+      await pushSystemMessage(conversation, {
         senderId: req.user.id,
-        senderType: "system",
         content: `Le candidat a décliné la proposition d'embauche.${reason ? ` Raison: ${reason}` : ""}`,
         messageType: "hire_response",
+        toCandidate: false,
       });
-      conversation.unreadByRecruiter += 1;
-      conversation.lastMessageAt = new Date();
-      await conversation.save();
     }
 
     const offer = application.offerId;
@@ -1533,6 +1491,10 @@ export const declineHire = async (req, res) => {
       message: `Le candidat a décliné l'embauche pour "${offer.titre}"`,
       type: "info",
     });
+    emitApplicationUpdate(recruiter.userId.toString(), {
+      _id: application._id,
+      recruiterStatus: "offer_declined",
+    });
 
     res.json({ msg: "Proposition d'embauche déclinée", application });
   } catch (err) {
@@ -1540,19 +1502,12 @@ export const declineHire = async (req, res) => {
   }
 };
 
-// ============================================================
-// PHASE 7 : NETTOYAGE AUTRES CANDIDATURES
-// ============================================================
+/* ═══════════════════ PHASE 7 : NETTOYAGE CANDIDAT ═══════════════════ */
 
-/**
- * GET /api/recruitment/my-other-applications
- * Le candidat voit ses autres candidatures actives après embauche
- */
 export const getOtherActiveApplications = async (req, res) => {
   try {
     const candidate = await Candidate.findOne({ userId: req.user.id });
 
-    // Trouver la candidature embauchée
     const hiredApplication = await Application.findOne({
       candidateId: candidate._id,
       candidateStatus: "embauchee",
@@ -1562,7 +1517,6 @@ export const getOtherActiveApplications = async (req, res) => {
       return res.json({ hasHiredApplication: false, otherApplications: [] });
     }
 
-    // Trouver les autres candidatures actives
     const otherActiveApplications = await Application.find({
       candidateId: candidate._id,
       _id: { $ne: hiredApplication._id },
@@ -1592,10 +1546,6 @@ export const getOtherActiveApplications = async (req, res) => {
   }
 };
 
-/**
- * POST /api/recruitment/withdraw-all-others
- * Le candidat retire toutes ses autres candidatures
- */
 export const withdrawAllOtherApplications = async (req, res) => {
   const mongoose = (await import("mongoose")).default;
   const session = await mongoose.startSession();
@@ -1616,6 +1566,8 @@ export const withdrawAllOtherApplications = async (req, res) => {
 
     let withdrawnCount = 0;
     const affectedOfferIds = new Set();
+    // Collecte DANS la transaction pour notifier APRÈS sans fenêtre temporelle
+    const notifyTargets = [];
 
     await session.withTransaction(async () => {
       const otherApplications = await Application.find({
@@ -1644,7 +1596,6 @@ export const withdrawAllOtherApplications = async (req, res) => {
 
         affectedOfferIds.add(app.offerId._id.toString());
 
-        // Annuler les entretiens
         await Interview.updateMany(
           {
             applicationId: app._id,
@@ -1666,40 +1617,54 @@ export const withdrawAllOtherApplications = async (req, res) => {
           { session },
         );
 
+        // Fermer la conversation liée + message système
+        const conv = await Conversation.findOne({
+          applicationId: app._id,
+        }).session(session);
+        if (conv && !conv.isClosed) {
+          conv.messages.push({
+            senderId: req.user.id,
+            senderType: "system",
+            content: "Le candidat a retiré sa candidature (embauché ailleurs).",
+            messageType: "system",
+          });
+          conv.isClosed = true;
+          conv.closedReason = "application_closed";
+          conv.unreadByRecruiter += 1;
+          conv.lastMessageAt = new Date();
+          await conv.save({ session });
+        }
+
+        if (app.offerId?.recruteurId) {
+          notifyTargets.push({
+            recruiterId: app.offerId.recruteurId,
+            offerTitle: app.offerId.titre,
+            conversationId: conv?._id,
+          });
+        }
+
         withdrawnCount++;
       }
 
-      // Synchroniser nombreCandidatures pour chaque offre affectée
       for (const oid of affectedOfferIds) {
-        const activeCount = await Application.countDocuments({
-          offerId: oid,
-          candidateStatus: { $nin: ["cancelled", "retiree"] },
-        }).session(session);
-
-        await Offer.findByIdAndUpdate(
-          oid,
-          { nombreCandidatures: activeCount },
-          { session },
-        );
+        await syncNombreCandidatures(oid, session);
       }
     });
 
-    // Notifications après transaction
-    const withdrawnApps = await Application.find({
-      candidateId: candidate._id,
-      candidateStatus: "retiree",
-      withdrawReason: "Embauché(e) ailleurs",
-      withdrawnAt: { $gte: new Date(Date.now() - 10000) },
-    }).populate("offerId");
-
-    for (const app of withdrawnApps) {
-      if (app.offerId?.recruteurId) {
-        const recruiter = await Recruiter.findById(app.offerId.recruteurId);
-        if (recruiter) {
-          await Notification.create({
-            userId: recruiter.userId,
-            message: `Le candidat a retiré sa candidature pour "${app.offerId.titre}" (embauché ailleurs)`,
-            type: "info",
+    // Notifications + socket APRÈS la transaction, sur cibles collectées
+    for (const t of notifyTargets) {
+      const recruiter = await Recruiter.findById(t.recruiterId);
+      if (recruiter) {
+        await Notification.create({
+          userId: recruiter.userId,
+          message: `Le candidat a retiré sa candidature pour "${t.offerTitle}" (embauché ailleurs)`,
+          type: "info",
+        });
+        if (t.conversationId) {
+          emitConversationClosed(t.conversationId.toString(), {
+            isClosed: true,
+            closedBy: "candidate",
+            reason: "application_withdrawn",
           });
         }
       }
@@ -1716,15 +1681,8 @@ export const withdrawAllOtherApplications = async (req, res) => {
   }
 };
 
-// ============================================================
-// PHASE 9 : CLÔTURE D'OFFRE (quota atteint)
-// ============================================================
+/* ═══════════════════ PHASE 8 : CLÔTURE D'OFFRE ═══════════════════ */
 
-/**
- * POST /api/recruitment/offers/:offerId/close
- * Le recruteur clôture l'offre (quota atteint ou manuellement)
- */
-// ▶ REMPLACER closeOffer - Fix: Synchronisation atomique + gestion ANEM
 export const closeOffer = async (req, res) => {
   const mongoose = (await import("mongoose")).default;
   const session = await mongoose.startSession();
@@ -1744,13 +1702,12 @@ export const closeOffer = async (req, res) => {
     }
 
     let rejectedCount = 0;
+    const notifyTargets = [];
 
     await session.withTransaction(async () => {
-      // Désactiver l'offre
       offer.actif = false;
       await offer.save({ session });
 
-      // Désactiver ANEM
       const anemOffer = await AnemOffer.findOne({ offerId: offer._id }).session(
         session,
       );
@@ -1782,9 +1739,9 @@ export const closeOffer = async (req, res) => {
               "offer_declined",
             ],
           },
-        }).session(session);
-
-        const candidateIds = [];
+        })
+          .populate("candidateId")
+          .session(session);
 
         for (const app of activeApplications) {
           app.recruiterStatus = "refusee";
@@ -1799,9 +1756,7 @@ export const closeOffer = async (req, res) => {
             note: "Poste pourvu - offre clôturée",
           });
           await app.save({ session });
-          candidateIds.push(app.candidateId);
 
-          // Annuler les entretiens
           await Interview.updateMany(
             {
               applicationId: app._id,
@@ -1823,11 +1778,9 @@ export const closeOffer = async (req, res) => {
             { session },
           );
 
-          // Fermer la conversation et envoyer le message de rejet
           const conversation = await Conversation.findOne({
             applicationId: app._id,
           }).session(session);
-
           if (conversation) {
             conversation.messages.push({
               senderId: req.user.id,
@@ -1842,40 +1795,45 @@ export const closeOffer = async (req, res) => {
             conversation.lastMessageAt = new Date();
             await conversation.save({ session });
           }
+
+          // Collecte pour notif après transaction
+          if (app.candidateId?.userId) {
+            notifyTargets.push({
+              userId: app.candidateId.userId,
+              offerTitle: offer.titre,
+              conversationId: conversation?._id,
+              candidateUserId: app.candidateId.userId,
+              applicationId: app._id,
+            });
+          }
         }
 
         rejectedCount = activeApplications.length;
-
-        // Notifications en dehors de la transaction (non critique)
-        // On les crée après la transaction
       }
 
-      // Synchroniser le compteur
-      const finalCount = await Application.countDocuments({
-        offerId: offer._id,
-        candidateStatus: { $nin: ["cancelled", "retiree"] },
-      }).session(session);
-
-      offer.nombreCandidatures = finalCount;
-      await offer.save({ session });
+      await syncNombreCandidatures(offer._id, session);
     });
 
-    // Envoyer les notifications après la transaction réussie
+    // Notifications + socket APRÈS transaction
     if (autoReject) {
-      const rejectedApps = await Application.find({
-        offerId: offer._id,
-        recruiterStatus: "refusee",
-        dateDecision: { $gte: new Date(Date.now() - 5000) }, // Celles qu'on vient de rejeter
-      }).populate("candidateId");
-
-      for (const app of rejectedApps) {
-        if (app.candidateId?.userId) {
-          await Notification.create({
-            userId: app.candidateId.userId,
-            message: `Le poste "${offer.titre}" a été pourvu. Votre candidature n'a pas été retenue.`,
-            type: "info",
+      for (const t of notifyTargets) {
+        await Notification.create({
+          userId: t.userId,
+          message: `Le poste "${t.offerTitle}" a été pourvu. Votre candidature n'a pas été retenue.`,
+          type: "info",
+        });
+        if (t.conversationId) {
+          emitConversationClosed(t.conversationId.toString(), {
+            isClosed: true,
+            closedBy: "recruiter",
+            reason: "offer_closed",
           });
         }
+        emitApplicationUpdate(t.candidateUserId.toString(), {
+          _id: t.applicationId,
+          candidateStatus: "non_retenue",
+          offerTitle: t.offerTitle,
+        });
       }
 
       return res.json({
@@ -1892,14 +1850,8 @@ export const closeOffer = async (req, res) => {
   }
 };
 
-// ============================================================
-// GESTION DES EMBAUCHÉS (listes)
-// ============================================================
+/* ═══════════════════ PHASE 9 : EMBAUCHES ═══════════════════ */
 
-/**
- * GET /api/recruitment/my-hires
- * Le recruteur voit tous ses embauchés
- */
 export const getMyHires = async (req, res) => {
   try {
     const recruiter = await getRecruiterProfile(req.user.id);
@@ -1925,10 +1877,7 @@ export const getMyHires = async (req, res) => {
     const enriched = hiredApplications.map((app) => ({
       _id: app._id,
       hireAcceptedAt: app.hireAcceptedAt,
-      offer: {
-        _id: app.offerId?._id,
-        titre: app.offerId?.titre,
-      },
+      offer: { _id: app.offerId?._id, titre: app.offerId?.titre },
       candidate: {
         _id: app.candidateId?._id,
         nom: app.candidateId?.userId?.nom,
@@ -1945,8 +1894,9 @@ export const getMyHires = async (req, res) => {
 };
 
 /**
- * PUT /api/recruitment/hire/:applicationId/remove
- * Le recruteur retire un candidat embauché
+ * removeHire — retrait complet et propre d'une embauche.
+ * Ferme la conversation avec message système, resync compteur, socket,
+ * annule les interviews résiduels. Retrait DÉFINITIF (pas de ré-embauche).
  */
 export const removeHire = async (req, res) => {
   try {
@@ -1966,6 +1916,7 @@ export const removeHire = async (req, res) => {
     application.recruiterStatus = "refusee";
     application.candidateStatus = "non_retenue";
     application.dateDecision = new Date();
+    if (reason) application.rejectionMessage = reason;
     pushStatusHistory(
       application,
       "refusee",
@@ -1975,11 +1926,66 @@ export const removeHire = async (req, res) => {
     );
     await application.save();
 
+    // Resync compteur actif
+    await syncNombreCandidatures(application.offerId._id);
+
+    // Annuler d'éventuels interviews encore actifs
+    await Interview.updateMany(
+      {
+        applicationId: application._id,
+        status: {
+          $in: [
+            "proposed",
+            "confirmed",
+            "rescheduled_by_candidate",
+            "rescheduled_by_recruiter",
+            "pending_feedback",
+          ],
+        },
+      },
+      {
+        status: "cancelled_by_recruiter",
+        cancellationReason: "Embauche retirée",
+        cancelledBy: "recruiter",
+        cancelledAt: new Date(),
+      },
+    );
+
+    // Message système + fermeture conversation
     const candidate = await Candidate.findById(application.candidateId);
+    const conversation = await Conversation.findOne({ applicationId });
+    if (conversation) {
+      conversation.messages.push({
+        senderId: req.user.id,
+        senderType: "system",
+        content: `Votre embauche pour "${application.offerId.titre}" a été annulée par le recruteur.${reason ? ` Raison: ${reason}` : ""}`,
+        messageType: "closure",
+      });
+      conversation.isClosed = true;
+      conversation.closedReason = "application_closed";
+      conversation.unreadByCandidate += 1;
+      conversation.lastMessageAt = new Date();
+      await conversation.save();
+
+      const lastMsg = conversation.messages[conversation.messages.length - 1];
+      emitNewMessage(conversation._id.toString(), lastMsg);
+      emitConversationClosed(conversation._id.toString(), {
+        isClosed: true,
+        closedBy: "recruiter",
+        reason: "hire_removed",
+      });
+    }
+
     await Notification.create({
       userId: candidate.userId,
       message: `Votre embauche pour "${application.offerId.titre}" a été annulée par le recruteur.`,
       type: "alerte",
+    });
+
+    emitApplicationUpdate(candidate.userId.toString(), {
+      _id: application._id,
+      candidateStatus: "non_retenue",
+      offerTitle: application.offerId.titre,
     });
 
     res.json({ msg: "Embauche retirée", application });
@@ -1989,23 +1995,10 @@ export const removeHire = async (req, res) => {
   }
 };
 
-// ============================================================
-// AUTO-FEEDBACK TRIGGER (à appeler par un cron job ou scheduler)
-// ============================================================
+/* ═══════════════════ TÂCHES PLANIFIÉES ═══════════════════ */
 
-/**
- * Ce n'est pas un endpoint mais une fonction utilitaire
- * À appeler périodiquement pour déclencher le passage automatique
- * en pending_feedback 1h après la fin prévue de l'entretien
- */
 export const triggerPendingFeedback = async () => {
-  const now = new Date();
-
-  // Trouver les entretiens confirmés dont la fin + 1h est passée
-  const interviews = await Interview.find({
-    status: "confirmed",
-  });
-
+  const interviews = await Interview.find({ status: "confirmed" });
   let updatedCount = 0;
 
   for (const interview of interviews) {
@@ -2013,7 +2006,6 @@ export const triggerPendingFeedback = async () => {
       interview.status = "pending_feedback";
       await interview.save();
 
-      // Mettre à jour la candidature
       const application = await Application.findById(interview.applicationId);
       if (application && application.recruiterStatus === "entretien_planifie") {
         application.recruiterStatus = "pending_feedback";
@@ -2022,13 +2014,12 @@ export const triggerPendingFeedback = async () => {
         application.statusHistory.push({
           candidateStatus: application.candidateStatus,
           recruiterStatus: "pending_feedback",
-          changedBy: null, // Système
+          changedBy: null,
           note: `Feedback requis pour l'entretien #${interview.interviewNumber}`,
         });
         await application.save();
       }
 
-      // Notifier le recruteur
       const recruiter = await Recruiter.findById(interview.recruiterId);
       if (recruiter) {
         await Notification.create({
@@ -2037,17 +2028,11 @@ export const triggerPendingFeedback = async () => {
           type: "alerte",
         });
       }
-
       updatedCount++;
     }
   }
-
   return updatedCount;
 };
-
-// ============================================================
-// RAPPELS AUTOMATIQUES (24h avant)
-// ============================================================
 
 export const sendInterviewReminders = async () => {
   const now = new Date();
@@ -2068,9 +2053,7 @@ export const sendInterviewReminders = async () => {
     .populate("recruiterId");
 
   let sentCount = 0;
-
   for (const interview of interviews) {
-    // Rappel candidat
     if (interview.candidateId?.userId) {
       await Notification.create({
         userId: interview.candidateId.userId,
@@ -2078,8 +2061,6 @@ export const sendInterviewReminders = async () => {
         type: "info",
       });
     }
-
-    // Rappel recruteur
     if (interview.recruiterId?.userId) {
       await Notification.create({
         userId: interview.recruiterId.userId,
@@ -2087,13 +2068,41 @@ export const sendInterviewReminders = async () => {
         type: "info",
       });
     }
-
     interview.reminderSentToCandidate = true;
     interview.reminderSentToRecruiter = true;
     interview.reminderSentAt = new Date();
     await interview.save();
     sentCount++;
   }
-
   return sentCount;
+};
+
+export const deleteOrphanedConversation = async (req, res) => {
+  try {
+    const recruiter = await getRecruiterProfile(req.user.id);
+    const { conversationId } = req.params;
+
+    const conversation = await Conversation.findOne({
+      _id: conversationId,
+      recruiterId: recruiter._id,
+    });
+
+    if (!conversation) {
+      return res.status(404).json({ msg: "Conversation introuvable" });
+    }
+
+    if (!conversation.candidateDeleted) {
+      return res.status(400).json({
+        msg: "Seules les conversations liées à un candidat supprimé peuvent être supprimées.",
+      });
+    }
+
+    await Interview.deleteMany({ conversationId: conversation._id });
+    await Conversation.deleteOne({ _id: conversation._id });
+
+    res.json({ msg: "Conversation supprimée de votre historique." });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ msg: err.msg });
+    res.status(500).json({ msg: err.message });
+  }
 };

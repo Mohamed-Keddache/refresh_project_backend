@@ -106,6 +106,16 @@ export const getAllActiveOffers = async (req, res) => {
               ],
             },
           ];
+        } else if (sort === "salary") {
+          query.$and = [
+            ...(query.$and || []),
+            {
+              $or: [
+                { salaryMax: { $lt: value } },
+                { salaryMax: value, _id: { $lt: id } },
+              ],
+            },
+          ];
         } else {
           query.$and = [
             ...(query.$and || []),
@@ -123,6 +133,8 @@ export const getAllActiveOffers = async (req, res) => {
     let sortQuery = {};
     if (sort === "popular") {
       sortQuery = { nombreCandidatures: -1, _id: -1 };
+    } else if (sort === "salary") {
+      sortQuery = { salaryMax: -1, _id: -1 };
     } else {
       sortQuery = { datePublication: -1, _id: -1 };
     }
@@ -157,7 +169,9 @@ export const getAllActiveOffers = async (req, res) => {
       const cursorValue =
         sort === "popular"
           ? lastItem.nombreCandidatures
-          : lastItem.datePublication;
+          : sort === "salary"
+            ? lastItem.salaryMax || 0
+            : lastItem.datePublication;
 
       nextCursor = toCursor({
         id: lastItem._id,

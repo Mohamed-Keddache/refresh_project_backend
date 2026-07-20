@@ -65,25 +65,29 @@ export const initializeSocket = (httpServer) => {
       socket.leave(`application:${applicationId}`);
     });
 
-    // Typing indicators — relayed to the conversation room
     socket.on("typing:start", ({ conversationId }) => {
+      if (!conversationId) return;
       socket.to(`conversation:${conversationId}`).emit("typing:start", {
         userId,
+        userRole,
         conversationId,
       });
     });
 
     socket.on("typing:stop", ({ conversationId }) => {
+      if (!conversationId) return;
       socket.to(`conversation:${conversationId}`).emit("typing:stop", {
         userId,
+        userRole,
         conversationId,
       });
     });
 
-    // Mark messages as read in real time
     socket.on("messages:read", ({ conversationId }) => {
+      if (!conversationId) return;
       socket.to(`conversation:${conversationId}`).emit("messages:read", {
         userId,
+        userRole,
         conversationId,
         readAt: new Date(),
       });

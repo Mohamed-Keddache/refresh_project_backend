@@ -333,14 +333,15 @@ export const withdrawApplication = async (req, res) => {
       }
     }
 
-    await Offer.findOneAndUpdate(
-      { _id: application.offerId, nombreCandidatures: { $gt: 0 } },
-      { $inc: { nombreCandidatures: -1 } },
-    );
+    // Resync compteur actif (source unique de vérité)
+    const { syncNombreCandidatures } =
+      await import("./recruitmentFlowController.js");
+    await syncNombreCandidatures(application.offerId);
 
     const offer = await Offer.findById(application.offerId).populate(
       "recruteurId",
     );
+
     if (offer?.recruteurId?.userId) {
       await Notification.create({
         userId: offer.recruteurId.userId,
@@ -413,11 +414,9 @@ export const cancelApplication = async (req, res) => {
         };
       }
 
-      await Offer.findOneAndUpdate(
-        { _id: application.offerId, nombreCandidatures: { $gt: 0 } },
-        { $inc: { nombreCandidatures: -1 } },
-        { session },
-      );
+      const { syncNombreCandidatures } =
+        await import("./recruitmentFlowController.js");
+      await syncNombreCandidatures(application.offerId, session);
     });
 
     res.json({ msg: "Candidature annulée." });
@@ -504,6 +503,50 @@ export const checkApplicationStatus = async (req, res) => {
       canRepostulate,
       action,
       allowRepostulation: application.offerId.allowRepostulation,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+// ─────────────────────────────────────────────────────────────
+// Sidebar badge counts (conversations w/ unread, interviews needing
+// response, applications needing attention). Cheap aggregate queries.
+// ─────────────────────────────────────────────────────────────
+export const getCandidateBadgeCounts = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id }).select(
+      "_id",
+    );
+    if (!candidate) {
+      return res.json({ conversations: 0, interviews: 0, applications: 0 });
+    }
+
+    const [convAgg, interviewsNeedingResponse, hireOffers] = await Promise.all([
+      Conversation.aggregate([
+        {
+          $match: {
+            candidateId: candidate._id,
+            status: "active",
+            unreadByCandidate: { $gt: 0 },
+          },
+        },
+        { $count: "count" },
+      ]),
+      Interview.countDocuments({
+        candidateId: candidate._id,
+        status: { $in: ["proposed", "rescheduled_by_recruiter"] },
+      }),
+      // Applications where the candidate has a pending action (hire offer received)
+      Application.countDocuments({
+        candidateId: candidate._id,
+        candidateStatus: "retenue",
+      }),
+    ]);
+
+    res.json({
+      conversations: convAgg[0]?.count || 0,
+      interviews: interviewsNeedingResponse,
+      applications: hireOffers,
     });
   } catch (err) {
     res.status(500).json({ msg: err.message });

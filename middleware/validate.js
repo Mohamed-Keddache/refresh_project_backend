@@ -36,6 +36,28 @@ export const validators = {
       .matches(/\d/)
       .withMessage("Le mot de passe doit contenir un chiffre"),
     body("role").isIn(["candidat", "recruteur"]).withMessage("Rôle invalide"),
+    body("dateOfBirth")
+      .if(body("role").equals("candidat"))
+      .notEmpty()
+      .withMessage("La date de naissance est requise")
+      .isISO8601()
+      .withMessage("Date de naissance invalide")
+      .custom((value) => {
+        const dob = new Date(value);
+        if (isNaN(dob.getTime()) || dob > new Date()) {
+          throw new Error("Date de naissance invalide");
+        }
+        const age =
+          (Date.now() - dob.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
+        if (age < 15 || age > 100) {
+          throw new Error("L'âge doit être compris entre 15 et 100 ans");
+        }
+        return true;
+      }),
+    body("gender")
+      .if(body("role").equals("candidat"))
+      .isIn(["homme", "femme"])
+      .withMessage("Le genre est requis (homme ou femme)"),
     handleValidationErrors,
   ],
 

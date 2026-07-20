@@ -25,6 +25,7 @@ import {
   getSkillDetails,
   submitSkillFeedback,
 } from "./skillController.js";
+const escapeRegex = (str = "") => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 export const getProfile = async (req, res) => {
   try {
@@ -273,12 +274,20 @@ export const deleteCV = async (req, res) => {
       return res.status(404).json({ msg: "CV introuvable." });
     }
 
-    const publicId = getPublicIdFromUrl(cv.url);
+    let publicId = getPublicIdFromUrl(cv.url);
     if (publicId) {
+      // FIX: Cloudinary requires the file extension for 'raw' files (like PDFs)
+      if (cv.url.includes("/raw/")) {
+        const urlWithoutQuery = cv.url.split("?")[0];
+        const extension = urlWithoutQuery.split(".").pop();
+        publicId = `${publicId}.${extension}`;
+      }
       await deleteFromCloudinary(publicId, "raw");
     }
 
-    candidate.cvs.pull(cvId);
+    // FIX: Using a string with pull() on a DocumentArray fails silently.
+    // We must pass an object with the _id.
+    candidate.cvs.pull({ _id: cvId });
     await candidate.save();
 
     res.json({
@@ -738,7 +747,6 @@ export const applyToOffer = async (req, res) => {
           existingApp.rejectionMessage = undefined;
           existingApp.dateDecision = undefined;
 
-          // ── BUG 1 FIX: Rafraîchir le snapshot avec les données actuelles de l'offre ──
           const company = await Company.findById(offer.companyId).session(
             session,
           );
@@ -765,9 +773,17 @@ export const applyToOffer = async (req, res) => {
 
           await existingApp.save({ session });
 
+          // Repostulation : PAS de +1 sur candfidaturesRecues (historique).
+          // On recompte nombreCandidatures (actives) proprement.
+          const activeCount = await Application.countDocuments({
+            offerId: offreId,
+            candidateStatus: {
+              $in: ["envoyee", "en_cours", "entretien", "retenue"],
+            },
+          }).session(session);
           await Offer.findByIdAndUpdate(
             offreId,
-            { $inc: { nombreCandidatures: 1 } },
+            { nombreCandidatures: activeCount },
             { session },
           );
 
@@ -807,9 +823,20 @@ export const applyToOffer = async (req, res) => {
 
       await newApplication.save({ session });
 
+      // NOUVELLE candidature : +1 historique + recompute actif.
+      const activeCount = await Application.countDocuments({
+        offerId: offreId,
+        candidateStatus: {
+          $in: ["envoyee", "en_cours", "entretien", "retenue"],
+        },
+      }).session(session);
+
       await Offer.findByIdAndUpdate(
         offreId,
-        { $inc: { nombreCandidatures: 1 } },
+        {
+          nombreCandidatures: activeCount,
+          $inc: { candidaturesRecues: 1 },
+        },
         { session },
       );
 
@@ -914,41 +941,9 @@ export const getCandidateStats = async (req, res) => {
       suggestions.push({
         type: "critical",
         priority: 1,
-        message: "Confirmez votre email pour postuler aux offres",
+        message: "Confirmez votre email pour pouvoir postuler",
         action: "verify_email",
         icon: "mail",
-      });
-    }
-
-    if (profileCompletion.percentage < 100) {
-      suggestions.push({
-        type: "important",
-        priority: 2,
-        message: `Complétez votre profil (${profileCompletion.percentage}%)`,
-        action: "complete_profile",
-        missing: profileCompletion.missing,
-        icon: "user",
-      });
-    }
-
-    if (candidate.cvs.length === 0) {
-      suggestions.push({
-        type: "important",
-        priority: 3,
-        message: "Ajoutez votre CV pour augmenter vos chances",
-        action: "upload_cv",
-        icon: "file",
-      });
-    }
-
-    if (candidate.skills.length < 3) {
-      suggestions.push({
-        type: "suggestion",
-        priority: 4,
-        message:
-          "Ajoutez plus de compétences pour de meilleures recommandations",
-        action: "add_skills",
-        icon: "star",
       });
     }
 
@@ -956,10 +951,106 @@ export const getCandidateStats = async (req, res) => {
       suggestions.push({
         type: "urgent",
         priority: 0,
-        message: `${pendingInterviewResponses} proposition(s) d'entretien en attente`,
+        message: `${pendingInterviewResponses} proposition(s) d'entretien en attente de réponse`,
         action: "view_interviews",
         icon: "calendar",
       });
+    }
+
+    // --- Suggestions "bare minimum" pour postuler ---
+    if (!candidate.telephone) {
+      suggestions.push({
+        type: "important",
+        priority: 2,
+        message: "Ajoutez votre numéro de téléphone",
+        action: "field_telephone",
+        icon: "user",
+      });
+    }
+    if (!candidate.residence?.wilaya) {
+      suggestions.push({
+        type: "important",
+        priority: 2,
+        message: "Indiquez votre wilaya de résidence",
+        action: "field_wilaya",
+        icon: "user",
+      });
+    }
+    if (candidate.cvs.length === 0) {
+      suggestions.push({
+        type: "important",
+        priority: 3,
+        message: "Ajoutez au moins un CV",
+        action: "upload_cv",
+        icon: "file",
+      });
+    }
+    if (candidate.skills.length === 0) {
+      suggestions.push({
+        type: "important",
+        priority: 3,
+        message: "Ajoutez au moins une compétence",
+        action: "add_skills",
+        icon: "star",
+      });
+    }
+
+    // --- Suggestions "profil 100%" (nice to have) ---
+    if (candidate.telephone && candidate.residence?.wilaya) {
+      if (!candidate.profilePicture) {
+        suggestions.push({
+          type: "suggestion",
+          priority: 5,
+          message: "Ajoutez une photo de profil",
+          action: "field_photo",
+          icon: "user",
+        });
+      }
+      if (!candidate.bio) {
+        suggestions.push({
+          type: "suggestion",
+          priority: 5,
+          message: "Rédigez un résumé professionnel",
+          action: "field_bio",
+          icon: "user",
+        });
+      }
+      if (!candidate.desiredPosition) {
+        suggestions.push({
+          type: "suggestion",
+          priority: 5,
+          message: "Précisez le poste recherché",
+          action: "field_position",
+          icon: "star",
+        });
+      }
+      if (candidate.experiences.length === 0) {
+        suggestions.push({
+          type: "suggestion",
+          priority: 6,
+          message: "Ajoutez une expérience professionnelle",
+          action: "add_experience",
+          icon: "star",
+        });
+      }
+      if (candidate.education.length === 0) {
+        suggestions.push({
+          type: "suggestion",
+          priority: 6,
+          message: "Ajoutez votre formation",
+          action: "add_education",
+          icon: "star",
+        });
+      }
+      if (candidate.skills.length > 0 && candidate.skills.length < 3) {
+        suggestions.push({
+          type: "suggestion",
+          priority: 6,
+          message: "Ajoutez plus de compétences (min. 3 recommandé)",
+          action: "add_skills",
+          icon: "star",
+        });
+      }
     }
 
     suggestions.sort((a, b) => a.priority - b.priority);
@@ -1148,7 +1239,7 @@ export const getRecommendedOffers = async (req, res) => {
     if (candidateSkills.length > 0) {
       queryConditions.push({
         skills: {
-          $in: candidateSkills.map((s) => new RegExp(s, "i")),
+          $in: candidateSkills.map((s) => new RegExp(escapeRegex(s), "i")),
         },
       });
     }
@@ -1159,7 +1250,7 @@ export const getRecommendedOffers = async (req, res) => {
 
     if (desiredPosition) {
       queryConditions.push({
-        titre: { $regex: desiredPosition, $options: "i" },
+        titre: { $regex: escapeRegex(desiredPosition), $options: "i" },
       });
     }
 
@@ -1256,4 +1347,61 @@ export {
   deleteSkill,
   getSkillDetails,
   submitSkillFeedback,
+};
+export const getFinalizationStatus = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id }).select(
+      "dateOfBirth gender",
+    );
+    if (!candidate) {
+      return res.json({ isFinalized: false, needsFinalization: true });
+    }
+    const isFinalized = !!(candidate.dateOfBirth && candidate.gender);
+    res.json({
+      isFinalized,
+      needsFinalization: !isFinalized,
+      dateOfBirth: candidate.dateOfBirth,
+      gender: candidate.gender,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const finalizeAccount = async (req, res) => {
+  try {
+    const { dateOfBirth, gender } = req.body;
+
+    if (!dateOfBirth) {
+      return res.status(400).json({ msg: "La date de naissance est requise." });
+    }
+    if (!["homme", "femme"].includes(gender)) {
+      return res
+        .status(400)
+        .json({ msg: "Le genre est requis (homme ou femme)." });
+    }
+
+    // Basic age sanity check (must be a valid past date, at least 15 years old)
+    const dob = new Date(dateOfBirth);
+    if (isNaN(dob.getTime()) || dob > new Date()) {
+      return res.status(400).json({ msg: "Date de naissance invalide." });
+    }
+    const age = (Date.now() - dob.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
+    if (age < 15 || age > 100) {
+      return res.status(400).json({ msg: "Date de naissance invalide." });
+    }
+
+    let candidate = await Candidate.findOne({ userId: req.user.id });
+    if (!candidate) {
+      candidate = new Candidate({ userId: req.user.id });
+    }
+
+    candidate.dateOfBirth = dob;
+    candidate.gender = gender;
+    await candidate.save();
+
+    res.json({ msg: "Compte finalisé avec succès ✅", isFinalized: true });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
 };

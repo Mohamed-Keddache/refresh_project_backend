@@ -32,22 +32,12 @@ export const PREDEFINED_MESSAGES = {
   greeting: {
     id: "greeting",
     template: (candidateName, offerTitle) =>
-      `Bonjour ${candidateName}, votre profil a retenu notre attention pour le poste de ${offerTitle}. Êtes-vous disponible pour échanger ?`,
-  },
-  availability: {
-    id: "availability",
-    template: (candidateName, offerTitle) =>
-      `Bonjour ${candidateName}, nous examinons les candidatures pour ${offerTitle}. Pouvez-vous nous confirmer votre disponibilité actuelle ?`,
+      `Bonjour ${candidateName}, votre profil a retenu notre attention pour le poste de ${offerTitle}. Seriez-vous disponible pour échanger à ce sujet ?`,
   },
   interest: {
     id: "interest",
     template: (candidateName, offerTitle) =>
-      `Bonjour ${candidateName}, nous avons une opportunité intéressante pour le poste de ${offerTitle}. Seriez-vous intéressé(e) pour en discuter ?`,
-  },
-  quick_chat: {
-    id: "quick_chat",
-    template: (candidateName, offerTitle) =>
-      `Bonjour ${candidateName}, votre candidature pour ${offerTitle} nous intéresse. Pouvons-nous organiser un court échange pour en savoir plus sur votre parcours ?`,
+      `Bonjour ${candidateName}, nous étudions votre candidature pour ${offerTitle} et souhaiterions en discuter avec vous. Quand seriez-vous disponible pour un court échange ?`,
   },
 };
 

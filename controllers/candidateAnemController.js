@@ -691,6 +691,39 @@ export const getCandidateRegistrationForm = async (req, res) => {
     }
 
     const user = await User.findById(req.user.id);
+    const candidatee = await Candidate.findById(registration.candidateId);
+
+    const nameParts = user.nom ? user.nom.split(" ") : [];
+    const defaults1 = {
+      civilite:
+        candidatee?.gender === "homme"
+          ? "monsieur"
+          : candidatee?.gender === "femme"
+            ? "madame"
+            : undefined,
+      nom: nameParts.slice(1).join(" ") || undefined,
+      prenom: nameParts[0] || undefined,
+      dateNaissance: candidatee?.dateOfBirth || undefined,
+    };
+    const defaults2 = {
+      mobile: candidatee?.telephone || undefined,
+      wilayaResidence: candidatee?.residence?.wilaya || undefined,
+      communeResidence: candidatee?.residence?.commune || undefined,
+      adresse: candidatee?.residence?.address || undefined,
+    };
+
+    const mergeDefaults = (saved = {}, defaults = {}) => {
+      const out = { ...saved };
+      for (const [k, v] of Object.entries(defaults)) {
+        if (
+          (out[k] === undefined || out[k] === null || out[k] === "") &&
+          v !== undefined
+        ) {
+          out[k] = v;
+        }
+      }
+      return out;
+    };
 
     res.json({
       registration: {
@@ -701,8 +734,8 @@ export const getCandidateRegistrationForm = async (req, res) => {
         formCompleted: registration.formCompleted,
         formSubmittedAt: registration.formSubmittedAt,
 
-        step1: registration.step1 || {},
-        step2: registration.step2 || {},
+        step1: mergeDefaults(registration.step1 || {}, defaults1),
+        step2: mergeDefaults(registration.step2 || {}, defaults2),
         step3: registration.step3 || {},
         step4: {
           email: registration.step4?.email || user.email,
@@ -712,7 +745,6 @@ export const getCandidateRegistrationForm = async (req, res) => {
 
         declaredAnemId: registration.declaredAnemId,
         verifiedAnemId: registration.verifiedAnemId,
-
         failureReason: registration.failureReason,
         rejectionReason: registration.rejectionReason,
 

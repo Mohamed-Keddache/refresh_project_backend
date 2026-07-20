@@ -1,5 +1,55 @@
 
 
+=== fix-users.js ===
+import "dotenv/config";
+import mongoose from "mongoose";
+import User from "./models/User.js";
+
+async function fixOldUsers() {
+  try {
+    console.log("🔌 Connexion à la base de données...");
+
+    
+    if (!process.env.MONGO_URI) {
+      console.error("❌ ERREUR: MONGO_URI introuvable.");
+      process.exit(1);
+    }
+
+    await mongoose.connect(process.env.MONGO_URI);
+    console.log("🟢 Connecté à MongoDB!");
+
+    
+    
+    
+    const result = await User.updateMany(
+      {
+        $or: [
+          { oauthProviders: { $exists: false } }, 
+          { oauthProviders: { $size: 0 } }, 
+        ],
+        hasPassword: { $ne: true },
+      },
+      {
+        $set: { hasPassword: true },
+      },
+    );
+
+    console.log(`✅ Opération terminée avec succès !`);
+    console.log(
+      `🛠️ ${result.modifiedCount} ancien(s) utilisateur(s) standard corrigé(s).`,
+    );
+  } catch (error) {
+    console.error("❌ Erreur lors de la mise à jour :", error);
+  } finally {
+    await mongoose.disconnect();
+    console.log("👋 Déconnecté de la base de données.");
+    process.exit(0);
+  }
+}
+
+fixOldUsers();
+
+
 === package.json ===
 {
   "name": "refresh_project",
@@ -323,6 +373,24 @@ function startScheduledTasks() {
   const INTERVAL_MS = 5 * 60 * 1000;
   setInterval(runScheduledTasks, INTERVAL_MS);
   setTimeout(runScheduledTasks, 10000);
+
+  
+  const runAnemCooldownCheck = async () => {
+    try {
+      const { processExpiredCooldowns } =
+        await import("./controllers/anemOfferController.js");
+      const publishedCount = await processExpiredCooldowns();
+      if (publishedCount > 0) {
+        console.log(
+          `⏰ ANEM Cooldown (fast): ${publishedCount} offre(s) publiée(s)`,
+        );
+      }
+    } catch (err) {
+      console.error("⏰ ANEM fast cooldown check error:", err.message);
+    }
+  };
+  setInterval(runAnemCooldownCheck, 5 * 1000);
+  setTimeout(runAnemCooldownCheck, 3000);
 
   console.log("⏰ Scheduled tasks registered (runs every 5 minutes)");
 }
@@ -833,25 +901,29 @@ export const initializeSocket = (httpServer) => {
       socket.leave(`application:${applicationId}`);
     });
 
-    
     socket.on("typing:start", ({ conversationId }) => {
+      if (!conversationId) return;
       socket.to(`conversation:${conversationId}`).emit("typing:start", {
         userId,
+        userRole,
         conversationId,
       });
     });
 
     socket.on("typing:stop", ({ conversationId }) => {
+      if (!conversationId) return;
       socket.to(`conversation:${conversationId}`).emit("typing:stop", {
         userId,
+        userRole,
         conversationId,
       });
     });
 
-    
     socket.on("messages:read", ({ conversationId }) => {
+      if (!conversationId) return;
       socket.to(`conversation:${conversationId}`).emit("messages:read", {
         userId,
+        userRole,
         conversationId,
         readAt: new Date(),
       });
@@ -1988,7 +2060,13 @@ export const proposeCandidateToOffer = async (req, res) => {
       },
     });
 
-    offer.nombreCandidatures += 1;
+    
+    const { syncNombreCandidatures } =
+      await import("./recruitmentFlowController.js");
+    await Offer.findByIdAndUpdate(offer._id, {
+      $inc: { candidaturesRecues: 1 },
+    });
+    await syncNombreCandidatures(offer._id);
     await offer.save();
 
     if (offer.recruteurId?.userId) {
@@ -2903,6 +2981,69 @@ export const toggleStorageMode = async (req, res) => {
       msg: `Mode de stockage changé avec succès en : ${mode}`,
       mode,
     });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+export const setAnemCooldown = async (req, res) => {
+  try {
+    const { value, unit } = req.body;
+    
+    if (value === undefined || value === null || isNaN(Number(value))) {
+      return res.status(400).json({ msg: "Valeur invalide." });
+    }
+    const n = Number(value);
+    let ms;
+    switch (unit) {
+      case "seconds":
+        ms = n * 1000;
+        break;
+      case "minutes":
+        ms = n * 60 * 1000;
+        break;
+      case "hours":
+        ms = n * 60 * 60 * 1000;
+        break;
+      case "days":
+      default:
+        ms = n * 24 * 60 * 60 * 1000;
+        break;
+    }
+
+    if (ms < 0)
+      return res.status(400).json({ msg: "Durée négative interdite." });
+
+    await SystemSettings.setSetting(
+      "anem_offer_cooldown_ms",
+      ms,
+      "Durée de cooldown ANEM en millisecondes",
+      req.user.id,
+    );
+    await SystemSettings.setSetting(
+      "anem_offer_cooldown_days",
+      Math.max(0, Math.round(ms / (24 * 60 * 60 * 1000))),
+      "Nombre de jours de cooldown ANEM (dérivé)",
+      req.user.id,
+    );
+
+    res.json({
+      msg: "Délai de cooldown ANEM mis à jour.",
+      cooldownMs: ms,
+      unit,
+      value: n,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getAnemCooldown = async (req, res) => {
+  try {
+    const ms = await SystemSettings.getSetting(
+      "anem_offer_cooldown_ms",
+      21 * 24 * 60 * 60 * 1000,
+    );
+    res.json({ cooldownMs: ms });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
@@ -5192,11 +5333,55 @@ import Company from "../models/Company.js";
 import Notification from "../models/Notification.js";
 import { logAdminAction } from "../models/AdminLog.js";
 import SystemSettings from "../models/SystemSettings.js";
+import {
+  emitAnemOfferUpdate,
+  emitAnemOfferAdminUpdate,
+} from "../services/anemSocketEvents.js";
 
 
+const buildAnemOfferPayload = (anemOffer, offer = null) => ({
+  _id: anemOffer._id,
+  offerId: anemOffer.offerId,
+  anemId: anemOffer.anemId,
+  status: anemOffer.status,
+  pdfDownloaded: anemOffer.pdfDownloaded,
+  cooldownStartedAt: anemOffer.cooldownStartedAt,
+  cooldownEndsAt: anemOffer.cooldownEndsAt,
+  cooldownDays: anemOffer.cooldownDays,
+  cooldownMs: anemOffer.cooldownMs,
+  failureReason: anemOffer.failureReason,
+  failureOption: anemOffer.failureOption,
+  failedAt: anemOffer.failedAt,
+  publishedAt: anemOffer.publishedAt,
+  recruiterAction: anemOffer.recruiterAction,
+  offerTitle: offer?.titre,
+  offerActif: offer?.actif,
+  offerValidationStatus: offer?.validationStatus,
+  updatedAt: new Date(),
+});
 
 
-
+const resolveDefaultCooldown = async () => {
+  const defaultMs = await SystemSettings.getSetting(
+    "anem_offer_cooldown_ms",
+    null,
+  );
+  if (defaultMs !== null && defaultMs !== undefined) {
+    const ms = Number(defaultMs);
+    return {
+      ms,
+      days: Math.max(0, Math.round(ms / (24 * 60 * 60 * 1000))),
+    };
+  }
+  const defaultDays = await SystemSettings.getSetting(
+    "anem_offer_cooldown_days",
+    21,
+  );
+  return {
+    ms: Number(defaultDays) * 24 * 60 * 60 * 1000,
+    days: Number(defaultDays),
+  };
+};
 
 export const checkAnemEligibility = async (req, res) => {
   try {
@@ -5218,7 +5403,6 @@ export const checkAnemEligibility = async (req, res) => {
   }
 };
 
-
 export const getRecruiterAnemOffers = async (req, res) => {
   try {
     const recruiter = await Recruiter.findOne({ userId: req.user.id });
@@ -5228,7 +5412,7 @@ export const getRecruiterAnemOffers = async (req, res) => {
 
     const anemOffers = await AnemOffer.find({
       recruiterId: recruiter._id,
-      status: { $ne: "deleted_by_recruiter" }, 
+      status: { $ne: "deleted_by_recruiter" },
     })
       .populate(
         "offerId",
@@ -5246,7 +5430,10 @@ export const getRecruiterAnemOffers = async (req, res) => {
       anemId: ao.anemId,
       status: ao.status,
       pdfDownloaded: ao.pdfDownloaded,
+      cooldownStartedAt: ao.cooldownStartedAt,
       cooldownEndsAt: ao.cooldownEndsAt,
+      cooldownDays: ao.cooldownDays,
+      cooldownMs: ao.cooldownMs,
       cooldownRemaining:
         ao.status === "in_cooldown" && ao.cooldownEndsAt
           ? Math.max(
@@ -5269,7 +5456,6 @@ export const getRecruiterAnemOffers = async (req, res) => {
     res.status(500).json({ msg: err.message });
   }
 };
-
 
 export const getOfferAnemStatus = async (req, res) => {
   try {
@@ -5302,7 +5488,10 @@ export const getOfferAnemStatus = async (req, res) => {
         status: anemOffer.status,
         anemId: anemOffer.anemId,
         pdfDownloaded: anemOffer.pdfDownloaded,
+        cooldownStartedAt: anemOffer.cooldownStartedAt,
         cooldownEndsAt: anemOffer.cooldownEndsAt,
+        cooldownDays: anemOffer.cooldownDays,
+        cooldownMs: anemOffer.cooldownMs,
         cooldownRemaining:
           anemOffer.status === "in_cooldown" && anemOffer.cooldownEndsAt
             ? Math.max(
@@ -5324,7 +5513,6 @@ export const getOfferAnemStatus = async (req, res) => {
     res.status(500).json({ msg: err.message });
   }
 };
-
 
 export const recruiterPublishDirect = async (req, res) => {
   try {
@@ -5358,7 +5546,15 @@ export const recruiterPublishDirect = async (req, res) => {
       });
     }
 
-    
+    const offer = await Offer.findById(offerId);
+    if (!offer) {
+      anemOffer.status = "deleted_by_recruiter";
+      await anemOffer.save();
+      return res.status(400).json({
+        msg: "Impossible de publier une offre supprimée",
+      });
+    }
+
     anemOffer.status = "bypassed";
     anemOffer.recruiterActionAt = new Date();
     anemOffer.recruiterAction = "published_direct";
@@ -5366,18 +5562,9 @@ export const recruiterPublishDirect = async (req, res) => {
     anemOffer.addAuditEntry("recruiter_published_direct", req.user.id, {}, req);
     await anemOffer.save();
 
-    
-    const offer = await Offer.findById(offerId);
-    if (!offer || offer.actif === false) {
-      anemOffer.status = "deleted_by_recruiter";
-      await anemOffer.save();
-
-      return res.status(400).json({
-        msg: "Impossible de publier une offre fermée ou supprimée",
-      });
-    }
     offer.validationStatus = "approved";
     offer.actif = true;
+    offer.isAnem = false;
     offer.datePublication = new Date();
     offer.validationHistory.push({
       status: "approved",
@@ -5385,6 +5572,10 @@ export const recruiterPublishDirect = async (req, res) => {
       date: new Date(),
     });
     await offer.save();
+
+    const payload = buildAnemOfferPayload(anemOffer, offer);
+    emitAnemOfferUpdate(recruiter.userId.toString(), payload);
+    emitAnemOfferAdminUpdate(payload);
 
     res.json({
       msg: "Offre publiée avec succès ✅",
@@ -5399,7 +5590,6 @@ export const recruiterPublishDirect = async (req, res) => {
     res.status(500).json({ msg: err.message });
   }
 };
-
 
 export const recruiterSubmitClassic = async (req, res) => {
   try {
@@ -5426,7 +5616,6 @@ export const recruiterSubmitClassic = async (req, res) => {
       });
     }
 
-    
     anemOffer.status = "redirected_classic";
     anemOffer.recruiterActionAt = new Date();
     anemOffer.recruiterAction = "submitted_classic";
@@ -5438,10 +5627,9 @@ export const recruiterSubmitClassic = async (req, res) => {
     );
     await anemOffer.save();
 
-    
     const offer = await Offer.findById(offerId);
     offer.validationStatus = "pending";
-    offer.isAnem = false; 
+    offer.isAnem = false;
     offer.validationHistory.push({
       status: "pending",
       message: "Soumis au circuit classique après échec ANEM",
@@ -5449,7 +5637,6 @@ export const recruiterSubmitClassic = async (req, res) => {
     });
     await offer.save();
 
-    
     const admins = await User.find({ role: "admin" });
     const notifPromises = admins.map((admin) =>
       Notification.create({
@@ -5459,6 +5646,10 @@ export const recruiterSubmitClassic = async (req, res) => {
       }),
     );
     await Promise.all(notifPromises);
+
+    const payload = buildAnemOfferPayload(anemOffer, offer);
+    emitAnemOfferUpdate(recruiter.userId.toString(), payload);
+    emitAnemOfferAdminUpdate(payload);
 
     res.json({
       msg: "Offre soumise au circuit de validation classique ✅",
@@ -5472,7 +5663,6 @@ export const recruiterSubmitClassic = async (req, res) => {
     res.status(500).json({ msg: err.message });
   }
 };
-
 
 export const recruiterDeleteAnemOffer = async (req, res) => {
   try {
@@ -5492,7 +5682,6 @@ export const recruiterDeleteAnemOffer = async (req, res) => {
       return res.status(404).json({ msg: "Offre ANEM introuvable" });
     }
 
-    
     const deletableStatuses = ["failed", "pending_review"];
     if (!deletableStatuses.includes(anemOffer.status)) {
       return res.status(400).json({
@@ -5501,7 +5690,6 @@ export const recruiterDeleteAnemOffer = async (req, res) => {
       });
     }
 
-    
     anemOffer.status = "deleted_by_recruiter";
     anemOffer.deletedByRecruiterAt = new Date();
     anemOffer.recruiterActionAt = new Date();
@@ -5509,23 +5697,21 @@ export const recruiterDeleteAnemOffer = async (req, res) => {
     anemOffer.addAuditEntry("recruiter_deleted", req.user.id, {}, req);
     await anemOffer.save();
 
-    
     const offer = await Offer.findById(offerId);
     offer.isDeletedByRecruiter = true;
     offer.deletedByRecruiterAt = new Date();
     offer.actif = false;
     await offer.save();
 
+    const payload = buildAnemOfferPayload(anemOffer, offer);
+    emitAnemOfferUpdate(recruiter.userId.toString(), payload);
+    emitAnemOfferAdminUpdate(payload);
+
     res.json({ msg: "Offre supprimée avec succès" });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
 };
-
-
-
-
-
 
 export const getAdminAnemOffers = async (req, res) => {
   try {
@@ -5545,7 +5731,6 @@ export const getAdminAnemOffers = async (req, res) => {
 
     let query = {};
 
-    
     if (status) {
       if (status === "all") {
         
@@ -5555,30 +5740,25 @@ export const getAdminAnemOffers = async (req, res) => {
         query.status = status;
       }
     } else {
-      
       query.status = { $ne: "deleted_by_recruiter" };
     }
 
-    
     if (anemId) {
       query.anemId = { $regex: anemId, $options: "i" };
     }
 
-    
     if (pdfDownloaded === "true") {
       query.pdfDownloaded = true;
     } else if (pdfDownloaded === "false") {
       query.pdfDownloaded = false;
     }
 
-    
     if (failedSinceDays && status === "failed") {
       const cutoff = new Date();
       cutoff.setDate(cutoff.getDate() - parseInt(failedSinceDays));
       query.failedAt = { $lte: cutoff };
     }
 
-    
     if (dateFrom || dateTo) {
       query.createdAt = {};
       if (dateFrom) query.createdAt.$gte = new Date(dateFrom);
@@ -5589,26 +5769,17 @@ export const getAdminAnemOffers = async (req, res) => {
       }
     }
 
-    
     if (search) {
       const searchRegex = { $regex: search, $options: "i" };
-
-      
-      const matchingOffers = await Offer.find({
-        titre: searchRegex,
-      }).select("_id");
+      const matchingOffers = await Offer.find({ titre: searchRegex }).select(
+        "_id",
+      );
       const offerIds = matchingOffers.map((o) => o._id);
-
-      
       const matchingCompanies = await Company.find({
         name: searchRegex,
       }).select("_id");
       const companyIds = matchingCompanies.map((c) => c._id);
-
-      
-      const matchingUsers = await User.find({
-        nom: searchRegex,
-      }).select("_id");
+      const matchingUsers = await User.find({ nom: searchRegex }).select("_id");
       const userIds = matchingUsers.map((u) => u._id);
       const matchingRecruiters = await Recruiter.find({
         userId: { $in: userIds },
@@ -5671,7 +5842,10 @@ export const getAdminAnemOffers = async (req, res) => {
       },
       depositedAt: ao.depositedAt,
       depositedBy: ao.depositedBy?.nom,
+      cooldownStartedAt: ao.cooldownStartedAt,
       cooldownEndsAt: ao.cooldownEndsAt,
+      cooldownDays: ao.cooldownDays,
+      cooldownMs: ao.cooldownMs,
       cooldownRemaining:
         ao.status === "in_cooldown" && ao.cooldownEndsAt
           ? Math.max(
@@ -5719,7 +5893,6 @@ export const getAdminAnemOffers = async (req, res) => {
   }
 };
 
-
 export const getAnemOfferPdfData = async (req, res) => {
   try {
     const { anemOfferId } = req.params;
@@ -5729,7 +5902,6 @@ export const getAnemOfferPdfData = async (req, res) => {
       return res.status(404).json({ msg: "Offre ANEM introuvable" });
     }
 
-    
     anemOffer.pdfDownloaded = true;
     anemOffer.pdfDownloads.push({
       downloadedBy: req.user.id,
@@ -5749,12 +5921,13 @@ export const getAnemOfferPdfData = async (req, res) => {
       req,
     );
 
+    emitAnemOfferAdminUpdate(buildAnemOfferPayload(anemOffer));
+
     res.json(pdfData);
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
 };
-
 
 export const bulkGetAnemOfferPdfData = async (req, res) => {
   try {
@@ -5782,7 +5955,6 @@ export const bulkGetAnemOfferPdfData = async (req, res) => {
           continue;
         }
 
-        
         anemOffer.pdfDownloaded = true;
         anemOffer.pdfDownloads.push({
           downloadedBy: req.user.id,
@@ -5799,6 +5971,7 @@ export const bulkGetAnemOfferPdfData = async (req, res) => {
 
         const pdfData = await anemOffer.generatePdfData();
         results.push({ id, success: true, data: pdfData });
+        emitAnemOfferAdminUpdate(buildAnemOfferPayload(anemOffer));
       } catch (err) {
         results.push({ id, success: false, error: err.message });
       }
@@ -5823,7 +5996,6 @@ export const bulkGetAnemOfferPdfData = async (req, res) => {
     res.status(500).json({ msg: err.message });
   }
 };
-
 
 export const markAsDepositing = async (req, res) => {
   try {
@@ -5862,6 +6034,13 @@ export const markAsDepositing = async (req, res) => {
         await anemOffer.save();
 
         results.success.push(id);
+
+        const offer = await Offer.findById(anemOffer.offerId);
+        const payload = buildAnemOfferPayload(anemOffer, offer);
+        const recruiter = await Recruiter.findById(anemOffer.recruiterId);
+        if (recruiter)
+          emitAnemOfferUpdate(recruiter.userId.toString(), payload);
+        emitAnemOfferAdminUpdate(payload);
       } catch (err) {
         results.failed.push({ id, reason: err.message });
       }
@@ -5886,7 +6065,6 @@ export const markAsDepositing = async (req, res) => {
   }
 };
 
-
 export const markDownloadedAsDepositing = async (req, res) => {
   try {
     const downloadedOffers = await AnemOffer.find({
@@ -5895,15 +6073,10 @@ export const markDownloadedAsDepositing = async (req, res) => {
     });
 
     if (downloadedOffers.length === 0) {
-      return res.json({
-        msg: "Aucune offre téléchargée en attente",
-        count: 0,
-      });
+      return res.json({ msg: "Aucune offre téléchargée en attente", count: 0 });
     }
 
     const ids = downloadedOffers.map((o) => o._id);
-
-    
     req.body = { anemOfferIds: ids };
     return markAsDepositing(req, res);
   } catch (err) {
@@ -5911,11 +6084,10 @@ export const markDownloadedAsDepositing = async (req, res) => {
   }
 };
 
-
 export const markDepositSuccess = async (req, res) => {
   try {
     const { anemOfferId } = req.params;
-    const { cooldownDays, comment } = req.body;
+    const { cooldownDays, cooldownMs, comment } = req.body;
 
     const anemOffer = await AnemOffer.findById(anemOfferId);
     if (!anemOffer) {
@@ -5929,18 +6101,33 @@ export const markDepositSuccess = async (req, res) => {
       });
     }
 
-    const days = cooldownDays || 21;
-    const cooldownEnd = new Date();
-    cooldownEnd.setDate(cooldownEnd.getDate() + days);
+    let durationMs;
+    if (cooldownMs !== undefined && cooldownMs !== null) {
+      durationMs = Number(cooldownMs);
+    } else if (cooldownDays !== undefined && cooldownDays !== null) {
+      durationMs = Number(cooldownDays) * 24 * 60 * 60 * 1000;
+    } else {
+      const def = await resolveDefaultCooldown();
+      durationMs = def.ms;
+    }
+
+    if (isNaN(durationMs) || durationMs < 0) {
+      durationMs = 21 * 24 * 60 * 60 * 1000;
+    }
+
+    const now = new Date();
+    const cooldownEnd = new Date(now.getTime() + durationMs);
+    const days = Math.max(0, Math.round(durationMs / (24 * 60 * 60 * 1000)));
 
     anemOffer.status = "in_cooldown";
-    anemOffer.cooldownStartedAt = new Date();
+    anemOffer.cooldownStartedAt = now;
     anemOffer.cooldownEndsAt = cooldownEnd;
     anemOffer.cooldownDays = days;
+    anemOffer.cooldownMs = durationMs;
     anemOffer.addAuditEntry(
       "deposit_success",
       req.user.id,
-      { cooldownDays: days },
+      { cooldownMs: durationMs, cooldownDays: days },
       req,
     );
 
@@ -5955,12 +6142,31 @@ export const markDepositSuccess = async (req, res) => {
     await anemOffer.save();
 
     
+    let publishedImmediately = false;
+    if (durationMs <= 0 || cooldownEnd <= new Date()) {
+      try {
+        await publishSingleAnemOffer(anemOffer);
+        publishedImmediately = true;
+      } catch (pubErr) {
+        console.error("Immediate publish error:", pubErr);
+      }
+    }
+
     const recruiter = await Recruiter.findById(anemOffer.recruiterId);
-    if (recruiter) {
+    if (recruiter && !publishedImmediately) {
       const offer = await Offer.findById(anemOffer.offerId);
+      const humanDelay =
+        durationMs < 60 * 1000
+          ? `${Math.round(durationMs / 1000)} seconde(s)`
+          : durationMs < 60 * 60 * 1000
+            ? `${Math.round(durationMs / 60000)} minute(s)`
+            : durationMs < 24 * 60 * 60 * 1000
+              ? `${Math.round(durationMs / 3600000)} heure(s)`
+              : `${days} jour(s)`;
+
       await Notification.create({
         userId: recruiter.userId,
-        message: `Bonne nouvelle ! Votre offre "${offer?.titre}" a été déposée à l'ANEM avec succès. Elle sera publiée automatiquement dans ${days} jours.`,
+        message: `Bonne nouvelle ! Votre offre "${offer?.titre}" a été déposée à l'ANEM avec succès. Elle sera publiée automatiquement dans ${humanDelay}.`,
         type: "validation",
       });
     }
@@ -5969,20 +6175,33 @@ export const markDepositSuccess = async (req, res) => {
       req.user.id,
       "anem_offer_deposit_success",
       { type: "anem_offer", id: anemOffer._id },
-      { cooldownDays: days, cooldownEndsAt: cooldownEnd },
+      {
+        cooldownMs: durationMs,
+        cooldownDays: days,
+        cooldownEndsAt: cooldownEnd,
+      },
       req,
     );
 
+    
+    const freshOffer = await Offer.findById(anemOffer.offerId);
+    const payload = buildAnemOfferPayload(anemOffer, freshOffer);
+    if (recruiter) emitAnemOfferUpdate(recruiter.userId.toString(), payload);
+    emitAnemOfferAdminUpdate(payload);
+
     res.json({
-      msg: `Dépôt réussi. L'offre sera publiée automatiquement dans ${days} jours.`,
+      msg: publishedImmediately
+        ? "Dépôt réussi. L'offre a été publiée immédiatement."
+        : "Dépôt réussi. L'offre sera publiée automatiquement.",
       cooldownEndsAt: cooldownEnd,
+      cooldownStartedAt: now,
       cooldownDays: days,
+      cooldownMs: durationMs,
     });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
 };
-
 
 export const markDepositFailed = async (req, res) => {
   try {
@@ -6034,10 +6253,9 @@ export const markDepositFailed = async (req, res) => {
 
     await anemOffer.save();
 
-    
     const recruiter = await Recruiter.findById(anemOffer.recruiterId);
+    const offer = await Offer.findById(anemOffer.offerId);
     if (recruiter) {
-      const offer = await Offer.findById(anemOffer.offerId);
       const optionMsg =
         failureOption === "allow_direct_publish"
           ? "Vous pouvez publier votre offre directement ou la supprimer."
@@ -6058,6 +6276,10 @@ export const markDepositFailed = async (req, res) => {
       req,
     );
 
+    const payload = buildAnemOfferPayload(anemOffer, offer);
+    if (recruiter) emitAnemOfferUpdate(recruiter.userId.toString(), payload);
+    emitAnemOfferAdminUpdate(payload);
+
     res.json({
       msg: "Échec du dépôt enregistré. Le recruteur a été notifié.",
       failureOption,
@@ -6066,7 +6288,6 @@ export const markDepositFailed = async (req, res) => {
     res.status(500).json({ msg: err.message });
   }
 };
-
 
 export const addAnemOfferNote = async (req, res) => {
   try {
@@ -6090,7 +6311,6 @@ export const addAnemOfferNote = async (req, res) => {
     anemOffer.addAuditEntry("note_added", req.user.id, { isPublic }, req);
     await anemOffer.save();
 
-    
     if (isPublic) {
       const recruiter = await Recruiter.findById(anemOffer.recruiterId);
       if (recruiter) {
@@ -6126,7 +6346,6 @@ export const addAnemOfferNote = async (req, res) => {
   }
 };
 
-
 export const getAnemOfferDetails = async (req, res) => {
   try {
     const { anemOfferId } = req.params;
@@ -6157,7 +6376,6 @@ export const getAnemOfferDetails = async (req, res) => {
     res.status(500).json({ msg: err.message });
   }
 };
-
 
 export const getDeletedAnemOffers = async (req, res) => {
   try {
@@ -6203,7 +6421,6 @@ export const getDeletedAnemOffers = async (req, res) => {
   }
 };
 
-
 export const hardDeleteAnemOffers = async (req, res) => {
   try {
     const { anemOfferIds } = req.body;
@@ -6226,10 +6443,8 @@ export const hardDeleteAnemOffers = async (req, res) => {
           continue;
         }
 
-        
         await Offer.findByIdAndDelete(anemOffer.offerId);
         await AnemOffer.findByIdAndDelete(id);
-
         results.success.push(id);
       } catch (err) {
         results.failed.push({ id, reason: err.message });
@@ -6255,7 +6470,6 @@ export const hardDeleteAnemOffers = async (req, res) => {
   }
 };
 
-
 export const getAnemOfferStats = async (req, res) => {
   try {
     const [
@@ -6265,8 +6479,6 @@ export const getAnemOfferStats = async (req, res) => {
       staleFailures30,
     ] = await Promise.all([
       AnemOffer.aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }]),
-
-      
       AnemOffer.countDocuments({
         status: "in_cooldown",
         cooldownEndsAt: {
@@ -6274,8 +6486,6 @@ export const getAnemOfferStats = async (req, res) => {
           $gte: new Date(),
         },
       }),
-
-      
       (() => {
         const d = new Date();
         d.setDate(d.getDate() - 7);
@@ -6284,8 +6494,6 @@ export const getAnemOfferStats = async (req, res) => {
           failedAt: { $lte: d },
         });
       })(),
-
-      
       (() => {
         const d = new Date();
         d.setDate(d.getDate() - 30);
@@ -6301,7 +6509,6 @@ export const getAnemOfferStats = async (req, res) => {
       countsMap[s._id] = s.count;
     });
 
-    
     const autoCleanupEnabled = await SystemSettings.getSetting(
       "anem_offer_auto_cleanup_enabled",
       false,
@@ -6310,6 +6517,9 @@ export const getAnemOfferStats = async (req, res) => {
       "anem_offer_auto_cleanup_days",
       90,
     );
+
+    
+    const defaultCooldown = await resolveDefaultCooldown();
 
     res.json({
       overview: {
@@ -6330,6 +6540,8 @@ export const getAnemOfferStats = async (req, res) => {
       settings: {
         autoCleanupEnabled,
         autoCleanupDays,
+        defaultCooldownMs: defaultCooldown.ms,
+        defaultCooldownDays: defaultCooldown.days,
       },
       statusCounts: countsMap,
     });
@@ -6337,7 +6549,6 @@ export const getAnemOfferStats = async (req, res) => {
     res.status(500).json({ msg: err.message });
   }
 };
-
 
 export const toggleAutoCleanup = async (req, res) => {
   try {
@@ -6383,10 +6594,44 @@ export const toggleAutoCleanup = async (req, res) => {
   }
 };
 
+export const publishSingleAnemOffer = async (anemOffer, byUser = null) => {
+  const offer = await Offer.findById(anemOffer.offerId);
+  if (!offer) return false;
 
+  offer.validationStatus = "approved";
+  offer.actif = true;
+  offer.datePublication = new Date();
+  offer.validationHistory.push({
+    status: "approved",
+    message: "Publication automatique après délai ANEM",
+    date: new Date(),
+  });
+  await offer.save();
 
+  anemOffer.status = "published";
+  anemOffer.publishedAt = new Date();
+  anemOffer.addAuditEntry("auto_published", byUser, {
+    cooldownDays: anemOffer.cooldownDays,
+    cooldownMs: anemOffer.cooldownMs,
+  });
+  await anemOffer.save();
 
+  const recruiter = await Recruiter.findById(anemOffer.recruiterId);
+  if (recruiter) {
+    await Notification.create({
+      userId: recruiter.userId,
+      message: `Votre offre "${offer.titre}" est maintenant publiée après le délai ANEM ! 🎉`,
+      type: "validation",
+    });
+    emitAnemOfferUpdate(
+      recruiter.userId.toString(),
+      buildAnemOfferPayload(anemOffer, offer),
+    );
+  }
+  emitAnemOfferAdminUpdate(buildAnemOfferPayload(anemOffer, offer));
 
+  return true;
+};
 
 export const processExpiredCooldowns = async () => {
   try {
@@ -6395,39 +6640,8 @@ export const processExpiredCooldowns = async () => {
 
     for (const anemOffer of expiredOffers) {
       try {
-        
-        const offer = await Offer.findById(anemOffer.offerId);
-        if (!offer) continue;
-
-        offer.validationStatus = "approved";
-        offer.actif = true;
-        offer.datePublication = new Date();
-        offer.validationHistory.push({
-          status: "approved",
-          message: "Publication automatique après délai ANEM de 21 jours",
-          date: new Date(),
-        });
-        await offer.save();
-
-        
-        anemOffer.status = "published";
-        anemOffer.publishedAt = new Date();
-        anemOffer.addAuditEntry("auto_published", null, {
-          cooldownDays: anemOffer.cooldownDays,
-        });
-        await anemOffer.save();
-
-        
-        const recruiter = await Recruiter.findById(anemOffer.recruiterId);
-        if (recruiter) {
-          await Notification.create({
-            userId: recruiter.userId,
-            message: `Votre offre "${offer.titre}" est maintenant publiée après le délai ANEM ! 🎉`,
-            type: "validation",
-          });
-        }
-
-        publishedCount++;
+        const ok = await publishSingleAnemOffer(anemOffer);
+        if (ok) publishedCount++;
       } catch (err) {
         console.error(
           `Error auto-publishing ANEM offer ${anemOffer._id}:`,
@@ -6442,7 +6656,6 @@ export const processExpiredCooldowns = async () => {
     return 0;
   }
 };
-
 
 export const processAutoCleanup = async () => {
   try {
@@ -6485,11 +6698,6 @@ export const processAutoCleanup = async () => {
   }
 };
 
-
-
-
-
-
 export const createAnemOfferV2 = async (
   offerId,
   recruiterId,
@@ -6508,6 +6716,10 @@ export const createAnemOfferV2 = async (
 
   anemOffer.addAuditEntry("created", null, { anemId });
   await anemOffer.save();
+
+  
+  emitAnemOfferAdminUpdate(buildAnemOfferPayload(anemOffer));
+
   return anemOffer;
 };
 
@@ -7099,12 +7311,10 @@ export const changeEmail = async (req, res) => {
 };
 
 
-
-
 export const setPassword = async (req, res) => {
   try {
     const userId = req.user.id;
-    const { newPassword, confirmNewPassword, logoutAllDevices } = req.body;
+    const { newPassword, confirmNewPassword } = req.body;
 
     if (!newPassword) {
       return res
@@ -7112,7 +7322,6 @@ export const setPassword = async (req, res) => {
         .json({ msg: "Le nouveau mot de passe est requis." });
     }
 
-    
     if (newPassword.length < 8) {
       return res.status(400).json({
         msg: "Le mot de passe doit contenir au moins 8 caractères.",
@@ -7143,28 +7352,20 @@ export const setPassword = async (req, res) => {
       });
     }
 
-    const hash = await bcrypt.hash(newPassword, 12);
-    user.motDePasse = hash;
+    user.motDePasse = await bcrypt.hash(newPassword, 12);
     user.hasPassword = true;
-
     
-    const shouldLogoutAll = !!logoutAllDevices;
-    if (shouldLogoutAll) {
-      user.tokenVersion = (user.tokenVersion || 0) + 1;
-    }
-
+    
     await user.save();
 
-    
     const newToken = generateToken(user);
 
     
-    notifyPasswordChange(user, "set", req, shouldLogoutAll);
+    notifyPasswordChange(user, "set", req, false);
 
     res.json({
-      msg: "Mot de passe défini avec succès ✅. Vous pouvez désormais vous connecter via email + mot de passe.",
+      msg: "Mot de passe défini avec succès ✅. Vous pouvez désormais vous connecter avec votre email et ce mot de passe.",
       token: newToken,
-      logoutAllDevices: shouldLogoutAll,
     });
   } catch (err) {
     console.error("Set password error:", err);
@@ -7172,38 +7373,11 @@ export const setPassword = async (req, res) => {
   }
 };
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 export const changePassword = async (req, res) => {
   try {
-    const {
-      currentPassword,
-      newPassword,
-      confirmNewPassword,
-      logoutAllDevices = true,
-    } = req.body || {};
+    const { currentPassword, newPassword, confirmNewPassword } = req.body || {};
 
-    if (!newPassword || !confirmNewPassword) {
+    if (!currentPassword || !newPassword || !confirmNewPassword) {
       return res.status(400).json({ msg: "Tous les champs sont requis." });
     }
     if (newPassword !== confirmNewPassword) {
@@ -7211,8 +7385,6 @@ export const changePassword = async (req, res) => {
         .status(400)
         .json({ msg: "Les mots de passe ne correspondent pas." });
     }
-
-    
     if (newPassword.length < 8) {
       return res
         .status(400)
@@ -7233,50 +7405,40 @@ export const changePassword = async (req, res) => {
       return res.status(404).json({ msg: "Utilisateur introuvable." });
     }
 
-    const isAddingPassword = !user.hasPassword;
+    
+    if (!user.hasPassword) {
+      return res.status(400).json({
+        msg: "Aucun mot de passe n'est défini. Utilisez « Créer un mot de passe ».",
+        code: "NO_PASSWORD_SET",
+      });
+    }
 
-    if (!isAddingPassword) {
-      if (!currentPassword) {
-        return res.status(400).json({ msg: "Mot de passe actuel requis." });
-      }
-      const isMatch = await bcrypt.compare(currentPassword, user.motDePasse);
-      if (!isMatch) {
-        return res.status(400).json({ msg: "Mot de passe actuel incorrect." });
-      }
-      const isSame = await bcrypt.compare(newPassword, user.motDePasse);
-      if (isSame) {
-        return res.status(400).json({
-          msg: "Le nouveau mot de passe doit être différent de l'ancien.",
-        });
-      }
+    const isMatch = await bcrypt.compare(currentPassword, user.motDePasse);
+    if (!isMatch) {
+      return res.status(400).json({ msg: "Mot de passe actuel incorrect." });
+    }
+
+    const isSame = await bcrypt.compare(newPassword, user.motDePasse);
+    if (isSame) {
+      return res.status(400).json({
+        msg: "Le nouveau mot de passe doit être différent de l'ancien.",
+      });
     }
 
     user.motDePasse = await bcrypt.hash(newPassword, 12);
     user.hasPassword = true;
-
-    if (logoutAllDevices) {
-      user.tokenVersion = (user.tokenVersion || 0) + 1;
-    }
-
+    
+    user.tokenVersion = (user.tokenVersion || 0) + 1;
     await user.save();
 
+    
     const newToken = generateToken(user);
 
-    
-    notifyPasswordChange(
-      user,
-      isAddingPassword ? "set" : "change",
-      req,
-      !!logoutAllDevices,
-    );
+    notifyPasswordChange(user, "change", req, true);
 
     return res.json({
-      msg: isAddingPassword
-        ? "Mot de passe ajouté avec succès."
-        : "Mot de passe modifié avec succès.",
+      msg: "Mot de passe modifié avec succès. Toutes vos autres sessions ont été déconnectées.",
       token: newToken,
-      action: isAddingPassword ? "added" : "changed",
-      loggedOutOtherDevices: !!logoutAllDevices,
     });
   } catch (err) {
     console.error("changePassword error:", err);
@@ -7354,7 +7516,7 @@ export const deleteMyAccount = async (req, res) => {
 
     if (confirmation !== "SUPPRIMER MON COMPTE") {
       return res.status(400).json({
-        msg: "Veuillez confirmer en écrivant 'SUPPRIMER MON COMPTE'.",
+        msg: "Veuillez confirmer en écrivant « SUPPRIMER MON COMPTE ».",
       });
     }
 
@@ -7384,11 +7546,14 @@ export const deleteMyAccount = async (req, res) => {
 
     try {
       await session.withTransaction(async () => {
+        
         if (user.role === "candidat") {
           const candidate = await Candidate.findOne({ userId }).session(
             session,
           );
+
           if (candidate) {
+            
             const activeApps = await Application.find({
               candidateId: candidate._id,
               candidateStatus: {
@@ -7403,13 +7568,14 @@ export const deleteMyAccount = async (req, res) => {
               app.withdrawReason = "Compte supprimé par l'utilisateur";
               await app.save({ session });
 
-              await Offer.findByIdAndUpdate(
-                app.offerId,
+              await Offer.findOneAndUpdate(
+                { _id: app.offerId, nombreCandidatures: { $gt: 0 } },
                 { $inc: { nombreCandidatures: -1 } },
                 { session },
               );
             }
 
+            
             await Interview.updateMany(
               {
                 candidateId: candidate._id,
@@ -7425,17 +7591,47 @@ export const deleteMyAccount = async (req, res) => {
               {
                 status: "cancelled_by_candidate",
                 cancellationReason: "Compte supprimé",
+                cancelledBy: "candidate",
                 cancelledAt: new Date(),
               },
               { session },
             );
 
+            
+            
+            await Interview.updateMany(
+              { candidateId: candidate._id },
+              {
+                candidateNameSnapshot: user.nom,
+                candidateDeleted: true,
+                candidateDeletedAt: new Date(),
+              },
+              { session },
+            );
+
+            
             const Conversation = (await import("../models/Conversation.js"))
               .default;
+
+            await Conversation.updateMany(
+              { candidateId: candidate._id },
+              {
+                $set: {
+                  candidateNameSnapshot: user.nom,
+                  candidateDeleted: true,
+                  candidateDeletedAt: new Date(),
+                },
+              },
+              { session },
+            );
+
             await Conversation.updateMany(
               { candidateId: candidate._id, isClosed: { $ne: true } },
               {
-                $set: { isClosed: true, closedReason: "application_closed" },
+                $set: {
+                  isClosed: true,
+                  closedReason: "candidate_deleted",
+                },
                 $push: {
                   messages: {
                     senderId: userId,
@@ -7450,6 +7646,7 @@ export const deleteMyAccount = async (req, res) => {
               { session },
             );
 
+            
             const SupportTicket = (await import("../models/SupportTicket.js"))
               .default;
             await SupportTicket.updateMany(
@@ -7458,6 +7655,7 @@ export const deleteMyAccount = async (req, res) => {
               { session },
             );
 
+            
             try {
               const {
                 deleteMultipleFromCloudinary,
@@ -7484,17 +7682,29 @@ export const deleteMyAccount = async (req, res) => {
           const CandidateAnemRegistration = (
             await import("../models/CandidateAnemRegistration.js")
           ).default;
+          
+          
+          await CandidateAnemRegistration.updateMany(
+            { userId, assignedTo: { $exists: true } },
+            { $unset: { assignedTo: 1, assignedAt: 1, assignedBy: 1 } },
+          ).session(session);
           await CandidateAnemRegistration.deleteMany({ userId }).session(
             session,
           );
         } else if (user.role === "recruteur") {
+          
           const recruiter = await Recruiter.findOne({ userId }).session(
             session,
           );
+
           if (recruiter) {
             const myOfferIds = await Offer.find({
               recruteurId: recruiter._id,
-            }).distinct("_id");
+            })
+              .distinct("_id")
+              .session(session);
+
+            
             const activeOfferApps = await Application.countDocuments({
               offerId: { $in: myOfferIds },
               recruiterStatus: {
@@ -7506,13 +7716,46 @@ export const deleteMyAccount = async (req, res) => {
                   "offer_declined",
                 ],
               },
-            });
+            }).session(session);
 
             if (activeOfferApps > 0) {
               throw new Error(
-                "Vous avez des candidatures actives en cours. Veuillez d'abord les traiter.",
+                "Vous avez des candidatures actives en cours. Veuillez d'abord les traiter avant de supprimer votre compte.",
               );
             }
+
+            
+            
+            
+            await Offer.updateMany(
+              { recruteurId: recruiter._id },
+              {
+                $set: {
+                  actif: false,
+                  isRecruiterDeleted: true,
+                  recruiterDeletedAt: new Date(),
+                },
+              },
+              { session },
+            );
+
+            
+            const AnemOffer = (await import("../models/AnemOffer.js")).default;
+            await AnemOffer.updateMany(
+              {
+                recruiterId: recruiter._id,
+                status: {
+                  $in: ["pending_review", "depositing", "in_cooldown"],
+                },
+              },
+              {
+                $set: {
+                  status: "deleted_by_recruiter",
+                  deletedByRecruiterAt: new Date(),
+                },
+              },
+              { session },
+            );
 
             await Recruiter.deleteOne({ _id: recruiter._id }).session(session);
           }
@@ -7520,9 +7763,14 @@ export const deleteMyAccount = async (req, res) => {
           const AnemRegistration = (
             await import("../models/AnemRegistration.js")
           ).default;
+          await AnemRegistration.updateMany(
+            { userId, assignedTo: { $exists: true } },
+            { $unset: { assignedTo: 1, assignedAt: 1, assignedBy: 1 } },
+          ).session(session);
           await AnemRegistration.deleteMany({ userId }).session(session);
         }
 
+        
         const Notification = (await import("../models/Notification.js"))
           .default;
         await Notification.deleteMany({ userId }).session(session);
@@ -7537,9 +7785,10 @@ export const deleteMyAccount = async (req, res) => {
       await session.endSession();
     }
   } catch (err) {
-    if (err.message.includes("candidatures actives")) {
+    if (err.message && err.message.includes("candidatures actives")) {
       return res.status(400).json({ msg: err.message });
     }
+    console.error("deleteMyAccount error:", err);
     res.status(500).json({ msg: err.message });
   }
 };
@@ -8250,6 +8499,39 @@ export const getCandidateRegistrationForm = async (req, res) => {
     }
 
     const user = await User.findById(req.user.id);
+    const candidatee = await Candidate.findById(registration.candidateId);
+
+    const nameParts = user.nom ? user.nom.split(" ") : [];
+    const defaults1 = {
+      civilite:
+        candidatee?.gender === "homme"
+          ? "monsieur"
+          : candidatee?.gender === "femme"
+            ? "madame"
+            : undefined,
+      nom: nameParts.slice(1).join(" ") || undefined,
+      prenom: nameParts[0] || undefined,
+      dateNaissance: candidatee?.dateOfBirth || undefined,
+    };
+    const defaults2 = {
+      mobile: candidatee?.telephone || undefined,
+      wilayaResidence: candidatee?.residence?.wilaya || undefined,
+      communeResidence: candidatee?.residence?.commune || undefined,
+      adresse: candidatee?.residence?.address || undefined,
+    };
+
+    const mergeDefaults = (saved = {}, defaults = {}) => {
+      const out = { ...saved };
+      for (const [k, v] of Object.entries(defaults)) {
+        if (
+          (out[k] === undefined || out[k] === null || out[k] === "") &&
+          v !== undefined
+        ) {
+          out[k] = v;
+        }
+      }
+      return out;
+    };
 
     res.json({
       registration: {
@@ -8260,8 +8542,8 @@ export const getCandidateRegistrationForm = async (req, res) => {
         formCompleted: registration.formCompleted,
         formSubmittedAt: registration.formSubmittedAt,
 
-        step1: registration.step1 || {},
-        step2: registration.step2 || {},
+        step1: mergeDefaults(registration.step1 || {}, defaults1),
+        step2: mergeDefaults(registration.step2 || {}, defaults2),
         step3: registration.step3 || {},
         step4: {
           email: registration.step4?.email || user.email,
@@ -8271,7 +8553,6 @@ export const getCandidateRegistrationForm = async (req, res) => {
 
         declaredAnemId: registration.declaredAnemId,
         verifiedAnemId: registration.verifiedAnemId,
-
         failureReason: registration.failureReason,
         rejectionReason: registration.rejectionReason,
 
@@ -9542,14 +9823,15 @@ export const withdrawApplication = async (req, res) => {
       }
     }
 
-    await Offer.findOneAndUpdate(
-      { _id: application.offerId, nombreCandidatures: { $gt: 0 } },
-      { $inc: { nombreCandidatures: -1 } },
-    );
+    
+    const { syncNombreCandidatures } =
+      await import("./recruitmentFlowController.js");
+    await syncNombreCandidatures(application.offerId);
 
     const offer = await Offer.findById(application.offerId).populate(
       "recruteurId",
     );
+
     if (offer?.recruteurId?.userId) {
       await Notification.create({
         userId: offer.recruteurId.userId,
@@ -9622,11 +9904,9 @@ export const cancelApplication = async (req, res) => {
         };
       }
 
-      await Offer.findOneAndUpdate(
-        { _id: application.offerId, nombreCandidatures: { $gt: 0 } },
-        { $inc: { nombreCandidatures: -1 } },
-        { session },
-      );
+      const { syncNombreCandidatures } =
+        await import("./recruitmentFlowController.js");
+      await syncNombreCandidatures(application.offerId, session);
     });
 
     res.json({ msg: "Candidature annulée." });
@@ -9720,6 +10000,50 @@ export const checkApplicationStatus = async (req, res) => {
 };
 
 
+
+
+export const getCandidateBadgeCounts = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id }).select(
+      "_id",
+    );
+    if (!candidate) {
+      return res.json({ conversations: 0, interviews: 0, applications: 0 });
+    }
+
+    const [convAgg, interviewsNeedingResponse, hireOffers] = await Promise.all([
+      Conversation.aggregate([
+        {
+          $match: {
+            candidateId: candidate._id,
+            status: "active",
+            unreadByCandidate: { $gt: 0 },
+          },
+        },
+        { $count: "count" },
+      ]),
+      Interview.countDocuments({
+        candidateId: candidate._id,
+        status: { $in: ["proposed", "rescheduled_by_recruiter"] },
+      }),
+      
+      Application.countDocuments({
+        candidateId: candidate._id,
+        candidateStatus: "retenue",
+      }),
+    ]);
+
+    res.json({
+      conversations: convAgg[0]?.count || 0,
+      interviews: interviewsNeedingResponse,
+      applications: hireOffers,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+
 === controllers\candidateController.js ===
 import Candidate from "../models/Candidate.js";
 import Offer from "../models/Offer.js";
@@ -9748,6 +10072,7 @@ import {
   getSkillDetails,
   submitSkillFeedback,
 } from "./skillController.js";
+const escapeRegex = (str = "") => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 export const getProfile = async (req, res) => {
   try {
@@ -9996,12 +10321,20 @@ export const deleteCV = async (req, res) => {
       return res.status(404).json({ msg: "CV introuvable." });
     }
 
-    const publicId = getPublicIdFromUrl(cv.url);
+    let publicId = getPublicIdFromUrl(cv.url);
     if (publicId) {
+      
+      if (cv.url.includes("/raw/")) {
+        const urlWithoutQuery = cv.url.split("?")[0];
+        const extension = urlWithoutQuery.split(".").pop();
+        publicId = `${publicId}.${extension}`;
+      }
       await deleteFromCloudinary(publicId, "raw");
     }
 
-    candidate.cvs.pull(cvId);
+    
+    
+    candidate.cvs.pull({ _id: cvId });
     await candidate.save();
 
     res.json({
@@ -10461,7 +10794,6 @@ export const applyToOffer = async (req, res) => {
           existingApp.rejectionMessage = undefined;
           existingApp.dateDecision = undefined;
 
-          
           const company = await Company.findById(offer.companyId).session(
             session,
           );
@@ -10488,9 +10820,17 @@ export const applyToOffer = async (req, res) => {
 
           await existingApp.save({ session });
 
+          
+          
+          const activeCount = await Application.countDocuments({
+            offerId: offreId,
+            candidateStatus: {
+              $in: ["envoyee", "en_cours", "entretien", "retenue"],
+            },
+          }).session(session);
           await Offer.findByIdAndUpdate(
             offreId,
-            { $inc: { nombreCandidatures: 1 } },
+            { nombreCandidatures: activeCount },
             { session },
           );
 
@@ -10530,9 +10870,20 @@ export const applyToOffer = async (req, res) => {
 
       await newApplication.save({ session });
 
+      
+      const activeCount = await Application.countDocuments({
+        offerId: offreId,
+        candidateStatus: {
+          $in: ["envoyee", "en_cours", "entretien", "retenue"],
+        },
+      }).session(session);
+
       await Offer.findByIdAndUpdate(
         offreId,
-        { $inc: { nombreCandidatures: 1 } },
+        {
+          nombreCandidatures: activeCount,
+          $inc: { candidaturesRecues: 1 },
+        },
         { session },
       );
 
@@ -10637,41 +10988,9 @@ export const getCandidateStats = async (req, res) => {
       suggestions.push({
         type: "critical",
         priority: 1,
-        message: "Confirmez votre email pour postuler aux offres",
+        message: "Confirmez votre email pour pouvoir postuler",
         action: "verify_email",
         icon: "mail",
-      });
-    }
-
-    if (profileCompletion.percentage < 100) {
-      suggestions.push({
-        type: "important",
-        priority: 2,
-        message: `Complétez votre profil (${profileCompletion.percentage}%)`,
-        action: "complete_profile",
-        missing: profileCompletion.missing,
-        icon: "user",
-      });
-    }
-
-    if (candidate.cvs.length === 0) {
-      suggestions.push({
-        type: "important",
-        priority: 3,
-        message: "Ajoutez votre CV pour augmenter vos chances",
-        action: "upload_cv",
-        icon: "file",
-      });
-    }
-
-    if (candidate.skills.length < 3) {
-      suggestions.push({
-        type: "suggestion",
-        priority: 4,
-        message:
-          "Ajoutez plus de compétences pour de meilleures recommandations",
-        action: "add_skills",
-        icon: "star",
       });
     }
 
@@ -10679,10 +10998,106 @@ export const getCandidateStats = async (req, res) => {
       suggestions.push({
         type: "urgent",
         priority: 0,
-        message: `${pendingInterviewResponses} proposition(s) d'entretien en attente`,
+        message: `${pendingInterviewResponses} proposition(s) d'entretien en attente de réponse`,
         action: "view_interviews",
         icon: "calendar",
       });
+    }
+
+    
+    if (!candidate.telephone) {
+      suggestions.push({
+        type: "important",
+        priority: 2,
+        message: "Ajoutez votre numéro de téléphone",
+        action: "field_telephone",
+        icon: "user",
+      });
+    }
+    if (!candidate.residence?.wilaya) {
+      suggestions.push({
+        type: "important",
+        priority: 2,
+        message: "Indiquez votre wilaya de résidence",
+        action: "field_wilaya",
+        icon: "user",
+      });
+    }
+    if (candidate.cvs.length === 0) {
+      suggestions.push({
+        type: "important",
+        priority: 3,
+        message: "Ajoutez au moins un CV",
+        action: "upload_cv",
+        icon: "file",
+      });
+    }
+    if (candidate.skills.length === 0) {
+      suggestions.push({
+        type: "important",
+        priority: 3,
+        message: "Ajoutez au moins une compétence",
+        action: "add_skills",
+        icon: "star",
+      });
+    }
+
+    
+    if (candidate.telephone && candidate.residence?.wilaya) {
+      if (!candidate.profilePicture) {
+        suggestions.push({
+          type: "suggestion",
+          priority: 5,
+          message: "Ajoutez une photo de profil",
+          action: "field_photo",
+          icon: "user",
+        });
+      }
+      if (!candidate.bio) {
+        suggestions.push({
+          type: "suggestion",
+          priority: 5,
+          message: "Rédigez un résumé professionnel",
+          action: "field_bio",
+          icon: "user",
+        });
+      }
+      if (!candidate.desiredPosition) {
+        suggestions.push({
+          type: "suggestion",
+          priority: 5,
+          message: "Précisez le poste recherché",
+          action: "field_position",
+          icon: "star",
+        });
+      }
+      if (candidate.experiences.length === 0) {
+        suggestions.push({
+          type: "suggestion",
+          priority: 6,
+          message: "Ajoutez une expérience professionnelle",
+          action: "add_experience",
+          icon: "star",
+        });
+      }
+      if (candidate.education.length === 0) {
+        suggestions.push({
+          type: "suggestion",
+          priority: 6,
+          message: "Ajoutez votre formation",
+          action: "add_education",
+          icon: "star",
+        });
+      }
+      if (candidate.skills.length > 0 && candidate.skills.length < 3) {
+        suggestions.push({
+          type: "suggestion",
+          priority: 6,
+          message: "Ajoutez plus de compétences (min. 3 recommandé)",
+          action: "add_skills",
+          icon: "star",
+        });
+      }
     }
 
     suggestions.sort((a, b) => a.priority - b.priority);
@@ -10871,7 +11286,7 @@ export const getRecommendedOffers = async (req, res) => {
     if (candidateSkills.length > 0) {
       queryConditions.push({
         skills: {
-          $in: candidateSkills.map((s) => new RegExp(s, "i")),
+          $in: candidateSkills.map((s) => new RegExp(escapeRegex(s), "i")),
         },
       });
     }
@@ -10882,7 +11297,7 @@ export const getRecommendedOffers = async (req, res) => {
 
     if (desiredPosition) {
       queryConditions.push({
-        titre: { $regex: desiredPosition, $options: "i" },
+        titre: { $regex: escapeRegex(desiredPosition), $options: "i" },
       });
     }
 
@@ -10979,6 +11394,63 @@ export {
   deleteSkill,
   getSkillDetails,
   submitSkillFeedback,
+};
+export const getFinalizationStatus = async (req, res) => {
+  try {
+    const candidate = await Candidate.findOne({ userId: req.user.id }).select(
+      "dateOfBirth gender",
+    );
+    if (!candidate) {
+      return res.json({ isFinalized: false, needsFinalization: true });
+    }
+    const isFinalized = !!(candidate.dateOfBirth && candidate.gender);
+    res.json({
+      isFinalized,
+      needsFinalization: !isFinalized,
+      dateOfBirth: candidate.dateOfBirth,
+      gender: candidate.gender,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const finalizeAccount = async (req, res) => {
+  try {
+    const { dateOfBirth, gender } = req.body;
+
+    if (!dateOfBirth) {
+      return res.status(400).json({ msg: "La date de naissance est requise." });
+    }
+    if (!["homme", "femme"].includes(gender)) {
+      return res
+        .status(400)
+        .json({ msg: "Le genre est requis (homme ou femme)." });
+    }
+
+    
+    const dob = new Date(dateOfBirth);
+    if (isNaN(dob.getTime()) || dob > new Date()) {
+      return res.status(400).json({ msg: "Date de naissance invalide." });
+    }
+    const age = (Date.now() - dob.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
+    if (age < 15 || age > 100) {
+      return res.status(400).json({ msg: "Date de naissance invalide." });
+    }
+
+    let candidate = await Candidate.findOne({ userId: req.user.id });
+    if (!candidate) {
+      candidate = new Candidate({ userId: req.user.id });
+    }
+
+    candidate.dateOfBirth = dob;
+    candidate.gender = gender;
+    await candidate.save();
+
+    res.json({ msg: "Compte finalisé avec succès ✅", isFinalized: true });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
 };
 
 
@@ -11090,6 +11562,11 @@ export const openConversation = async (req, res) => {
         userId: candidate.userId,
         message: `Nouveau message du recruteur pour "${application.offerId.titre}"`,
         type: "info",
+        meta: {
+          category: "message",
+          conversationId: conversation._id,
+          applicationId: applicationId,
+        },
       });
     }
 
@@ -11151,8 +11628,13 @@ export const sendMessageAsRecruiter = async (req, res) => {
 
     await Notification.create({
       userId: candidate.userId,
-      message: `Nouveau message du recruteur`,
+      message: `Nouveau message : "${(content || "").slice(0, 60)}${(content || "").length > 60 ? "…" : ""}"`,
       type: "info",
+      meta: {
+        category: "message",
+        conversationId: conversation._id,
+        applicationId: conversation.applicationId,
+      },
     });
 
     res.json({
@@ -11198,13 +11680,18 @@ export const getRecruiterConversations = async (req, res) => {
       applicationId: c.applicationId,
       offer: { _id: c.offerId?._id, titre: c.offerId?.titre },
       candidate: {
-        nom: c.candidateId?.userId?.nom,
+        nom:
+          c.candidateId?.userId?.nom ||
+          c.candidateNameSnapshot ||
+          "Candidat supprimé",
         profilePicture: c.candidateId?.profilePicture,
+        deleted: c.candidateDeleted || !c.candidateId,
       },
       lastMessage: c.messages?.slice(-1)[0],
       unreadCount: c.unreadByRecruiter,
       lastMessageAt: c.lastMessageAt,
       isClosed: c.isClosed,
+      candidateDeleted: c.candidateDeleted || !c.candidateId,
     }));
 
     res.json({
@@ -11536,8 +12023,12 @@ export const getRecruiterConversationMessages = async (req, res) => {
       candidateId: conversation.candidateId?._id,
       offer: { titre: conversation.offerId?.titre },
       candidate: {
-        nom: conversation.candidateId?.userId?.nom,
+        nom:
+          conversation.candidateId?.userId?.nom ||
+          conversation.candidateNameSnapshot ||
+          "Candidat supprimé",
         profilePicture: conversation.candidateId?.profilePicture,
+        deleted: conversation.candidateDeleted || !conversation.candidateId,
       },
       messages: paginatedMessages,
       status: conversation.status,
@@ -11675,6 +12166,11 @@ export const getRecruiterInterviews = async (req, res) => {
 
     const enriched = interviews.map((i) => ({
       ...i,
+      candidateName:
+        i.candidateId?.userId?.nom ||
+        i.candidateNameSnapshot ||
+        "Candidat supprimé",
+      candidateDeleted: i.candidateDeleted || !i.candidateId,
       needsAction: i.status === "rescheduled_by_candidate",
       isToday:
         new Date(i.scheduledAt).toDateString() === new Date().toDateString(),
@@ -11744,9 +12240,14 @@ export const getRecruiterInterviewsGrouped = async (req, res) => {
         location: interview.location,
         meetingLink: interview.meetingLink,
         candidate: {
-          nom: interview.candidateId?.userId?.nom,
+          nom:
+            interview.candidateId?.userId?.nom ||
+            interview.candidateNameSnapshot ||
+            "Candidat supprimé",
           profilePicture: interview.candidateId?.profilePicture,
+          deleted: interview.candidateDeleted || !interview.candidateId,
         },
+
         offer: {
           _id: interview.offerId?._id,
           titre: interview.offerId?.titre,
@@ -11953,10 +12454,14 @@ export const getRecruiterInterviewById = async (req, res) => {
 
       candidate: {
         _id: interview.candidateId?._id,
-        nom: interview.candidateId?.userId?.nom,
+        nom:
+          interview.candidateId?.userId?.nom ||
+          interview.candidateNameSnapshot ||
+          "Candidat supprimé",
         email: interview.candidateId?.userId?.email,
         profilePicture: interview.candidateId?.profilePicture,
         telephone: interview.candidateId?.telephone,
+        deleted: interview.candidateDeleted || !interview.candidateId,
       },
 
       offer: {
@@ -12658,6 +13163,16 @@ export const getAllActiveOffers = async (req, res) => {
               ],
             },
           ];
+        } else if (sort === "salary") {
+          query.$and = [
+            ...(query.$and || []),
+            {
+              $or: [
+                { salaryMax: { $lt: value } },
+                { salaryMax: value, _id: { $lt: id } },
+              ],
+            },
+          ];
         } else {
           query.$and = [
             ...(query.$and || []),
@@ -12675,6 +13190,8 @@ export const getAllActiveOffers = async (req, res) => {
     let sortQuery = {};
     if (sort === "popular") {
       sortQuery = { nombreCandidatures: -1, _id: -1 };
+    } else if (sort === "salary") {
+      sortQuery = { salaryMax: -1, _id: -1 };
     } else {
       sortQuery = { datePublication: -1, _id: -1 };
     }
@@ -12709,7 +13226,9 @@ export const getAllActiveOffers = async (req, res) => {
       const cursorValue =
         sort === "popular"
           ? lastItem.nombreCandidatures
-          : lastItem.datePublication;
+          : sort === "salary"
+            ? lastItem.salaryMax || 0
+            : lastItem.datePublication;
 
       nextCursor = toCursor({
         id: lastItem._id,
@@ -14039,8 +14558,17 @@ export const getMyOffersWithStats = async (req, res) => {
               then: {
                 status: { $arrayElemAt: ["$anemData.status", 0] },
                 anemId: { $arrayElemAt: ["$anemData.anemId", 0] },
+                cooldownStartedAt: {
+                  $arrayElemAt: ["$anemData.cooldownStartedAt", 0],
+                },
                 cooldownEndsAt: {
                   $arrayElemAt: ["$anemData.cooldownEndsAt", 0],
+                },
+                cooldownDays: {
+                  $arrayElemAt: ["$anemData.cooldownDays", 0],
+                },
+                cooldownMs: {
+                  $arrayElemAt: ["$anemData.cooldownMs", 0],
                 },
                 failureOption: {
                   $arrayElemAt: ["$anemData.failureOption", 0],
@@ -14192,60 +14720,19 @@ export const deactivateOffer = async (req, res) => {
 export const updateRecruiterProfile = async (req, res) => {
   try {
     const userId = req.user.id;
-
-    const { nom, motDePasse, ancienMotDePasse, telephone } = req.body;
+    const { nom, telephone } = req.body;
 
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ msg: "Utilisateur introuvable" });
 
     if (nom) user.nom = nom;
-
-    if (motDePasse) {
-      if (!ancienMotDePasse) {
-        return res.status(400).json({
-          msg: "L'ancien mot de passe est requis pour changer de mot de passe.",
-        });
-      }
-
-      const isMatch = await bcrypt.compare(ancienMotDePasse, user.motDePasse);
-      if (!isMatch) {
-        return res.status(401).json({ msg: "Ancien mot de passe incorrect." });
-      }
-
-      const isSame = await bcrypt.compare(motDePasse, user.motDePasse);
-      if (isSame) {
-        return res.status(400).json({
-          msg: "Le nouveau mot de passe doit être différent de l'ancien.",
-        });
-      }
-
-      if (motDePasse.length < 8) {
-        return res.status(400).json({
-          msg: "Le mot de passe doit contenir au moins 8 caractères.",
-        });
-      }
-      if (
-        !/[a-z]/.test(motDePasse) ||
-        !/[A-Z]/.test(motDePasse) ||
-        !/\d/.test(motDePasse)
-      ) {
-        return res.status(400).json({
-          msg: "Le mot de passe doit contenir une minuscule, une majuscule et un chiffre.",
-        });
-      }
-
-      const hash = await bcrypt.hash(motDePasse, 12);
-      user.motDePasse = hash;
-    }
-
     await user.save();
 
     const recruiter = await Recruiter.findOne({ userId });
     if (!recruiter)
       return res.status(404).json({ msg: "Profil recruteur introuvable" });
 
-    if (telephone) recruiter.telephone = telephone;
-
+    if (telephone !== undefined) recruiter.telephone = telephone;
     await recruiter.save();
 
     res.json({
@@ -14885,11 +15372,13 @@ import {
 import {
   emitInterviewNew,
   emitInterviewUpdate,
+  emitInterviewCardUpdate,
   emitApplicationUpdate,
   emitNewMessage,
+  emitConversationClosed,
+  emitConversationUpdate,
+  emitUnreadCount,
 } from "../services/socketEvents.js";
-
-
 
 
 
@@ -14926,20 +15415,59 @@ const pushStatusHistory = (
 };
 
 
-export const syncNombreCandidatures = async (offerId) => {
-  const activeCount = await Application.countDocuments({
-    offerId,
-    candidateStatus: { $nin: ["cancelled", "retiree"] },
-  });
+const ACTIVE_CANDIDATE_STATUSES = [
+  "envoyee",
+  "en_cours",
+  "entretien",
+  "retenue",
+];
 
-  await Offer.findByIdAndUpdate(offerId, {
+
+export const syncNombreCandidatures = async (offerId, session = null) => {
+  const query = Application.countDocuments({
+    offerId,
+    candidateStatus: { $in: ACTIVE_CANDIDATE_STATUSES },
+  });
+  if (session) query.session(session);
+  const activeCount = await query;
+
+  const update = Offer.findByIdAndUpdate(offerId, {
     nombreCandidatures: activeCount,
   });
+  if (session) update.session(session);
+  await update;
 
   return activeCount;
 };
 
 
+const pushSystemMessage = async (
+  conversation,
+  {
+    senderId,
+    content,
+    messageType = "system",
+    metadata = {},
+    toCandidate = true,
+  },
+) => {
+  if (!conversation) return null;
+  conversation.messages.push({
+    senderId,
+    senderType: "system",
+    content,
+    messageType,
+    metadata,
+  });
+  if (toCandidate) conversation.unreadByCandidate += 1;
+  else conversation.unreadByRecruiter += 1;
+  conversation.lastMessageAt = new Date();
+  await conversation.save();
+
+  const lastMsg = conversation.messages[conversation.messages.length - 1];
+  emitNewMessage(conversation._id.toString(), lastMsg);
+  return lastMsg;
+};
 
 
 
@@ -14947,14 +15475,13 @@ export const initiateContact = async (req, res) => {
   try {
     const recruiter = await getRecruiterProfile(req.user.id);
     const { applicationId } = req.params;
-    const { templateId } = req.body; 
+    const { templateId, customMessage } = req.body;
 
     const application = await findOrFailApplication(
       applicationId,
       recruiter._id,
     );
 
-    
     const existingConversation = await Conversation.findOne({ applicationId });
     if (existingConversation) {
       return res.json({
@@ -14964,7 +15491,6 @@ export const initiateContact = async (req, res) => {
       });
     }
 
-    
     const candidate = await Candidate.findById(
       application.candidateId,
     ).populate("userId", "nom");
@@ -14972,42 +15498,50 @@ export const initiateContact = async (req, res) => {
       return res.status(404).json({ msg: "Candidat introuvable" });
 
     
-    const template = PREDEFINED_MESSAGES[templateId];
-    if (!template) {
-      return res.status(400).json({
-        msg: "Template de message invalide",
-        availableTemplates: Object.keys(PREDEFINED_MESSAGES),
-      });
+    let messageContent;
+    let createdWith = "predefined_message";
+    let usedTemplateId = null;
+
+    if (customMessage && customMessage.trim().length > 0) {
+      messageContent = customMessage.trim().slice(0, 5000);
+      createdWith = "custom_message";
+    } else {
+      const template = PREDEFINED_MESSAGES[templateId];
+      if (!template) {
+        return res.status(400).json({
+          msg: "Template de message invalide",
+          availableTemplates: Object.keys(PREDEFINED_MESSAGES),
+        });
+      }
+      messageContent = template.template(
+        candidate.userId.nom,
+        application.offerId.titre,
+      );
+      usedTemplateId = templateId;
     }
 
-    
-    const messageContent = template.template(
-      candidate.userId.nom,
-      application.offerId.titre,
-    );
-
-    
     const conversation = await Conversation.create({
       applicationId,
       offerId: application.offerId._id,
       candidateId: application.candidateId,
       recruiterId: recruiter._id,
       openedBy: req.user.id,
-      createdWith: "predefined_message",
+      createdWith,
       messages: [
         {
           senderId: req.user.id,
           senderType: "recruiter",
           content: messageContent,
-          messageType: "predefined",
-          metadata: { predefinedTemplateId: templateId },
+          messageType: createdWith === "custom_message" ? "text" : "predefined",
+          metadata: usedTemplateId
+            ? { predefinedTemplateId: usedTemplateId }
+            : {},
         },
       ],
       unreadByCandidate: 1,
       lastMessageAt: new Date(),
     });
 
-    
     if (
       ![
         "en_discussion",
@@ -15027,7 +15561,6 @@ export const initiateContact = async (req, res) => {
         req.user.id,
         "Premier contact initié",
       );
-
       if (!application.seenByRecruiter) {
         application.seenByRecruiter = true;
         application.seenAt = new Date();
@@ -15035,11 +15568,26 @@ export const initiateContact = async (req, res) => {
       await application.save();
     }
 
-    
+    const firstMsg = conversation.messages[conversation.messages.length - 1];
+    emitNewMessage(conversation._id.toString(), firstMsg, { applicationId });
+    emitConversationUpdate(candidate.userId._id.toString(), {
+      _id: conversation._id,
+      applicationId,
+      lastMessage: firstMsg,
+      unreadCount: 1,
+      lastMessageAt: conversation.lastMessageAt,
+    });
+    emitUnreadCount(candidate.userId._id.toString(), { conversations: 1 });
+
     await Notification.create({
       userId: candidate.userId._id,
       message: `Un recruteur essaye de vous contacter pour "${application.offerId.titre}"`,
       type: "info",
+      meta: {
+        category: "message",
+        conversationId: conversation._id,
+        applicationId: application._id,
+      },
     });
 
     res.status(201).json({
@@ -15053,7 +15601,6 @@ export const initiateContact = async (req, res) => {
   }
 };
 
-
 export const getPredefinedMessages = async (req, res) => {
   const templates = Object.entries(PREDEFINED_MESSAGES).map(([id, t]) => ({
     id,
@@ -15064,22 +15611,19 @@ export const getPredefinedMessages = async (req, res) => {
 
 
 
-
-
-
 export const proposeInterview = async (req, res) => {
   try {
     const recruiter = await getRecruiterProfile(req.user.id);
     const { applicationId } = req.params;
     const {
-      type, 
+      type,
       meetingLink,
       phoneNumber,
       location,
-      duration, 
-      schedulingMode, 
-      scheduledAt, 
-      proposedSlots, 
+      duration,
+      schedulingMode,
+      scheduledAt,
+      proposedSlots,
       preparationNotes,
     } = req.body;
 
@@ -15088,11 +15632,11 @@ export const proposeInterview = async (req, res) => {
       recruiter._id,
     );
 
-    
     const allowedStatuses = [
       "consultee",
       "preselection",
       "en_discussion",
+      "entretien_planifie",
       "entretien_termine",
       "pending_feedback",
       "shortlisted",
@@ -15104,7 +15648,6 @@ export const proposeInterview = async (req, res) => {
       });
     }
 
-    
     if (type === "video" && !meetingLink) {
       return res
         .status(400)
@@ -15119,7 +15662,6 @@ export const proposeInterview = async (req, res) => {
         .json({ msg: "L'adresse est requise pour un entretien présentiel" });
     }
 
-    
     if (schedulingMode === "fixed_date" && !scheduledAt) {
       return res
         .status(400)
@@ -15136,33 +15678,8 @@ export const proposeInterview = async (req, res) => {
     }
 
     
-    const activeInterview = await Interview.findOne({
-      applicationId,
-      status: {
-        $in: [
-          "proposed",
-          "confirmed",
-          "rescheduled_by_candidate",
-          "rescheduled_by_recruiter",
-        ],
-      },
-    });
-
-    if (activeInterview) {
-      return res.status(400).json({
-        msg: "Un entretien est déjà planifié avec ce candidat. Voulez-vous créer un nouvel entretien ?",
-        existingInterviewId: activeInterview._id,
-        existingInterviewNumber: activeInterview.interviewNumber,
-        requiresConfirmation: true,
-      });
-    }
-
-    
-    const completedInterviews = await Interview.countDocuments({
-      applicationId,
-      status: { $in: ["completed", "no_show_candidate", "no_show_recruiter"] },
-    });
-    const interviewNumber = completedInterviews + 1;
+    const totalInterviews = await Interview.countDocuments({ applicationId });
+    const interviewNumber = totalInterviews + 1;
 
     
     let conversation = await Conversation.findOne({ applicationId });
@@ -15171,7 +15688,6 @@ export const proposeInterview = async (req, res) => {
     ).populate("userId", "nom");
 
     if (!conversation) {
-      
       const initMessage = INTERVIEW_INIT_MESSAGE.template(candidate.userId.nom);
       conversation = await Conversation.create({
         applicationId,
@@ -15193,7 +15709,6 @@ export const proposeInterview = async (req, res) => {
       });
     }
 
-    
     const interview = await Interview.create({
       applicationId,
       offerId: application.offerId._id,
@@ -15220,42 +15735,50 @@ export const proposeInterview = async (req, res) => {
       status: "proposed",
     });
 
-    
     const interviewCardMessage = {
       senderId: req.user.id,
       senderType: "system",
       content: `📅 Entretien #${interviewNumber} proposé`,
       messageType: "interview_card",
-      metadata: {
-        interviewId: interview._id,
-        interviewNumber,
-      },
+      metadata: { interviewId: interview._id, interviewNumber },
     };
-
     conversation.messages.push(interviewCardMessage);
     conversation.unreadByCandidate += 1;
     conversation.lastMessageAt = new Date();
     conversation.activeInterviewIds.push(interview._id);
-
-    
     await conversation.save();
+
     const lastMsg = conversation.messages[conversation.messages.length - 1];
     interview.interviewMessageId = lastMsg._id;
     await interview.save();
 
     
-    application.recruiterStatus = "entretien_planifie";
-    application.candidateStatus = "entretien";
-    pushStatusHistory(
-      application,
-      "entretien_planifie",
-      "entretien",
-      req.user.id,
-      `Entretien #${interviewNumber} proposé`,
-    );
-    await application.save();
+    if (
+      [
+        "consultee",
+        "preselection",
+        "en_discussion",
+        "shortlisted",
+        "entretien_termine",
+        "pending_feedback",
+      ].includes(application.recruiterStatus)
+    ) {
+      application.recruiterStatus = "entretien_planifie";
+      application.candidateStatus = "entretien";
+      pushStatusHistory(
+        application,
+        "entretien_planifie",
+        "entretien",
+        req.user.id,
+        `Entretien #${interviewNumber} proposé`,
+      );
+      await application.save();
+    }
 
     
+    
+    const freshInterview = await Interview.findById(interview._id).lean();
+
     emitInterviewNew(candidate.userId._id.toString(), {
       _id: interview._id,
       interviewNumber,
@@ -15267,17 +15790,24 @@ export const proposeInterview = async (req, res) => {
     });
 
     
-    emitNewMessage(conversation._id.toString(), interviewCardMessage);
+    emitNewMessage(conversation._id.toString(), lastMsg);
+    emitInterviewCardUpdate(conversation._id.toString(), freshInterview);
 
-    
     await Notification.create({
       userId: candidate.userId._id,
       message: `Un entretien #${interviewNumber} vous est proposé pour "${application.offerId.titre}"`,
       type: "validation",
+      meta: {
+        category: "interview",
+        interviewId: interview._id,
+        conversationId: conversation._id,
+        applicationId: application._id,
+        interviewScheduled: !!interview.scheduledAt,
+      },
     });
 
     res.status(201).json({
-      msg: "Entretien proposé",
+      msg: `Entretien #${interviewNumber} proposé`,
       interview,
       interviewNumber,
       conversationId: conversation._id,
@@ -15289,52 +15819,21 @@ export const proposeInterview = async (req, res) => {
 };
 
 
-export const forceNewInterview = async (req, res) => {
-  try {
-    const recruiter = await getRecruiterProfile(req.user.id);
-    const { applicationId } = req.params;
 
-    
-    const activeInterview = await Interview.findOne({
-      applicationId,
-      status: {
-        $in: [
-          "proposed",
-          "confirmed",
-          "rescheduled_by_candidate",
-          "rescheduled_by_recruiter",
-        ],
-      },
-      recruiterId: recruiter._id,
-    });
 
-    if (activeInterview) {
-      
-      activeInterview.status = "cancelled_by_recruiter";
-      activeInterview.cancellationReason = "Remplacé par un nouvel entretien";
-      activeInterview.cancelledBy = "recruiter";
-      activeInterview.cancelledAt = new Date();
-      await activeInterview.save();
-    }
-
-    
-    return proposeInterview(req, res);
-  } catch (err) {
-    if (err.status) return res.status(err.status).json({ msg: err.msg });
-    res.status(500).json({ msg: err.message });
+const emitCardRefresh = async (interviewId, conversationId) => {
+  const fresh = await Interview.findById(interviewId).lean();
+  if (fresh && conversationId) {
+    emitInterviewCardUpdate(conversationId.toString(), fresh);
   }
+  return fresh;
 };
-
-
-
-
-
 
 export const acceptInterview = async (req, res) => {
   try {
     const candidate = await Candidate.findOne({ userId: req.user.id });
     const { interviewId } = req.params;
-    const { chosenSlotIndex } = req.body; 
+    const { chosenSlotIndex } = req.body;
 
     const interview = await Interview.findOne({
       _id: interviewId,
@@ -15348,7 +15847,6 @@ export const acceptInterview = async (req, res) => {
         .json({ msg: "Entretien introuvable ou déjà traité" });
     }
 
-    
     if (interview.schedulingMode === "propose_slots") {
       if (
         chosenSlotIndex === undefined ||
@@ -15367,22 +15865,17 @@ export const acceptInterview = async (req, res) => {
     interview.status = "confirmed";
     await interview.save();
 
-    
     const conversation = await Conversation.findById(interview.conversationId);
     if (conversation) {
-      conversation.messages.push({
+      await pushSystemMessage(conversation, {
         senderId: req.user.id,
-        senderType: "system",
         content: `✅ Entretien #${interview.interviewNumber} confirmé`,
         messageType: "interview_response",
         metadata: { interviewId: interview._id },
+        toCandidate: false,
       });
-      conversation.unreadByRecruiter += 1;
-      conversation.lastMessageAt = new Date();
-      await conversation.save();
     }
 
-    
     const recruiter = await Recruiter.findById(interview.recruiterId);
     await Notification.create({
       userId: recruiter.userId,
@@ -15390,26 +15883,19 @@ export const acceptInterview = async (req, res) => {
       type: "validation",
     });
 
-    
     emitInterviewUpdate(recruiter.userId.toString(), {
       _id: interview._id,
       interviewNumber: interview.interviewNumber,
       status: "confirmed",
       scheduledAt: interview.scheduledAt,
     });
-    if (conversation) {
-      emitNewMessage(
-        conversation._id.toString(),
-        conversation.messages[conversation.messages.length - 1],
-      );
-    }
+    await emitCardRefresh(interview._id, interview.conversationId);
 
     res.json({ msg: "Entretien confirmé", interview });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
 };
-
 
 export const proposeAlternativeDate = async (req, res) => {
   try {
@@ -15447,7 +15933,6 @@ export const proposeAlternativeDate = async (req, res) => {
     };
     await interview.save();
 
-    
     const conversation = await Conversation.findById(interview.conversationId);
     if (conversation) {
       conversation.messages.push({
@@ -15455,17 +15940,15 @@ export const proposeAlternativeDate = async (req, res) => {
         senderType: "candidate",
         content: message.trim(),
         messageType: "negotiate",
-        metadata: {
-          interviewId: interview._id,
-          negotiateTag: true,
-        },
+        metadata: { interviewId: interview._id, negotiateTag: true },
       });
       conversation.unreadByRecruiter += 1;
       conversation.lastMessageAt = new Date();
       await conversation.save();
+      const lastMsg = conversation.messages[conversation.messages.length - 1];
+      emitNewMessage(conversation._id.toString(), lastMsg);
     }
 
-    
     const recruiter = await Recruiter.findById(interview.recruiterId);
     await Notification.create({
       userId: recruiter.userId,
@@ -15473,25 +15956,18 @@ export const proposeAlternativeDate = async (req, res) => {
       type: "validation",
     });
 
-    
     emitInterviewUpdate(recruiter.userId.toString(), {
       _id: interview._id,
       status: "rescheduled_by_candidate",
       proposedAlternative: interview.proposedAlternative,
     });
-    if (conversation) {
-      emitNewMessage(
-        conversation._id.toString(),
-        conversation.messages[conversation.messages.length - 1],
-      );
-    }
+    await emitCardRefresh(interview._id, interview.conversationId);
 
     res.json({ msg: "Proposition envoyée", interview });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
 };
-
 
 export const declineInterview = async (req, res) => {
   try {
@@ -15517,27 +15993,20 @@ export const declineInterview = async (req, res) => {
     interview.cancelledAt = new Date();
     await interview.save();
 
-    
     const conversation = await Conversation.findById(interview.conversationId);
     if (conversation) {
-      conversation.messages.push({
-        senderId: req.user.id,
-        senderType: "system",
-        content: `❌ Le candidat a décliné l'entretien #${interview.interviewNumber}${reason ? ` - Raison: ${reason}` : ""}`,
-        messageType: "interview_response",
-        metadata: { interviewId: interview._id },
-      });
-      conversation.unreadByRecruiter += 1;
-      conversation.lastMessageAt = new Date();
-
-      
       conversation.activeInterviewIds = conversation.activeInterviewIds.filter(
         (id) => id.toString() !== interview._id.toString(),
       );
-      await conversation.save();
+      await pushSystemMessage(conversation, {
+        senderId: req.user.id,
+        content: `❌ Le candidat a décliné l'entretien #${interview.interviewNumber}${reason ? ` — Raison: ${reason}` : ""}`,
+        messageType: "interview_response",
+        metadata: { interviewId: interview._id },
+        toCandidate: false,
+      });
     }
 
-    
     const recruiter = await Recruiter.findById(interview.recruiterId);
     await Notification.create({
       userId: recruiter.userId,
@@ -15545,20 +16014,17 @@ export const declineInterview = async (req, res) => {
       type: "info",
     });
 
-    
     emitInterviewUpdate(recruiter.userId.toString(), {
       _id: interview._id,
       status: "cancelled_by_candidate",
     });
+    await emitCardRefresh(interview._id, interview.conversationId);
 
     res.json({ msg: "Entretien décliné", interview });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
 };
-
-
-
 
 
 
@@ -15599,22 +16065,18 @@ export const cancelInterviewByRecruiter = async (req, res) => {
     interview.cancelledAt = new Date();
     await interview.save();
 
-    
     const conversation = await Conversation.findById(interview.conversationId);
     if (conversation) {
-      conversation.messages.push({
-        senderId: req.user.id,
-        senderType: "system",
-        content: `⚠️ L'entretien #${interview.interviewNumber} a été annulé par le recruteur. Raison: ${reason.trim()}`,
-        messageType: "system",
-        metadata: { interviewId: interview._id },
-      });
-      conversation.unreadByCandidate += 1;
-      conversation.lastMessageAt = new Date();
       conversation.activeInterviewIds = conversation.activeInterviewIds.filter(
         (id) => id.toString() !== interview._id.toString(),
       );
-      await conversation.save();
+      await pushSystemMessage(conversation, {
+        senderId: req.user.id,
+        content: `⚠️ L'entretien #${interview.interviewNumber} a été annulé par le recruteur. Raison: ${reason.trim()}`,
+        messageType: "system",
+        metadata: { interviewId: interview._id },
+        toCandidate: true,
+      });
     }
 
     const candidate = await Candidate.findById(interview.candidateId);
@@ -15622,14 +16084,26 @@ export const cancelInterviewByRecruiter = async (req, res) => {
       userId: candidate.userId,
       message: `L'entretien prévu a été annulé par le recruteur`,
       type: "info",
+      meta: {
+        category: "interview",
+        interviewId: interview._id,
+        conversationId: interview.conversationId,
+        applicationId: interview.applicationId,
+        interviewScheduled: !!interview.scheduledAt,
+      },
     });
+
+    emitInterviewUpdate(candidate.userId.toString(), {
+      _id: interview._id,
+      status: "cancelled_by_recruiter",
+    });
+    await emitCardRefresh(interview._id, interview.conversationId);
 
     res.json({ msg: "Entretien annulé", interview });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
 };
-
 
 export const cancelInterviewByCandidate = async (req, res) => {
   try {
@@ -15663,19 +16137,16 @@ export const cancelInterviewByCandidate = async (req, res) => {
 
     const conversation = await Conversation.findById(interview.conversationId);
     if (conversation) {
-      conversation.messages.push({
-        senderId: req.user.id,
-        senderType: "system",
-        content: `⚠️ L'entretien #${interview.interviewNumber} a été annulé par le candidat. Raison: ${reason.trim()}`,
-        messageType: "system",
-        metadata: { interviewId: interview._id },
-      });
-      conversation.unreadByRecruiter += 1;
-      conversation.lastMessageAt = new Date();
       conversation.activeInterviewIds = conversation.activeInterviewIds.filter(
         (id) => id.toString() !== interview._id.toString(),
       );
-      await conversation.save();
+      await pushSystemMessage(conversation, {
+        senderId: req.user.id,
+        content: `⚠️ L'entretien #${interview.interviewNumber} a été annulé par le candidat. Raison: ${reason.trim()}`,
+        messageType: "system",
+        metadata: { interviewId: interview._id },
+        toCandidate: false,
+      });
     }
 
     const recruiter = await Recruiter.findById(interview.recruiterId);
@@ -15685,12 +16156,17 @@ export const cancelInterviewByCandidate = async (req, res) => {
       type: "info",
     });
 
+    emitInterviewUpdate(recruiter.userId.toString(), {
+      _id: interview._id,
+      status: "cancelled_by_candidate",
+    });
+    await emitCardRefresh(interview._id, interview.conversationId);
+
     res.json({ msg: "Entretien annulé", interview });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
 };
-
 
 export const rescheduleByRecruiter = async (req, res) => {
   try {
@@ -15724,19 +16200,16 @@ export const rescheduleByRecruiter = async (req, res) => {
 
     const conversation = await Conversation.findById(interview.conversationId);
     if (conversation) {
-      conversation.messages.push({
+      await pushSystemMessage(conversation, {
         senderId: req.user.id,
-        senderType: "system",
         content: `🔄 L'entretien #${interview.interviewNumber} a été reprogrammé par le recruteur`,
         messageType: "interview_card",
         metadata: {
           interviewId: interview._id,
           interviewNumber: interview.interviewNumber,
         },
+        toCandidate: true,
       });
-      conversation.unreadByCandidate += 1;
-      conversation.lastMessageAt = new Date();
-      await conversation.save();
     }
 
     const candidate = await Candidate.findById(interview.candidateId);
@@ -15744,14 +16217,27 @@ export const rescheduleByRecruiter = async (req, res) => {
       userId: candidate.userId,
       message: `L'entretien #${interview.interviewNumber} a été reprogrammé, veuillez confirmer la nouvelle date`,
       type: "validation",
+      meta: {
+        category: "interview",
+        interviewId: interview._id,
+        conversationId: interview.conversationId,
+        applicationId: interview.applicationId,
+        interviewScheduled: !!interview.scheduledAt,
+      },
     });
+
+    emitInterviewUpdate(candidate.userId.toString(), {
+      _id: interview._id,
+      status: "rescheduled_by_recruiter",
+      scheduledAt: interview.scheduledAt,
+    });
+    await emitCardRefresh(interview._id, interview.conversationId);
 
     res.json({ msg: "Entretien reprogrammé", interview });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
 };
-
 
 export const acceptAlternativeDate = async (req, res) => {
   try {
@@ -15777,16 +16263,13 @@ export const acceptAlternativeDate = async (req, res) => {
 
     const conversation = await Conversation.findById(interview.conversationId);
     if (conversation) {
-      conversation.messages.push({
+      await pushSystemMessage(conversation, {
         senderId: req.user.id,
-        senderType: "system",
         content: `✅ La nouvelle date pour l'entretien #${interview.interviewNumber} a été confirmée`,
         messageType: "interview_response",
         metadata: { interviewId: interview._id },
+        toCandidate: true,
       });
-      conversation.unreadByCandidate += 1;
-      conversation.lastMessageAt = new Date();
-      await conversation.save();
     }
 
     const candidate = await Candidate.findById(interview.candidateId);
@@ -15794,14 +16277,27 @@ export const acceptAlternativeDate = async (req, res) => {
       userId: candidate.userId,
       message: `Votre nouvelle date d'entretien #${interview.interviewNumber} a été confirmée`,
       type: "validation",
+      meta: {
+        category: "interview",
+        interviewId: interview._id,
+        conversationId: interview.conversationId,
+        applicationId: interview.applicationId,
+        interviewScheduled: true,
+      },
     });
+
+    emitInterviewUpdate(candidate.userId.toString(), {
+      _id: interview._id,
+      status: "confirmed",
+      scheduledAt: interview.scheduledAt,
+    });
+    await emitCardRefresh(interview._id, interview.conversationId);
 
     res.json({ msg: "Nouvelle date acceptée", interview });
   } catch (err) {
     res.status(500).json({ msg: err.message });
   }
 };
-
 
 export const markInterviewCompleted = async (req, res) => {
   try {
@@ -15825,7 +16321,12 @@ export const markInterviewCompleted = async (req, res) => {
 
     
     const application = await Application.findById(interview.applicationId);
-    if (application) {
+    if (
+      application &&
+      ["entretien_planifie", "entretien_termine"].includes(
+        application.recruiterStatus,
+      )
+    ) {
       application.recruiterStatus = "pending_feedback";
       application.candidateStatus = mapRecruiterToCandidate("pending_feedback");
       pushStatusHistory(
@@ -15838,6 +16339,8 @@ export const markInterviewCompleted = async (req, res) => {
       await application.save();
     }
 
+    await emitCardRefresh(interview._id, interview.conversationId);
+
     res.json({
       msg: "Entretien marqué comme terminé, veuillez donner votre feedback",
       interview,
@@ -15846,9 +16349,6 @@ export const markInterviewCompleted = async (req, res) => {
     res.status(500).json({ msg: err.message });
   }
 };
-
-
-
 
 
 
@@ -15863,7 +16363,7 @@ export const submitInterviewFeedback = async (req, res) => {
       rating,
       privateNotes,
       decision,
-      rejectionMessage, 
+      rejectionMessage,
     } = req.body;
 
     const interview = await Interview.findOne({
@@ -15888,21 +16388,16 @@ export const submitInterviewFeedback = async (req, res) => {
           msg: "La raison est requise si l'entretien n'a pas eu lieu",
         });
       }
-
       interview.feedback = {
         interviewHappened: false,
         noShowReason,
         noShowDetails,
         completedAt: new Date(),
       };
-
-      if (noShowReason === "candidate_absent") {
-        interview.status = "no_show_candidate";
-      } else {
-        interview.status = "completed";
-      }
-
+      interview.status =
+        noShowReason === "candidate_absent" ? "no_show_candidate" : "completed";
       await interview.save();
+      await emitCardRefresh(interview._id, interview.conversationId);
 
       return res.json({
         msg: "Feedback enregistré (entretien non tenu)",
@@ -15911,12 +16406,9 @@ export const submitInterviewFeedback = async (req, res) => {
       });
     }
 
-    if (!rating) {
-      return res.status(400).json({ msg: "La note est requise" });
-    }
-    if (!decision) {
+    if (!rating) return res.status(400).json({ msg: "La note est requise" });
+    if (!decision)
       return res.status(400).json({ msg: "La décision est requise" });
-    }
 
     interview.feedback = {
       interviewHappened: true,
@@ -15947,7 +16439,7 @@ export const submitInterviewFeedback = async (req, res) => {
           `Entretien #${interview.interviewNumber} terminé - Round suivant prévu`,
         );
         await application.save();
-
+        await emitCardRefresh(interview._id, interview.conversationId);
         res.json({
           msg: "Feedback enregistré. Vous pouvez proposer un nouvel entretien.",
           interview,
@@ -15956,7 +16448,6 @@ export const submitInterviewFeedback = async (req, res) => {
         });
         break;
       }
-
       case "shortlist": {
         application.recruiterStatus = "shortlisted";
         application.candidateStatus = mapRecruiterToCandidate("shortlisted");
@@ -15968,22 +16459,15 @@ export const submitInterviewFeedback = async (req, res) => {
           "Ajouté à la shortlist",
         );
         await application.save();
-
-        res.json({
-          msg: "Candidat ajouté à la shortlist",
-          interview,
-        });
+        await emitCardRefresh(interview._id, interview.conversationId);
+        res.json({ msg: "Candidat ajouté à la shortlist", interview });
         break;
       }
-
       case "reject": {
         application.recruiterStatus = "refusee";
         application.candidateStatus = "non_retenue";
         application.dateDecision = new Date();
-        
-        if (rejectionMessage) {
-          application.rejectionMessage = rejectionMessage;
-        }
+        if (rejectionMessage) application.rejectionMessage = rejectionMessage;
         pushStatusHistory(
           application,
           "refusee",
@@ -15992,12 +16476,13 @@ export const submitInterviewFeedback = async (req, res) => {
           "Rejeté après entretien",
         );
         await application.save();
+        await syncNombreCandidatures(application.offerId._id);
 
         if (conversation) {
           conversation.messages.push({
             senderId: req.user.id,
             senderType: "system",
-            content: `Votre candidature pour "${application.offerId.titre}" n'a pas été retenue.`,
+            content: `Votre candidature pour "${application.offerId.titre}" n'a pas été retenue.${rejectionMessage ? ` Message : ${rejectionMessage}` : ""}`,
             messageType: "rejection",
           });
           conversation.isClosed = true;
@@ -16005,18 +16490,36 @@ export const submitInterviewFeedback = async (req, res) => {
           conversation.unreadByCandidate += 1;
           conversation.lastMessageAt = new Date();
           await conversation.save();
+          const lastMsg =
+            conversation.messages[conversation.messages.length - 1];
+          emitNewMessage(conversation._id.toString(), lastMsg);
+          emitConversationClosed(conversation._id.toString(), {
+            isClosed: true,
+            closedBy: "recruiter",
+            reason: "application_rejected",
+          });
         }
 
         await Notification.create({
           userId: candidate.userId,
           message: `Votre candidature pour "${application.offerId.titre}" n'a pas été retenue.${rejectionMessage ? ` Raison: ${rejectionMessage}` : ""}`,
           type: "info",
+          meta: {
+            category: "application",
+            applicationId: application._id,
+            conversationId: interview.conversationId,
+          },
         });
 
+        emitApplicationUpdate(candidate.userId.toString(), {
+          _id: application._id,
+          candidateStatus: "non_retenue",
+          offerTitle: application.offerId.titre,
+        });
+        await emitCardRefresh(interview._id, interview.conversationId);
         res.json({ msg: "Candidat rejeté", interview });
         break;
       }
-
       case "hire": {
         application.recruiterStatus = "retenue";
         application.candidateStatus = "retenue";
@@ -16031,22 +16534,27 @@ export const submitInterviewFeedback = async (req, res) => {
         await application.save();
 
         if (conversation) {
-          conversation.messages.push({
+          await pushSystemMessage(conversation, {
             senderId: req.user.id,
-            senderType: "system",
             content: `🎉 Félicitations ! Le recruteur souhaite vous embaucher pour le poste "${application.offerId.titre}".`,
             messageType: "hire_offer",
-            metadata: { interviewId: interview._id },
+            metadata: {
+              interviewId: interview._id,
+              applicationId: application._id,
+            },
+            toCandidate: true,
           });
-          conversation.unreadByCandidate += 1;
-          conversation.lastMessageAt = new Date();
-          await conversation.save();
         }
 
         await Notification.create({
           userId: candidate.userId,
           message: `Félicitations ! Vous avez une proposition d'embauche pour "${application.offerId.titre}" !`,
           type: "validation",
+          meta: {
+            category: "application",
+            applicationId: application._id,
+            conversationId: interview.conversationId,
+          },
         });
 
         emitApplicationUpdate(candidate.userId.toString(), {
@@ -16054,13 +16562,7 @@ export const submitInterviewFeedback = async (req, res) => {
           candidateStatus: "retenue",
           offerTitle: application.offerId.titre,
         });
-        if (conversation) {
-          emitNewMessage(
-            conversation._id.toString(),
-            conversation.messages[conversation.messages.length - 1],
-          );
-        }
-
+        await emitCardRefresh(interview._id, interview.conversationId);
         res.json({
           msg: "Proposition d'embauche envoyée au candidat",
           interview,
@@ -16073,8 +16575,6 @@ export const submitInterviewFeedback = async (req, res) => {
     res.status(500).json({ msg: err.message });
   }
 };
-
-
 
 
 
@@ -16091,7 +16591,6 @@ export const proposeHire = async (req, res) => {
       application.candidateId,
     ).populate("userId", "nom");
 
-    
     const allowedStatuses = [
       "shortlisted",
       "entretien_termine",
@@ -16118,24 +16617,31 @@ export const proposeHire = async (req, res) => {
     );
     await application.save();
 
-    
     let conversation = await Conversation.findOne({ applicationId });
     if (conversation) {
-      conversation.messages.push({
+      await pushSystemMessage(conversation, {
         senderId: req.user.id,
-        senderType: "system",
         content: `🎉 Félicitations ! Le recruteur souhaite vous embaucher pour le poste "${application.offerId.titre}".`,
         messageType: "hire_offer",
+        metadata: { applicationId: application._id },
+        toCandidate: true,
       });
-      conversation.unreadByCandidate += 1;
-      conversation.lastMessageAt = new Date();
-      await conversation.save();
     }
 
     await Notification.create({
       userId: candidate.userId._id,
       message: `Félicitations ! Vous avez une proposition d'embauche pour "${application.offerId.titre}" !`,
       type: "validation",
+      meta: {
+        category: "application",
+        applicationId: application._id,
+      },
+    });
+
+    emitApplicationUpdate(candidate.userId._id.toString(), {
+      _id: application._id,
+      candidateStatus: "retenue",
+      offerTitle: application.offerId.titre,
     });
 
     res.json({ msg: "Proposition d'embauche envoyée", application });
@@ -16144,7 +16650,6 @@ export const proposeHire = async (req, res) => {
     res.status(500).json({ msg: err.message });
   }
 };
-
 
 export const cancelHireOffer = async (req, res) => {
   try {
@@ -16163,7 +16668,7 @@ export const cancelHireOffer = async (req, res) => {
         .json({ msg: "Pas de proposition d'embauche active" });
     }
 
-    application.recruiterStatus = "shortlisted"; 
+    application.recruiterStatus = "shortlisted";
     application.candidateStatus = "en_cours";
     application.hireCancelledAt = new Date();
     application.hireCancelReason = reason;
@@ -16178,15 +16683,12 @@ export const cancelHireOffer = async (req, res) => {
 
     const conversation = await Conversation.findOne({ applicationId });
     if (conversation) {
-      conversation.messages.push({
+      await pushSystemMessage(conversation, {
         senderId: req.user.id,
-        senderType: "system",
         content: `La proposition d'embauche a été annulée par le recruteur.`,
         messageType: "hire_cancelled",
+        toCandidate: true,
       });
-      conversation.unreadByCandidate += 1;
-      conversation.lastMessageAt = new Date();
-      await conversation.save();
     }
 
     const candidate = await Candidate.findById(application.candidateId);
@@ -16195,6 +16697,10 @@ export const cancelHireOffer = async (req, res) => {
       message: "La proposition d'embauche a été annulée par le recruteur.",
       type: "info",
     });
+    emitApplicationUpdate(candidate.userId.toString(), {
+      _id: application._id,
+      candidateStatus: "en_cours",
+    });
 
     res.json({ msg: "Proposition d'embauche annulée", application });
   } catch (err) {
@@ -16202,7 +16708,6 @@ export const cancelHireOffer = async (req, res) => {
     res.status(500).json({ msg: err.message });
   }
 };
-
 
 export const acceptHire = async (req, res) => {
   try {
@@ -16234,22 +16739,18 @@ export const acceptHire = async (req, res) => {
       "Embauche acceptée",
     );
     await application.save();
+    await syncNombreCandidatures(application.offerId._id);
 
-    
     const conversation = await Conversation.findOne({ applicationId });
     if (conversation) {
-      conversation.messages.push({
+      await pushSystemMessage(conversation, {
         senderId: req.user.id,
-        senderType: "system",
         content: `🎉 Le candidat a accepté l'embauche pour "${application.offerId.titre}" !`,
         messageType: "hire_response",
+        toCandidate: false,
       });
-      conversation.unreadByRecruiter += 1;
-      conversation.lastMessageAt = new Date();
-      await conversation.save();
     }
 
-    
     const offer = application.offerId;
     const recruiter = await Recruiter.findById(offer.recruteurId);
     await Notification.create({
@@ -16258,14 +16759,12 @@ export const acceptHire = async (req, res) => {
       type: "validation",
     });
 
-    
     let quotaInfo = null;
     if (offer.hiresNeeded) {
       const hiredCount = await Application.countDocuments({
         offerId: offer._id,
         recruiterStatus: "embauche",
       });
-
       if (hiredCount >= offer.hiresNeeded) {
         quotaInfo = {
           quotaReached: true,
@@ -16275,18 +16774,12 @@ export const acceptHire = async (req, res) => {
         };
       }
     }
-    
+
     emitApplicationUpdate(recruiter.userId.toString(), {
       _id: application._id,
       recruiterStatus: "embauche",
-      offerTitle: application.offerId.titre,
+      offerTitle: offer.titre,
     });
-    if (conversation) {
-      emitNewMessage(
-        conversation._id.toString(),
-        conversation.messages[conversation.messages.length - 1],
-      );
-    }
 
     res.json({
       msg: "Embauche acceptée ! Félicitations !",
@@ -16297,7 +16790,6 @@ export const acceptHire = async (req, res) => {
     res.status(500).json({ msg: err.message });
   }
 };
-
 
 export const declineHire = async (req, res) => {
   try {
@@ -16319,7 +16811,7 @@ export const declineHire = async (req, res) => {
     }
 
     application.recruiterStatus = "offer_declined";
-    application.candidateStatus = "en_cours"; 
+    application.candidateStatus = "en_cours";
     application.hireDeclinedAt = new Date();
     application.hireDeclineReason = reason;
     pushStatusHistory(
@@ -16333,15 +16825,12 @@ export const declineHire = async (req, res) => {
 
     const conversation = await Conversation.findOne({ applicationId });
     if (conversation) {
-      conversation.messages.push({
+      await pushSystemMessage(conversation, {
         senderId: req.user.id,
-        senderType: "system",
         content: `Le candidat a décliné la proposition d'embauche.${reason ? ` Raison: ${reason}` : ""}`,
         messageType: "hire_response",
+        toCandidate: false,
       });
-      conversation.unreadByRecruiter += 1;
-      conversation.lastMessageAt = new Date();
-      await conversation.save();
     }
 
     const offer = application.offerId;
@@ -16350,6 +16839,10 @@ export const declineHire = async (req, res) => {
       userId: recruiter.userId,
       message: `Le candidat a décliné l'embauche pour "${offer.titre}"`,
       type: "info",
+    });
+    emitApplicationUpdate(recruiter.userId.toString(), {
+      _id: application._id,
+      recruiterStatus: "offer_declined",
     });
 
     res.json({ msg: "Proposition d'embauche déclinée", application });
@@ -16360,14 +16853,10 @@ export const declineHire = async (req, res) => {
 
 
 
-
-
-
 export const getOtherActiveApplications = async (req, res) => {
   try {
     const candidate = await Candidate.findOne({ userId: req.user.id });
 
-    
     const hiredApplication = await Application.findOne({
       candidateId: candidate._id,
       candidateStatus: "embauchee",
@@ -16377,7 +16866,6 @@ export const getOtherActiveApplications = async (req, res) => {
       return res.json({ hasHiredApplication: false, otherApplications: [] });
     }
 
-    
     const otherActiveApplications = await Application.find({
       candidateId: candidate._id,
       _id: { $ne: hiredApplication._id },
@@ -16407,7 +16895,6 @@ export const getOtherActiveApplications = async (req, res) => {
   }
 };
 
-
 export const withdrawAllOtherApplications = async (req, res) => {
   const mongoose = (await import("mongoose")).default;
   const session = await mongoose.startSession();
@@ -16428,6 +16915,8 @@ export const withdrawAllOtherApplications = async (req, res) => {
 
     let withdrawnCount = 0;
     const affectedOfferIds = new Set();
+    
+    const notifyTargets = [];
 
     await session.withTransaction(async () => {
       const otherApplications = await Application.find({
@@ -16456,7 +16945,6 @@ export const withdrawAllOtherApplications = async (req, res) => {
 
         affectedOfferIds.add(app.offerId._id.toString());
 
-        
         await Interview.updateMany(
           {
             applicationId: app._id,
@@ -16478,40 +16966,54 @@ export const withdrawAllOtherApplications = async (req, res) => {
           { session },
         );
 
+        
+        const conv = await Conversation.findOne({
+          applicationId: app._id,
+        }).session(session);
+        if (conv && !conv.isClosed) {
+          conv.messages.push({
+            senderId: req.user.id,
+            senderType: "system",
+            content: "Le candidat a retiré sa candidature (embauché ailleurs).",
+            messageType: "system",
+          });
+          conv.isClosed = true;
+          conv.closedReason = "application_closed";
+          conv.unreadByRecruiter += 1;
+          conv.lastMessageAt = new Date();
+          await conv.save({ session });
+        }
+
+        if (app.offerId?.recruteurId) {
+          notifyTargets.push({
+            recruiterId: app.offerId.recruteurId,
+            offerTitle: app.offerId.titre,
+            conversationId: conv?._id,
+          });
+        }
+
         withdrawnCount++;
       }
 
-      
       for (const oid of affectedOfferIds) {
-        const activeCount = await Application.countDocuments({
-          offerId: oid,
-          candidateStatus: { $nin: ["cancelled", "retiree"] },
-        }).session(session);
-
-        await Offer.findByIdAndUpdate(
-          oid,
-          { nombreCandidatures: activeCount },
-          { session },
-        );
+        await syncNombreCandidatures(oid, session);
       }
     });
 
     
-    const withdrawnApps = await Application.find({
-      candidateId: candidate._id,
-      candidateStatus: "retiree",
-      withdrawReason: "Embauché(e) ailleurs",
-      withdrawnAt: { $gte: new Date(Date.now() - 10000) },
-    }).populate("offerId");
-
-    for (const app of withdrawnApps) {
-      if (app.offerId?.recruteurId) {
-        const recruiter = await Recruiter.findById(app.offerId.recruteurId);
-        if (recruiter) {
-          await Notification.create({
-            userId: recruiter.userId,
-            message: `Le candidat a retiré sa candidature pour "${app.offerId.titre}" (embauché ailleurs)`,
-            type: "info",
+    for (const t of notifyTargets) {
+      const recruiter = await Recruiter.findById(t.recruiterId);
+      if (recruiter) {
+        await Notification.create({
+          userId: recruiter.userId,
+          message: `Le candidat a retiré sa candidature pour "${t.offerTitle}" (embauché ailleurs)`,
+          type: "info",
+        });
+        if (t.conversationId) {
+          emitConversationClosed(t.conversationId.toString(), {
+            isClosed: true,
+            closedBy: "candidate",
+            reason: "application_withdrawn",
           });
         }
       }
@@ -16527,10 +17029,6 @@ export const withdrawAllOtherApplications = async (req, res) => {
     await session.endSession();
   }
 };
-
-
-
-
 
 
 
@@ -16553,13 +17051,12 @@ export const closeOffer = async (req, res) => {
     }
 
     let rejectedCount = 0;
+    const notifyTargets = [];
 
     await session.withTransaction(async () => {
-      
       offer.actif = false;
       await offer.save({ session });
 
-      
       const anemOffer = await AnemOffer.findOne({ offerId: offer._id }).session(
         session,
       );
@@ -16591,9 +17088,9 @@ export const closeOffer = async (req, res) => {
               "offer_declined",
             ],
           },
-        }).session(session);
-
-        const candidateIds = [];
+        })
+          .populate("candidateId")
+          .session(session);
 
         for (const app of activeApplications) {
           app.recruiterStatus = "refusee";
@@ -16608,9 +17105,7 @@ export const closeOffer = async (req, res) => {
             note: "Poste pourvu - offre clôturée",
           });
           await app.save({ session });
-          candidateIds.push(app.candidateId);
 
-          
           await Interview.updateMany(
             {
               applicationId: app._id,
@@ -16632,11 +17127,9 @@ export const closeOffer = async (req, res) => {
             { session },
           );
 
-          
           const conversation = await Conversation.findOne({
             applicationId: app._id,
           }).session(session);
-
           if (conversation) {
             conversation.messages.push({
               senderId: req.user.id,
@@ -16651,40 +17144,45 @@ export const closeOffer = async (req, res) => {
             conversation.lastMessageAt = new Date();
             await conversation.save({ session });
           }
+
+          
+          if (app.candidateId?.userId) {
+            notifyTargets.push({
+              userId: app.candidateId.userId,
+              offerTitle: offer.titre,
+              conversationId: conversation?._id,
+              candidateUserId: app.candidateId.userId,
+              applicationId: app._id,
+            });
+          }
         }
 
         rejectedCount = activeApplications.length;
-
-        
-        
       }
 
-      
-      const finalCount = await Application.countDocuments({
-        offerId: offer._id,
-        candidateStatus: { $nin: ["cancelled", "retiree"] },
-      }).session(session);
-
-      offer.nombreCandidatures = finalCount;
-      await offer.save({ session });
+      await syncNombreCandidatures(offer._id, session);
     });
 
     
     if (autoReject) {
-      const rejectedApps = await Application.find({
-        offerId: offer._id,
-        recruiterStatus: "refusee",
-        dateDecision: { $gte: new Date(Date.now() - 5000) }, 
-      }).populate("candidateId");
-
-      for (const app of rejectedApps) {
-        if (app.candidateId?.userId) {
-          await Notification.create({
-            userId: app.candidateId.userId,
-            message: `Le poste "${offer.titre}" a été pourvu. Votre candidature n'a pas été retenue.`,
-            type: "info",
+      for (const t of notifyTargets) {
+        await Notification.create({
+          userId: t.userId,
+          message: `Le poste "${t.offerTitle}" a été pourvu. Votre candidature n'a pas été retenue.`,
+          type: "info",
+        });
+        if (t.conversationId) {
+          emitConversationClosed(t.conversationId.toString(), {
+            isClosed: true,
+            closedBy: "recruiter",
+            reason: "offer_closed",
           });
         }
+        emitApplicationUpdate(t.candidateUserId.toString(), {
+          _id: t.applicationId,
+          candidateStatus: "non_retenue",
+          offerTitle: t.offerTitle,
+        });
       }
 
       return res.json({
@@ -16700,9 +17198,6 @@ export const closeOffer = async (req, res) => {
     await session.endSession();
   }
 };
-
-
-
 
 
 
@@ -16731,10 +17226,7 @@ export const getMyHires = async (req, res) => {
     const enriched = hiredApplications.map((app) => ({
       _id: app._id,
       hireAcceptedAt: app.hireAcceptedAt,
-      offer: {
-        _id: app.offerId?._id,
-        titre: app.offerId?.titre,
-      },
+      offer: { _id: app.offerId?._id, titre: app.offerId?.titre },
       candidate: {
         _id: app.candidateId?._id,
         nom: app.candidateId?.userId?.nom,
@@ -16769,6 +17261,7 @@ export const removeHire = async (req, res) => {
     application.recruiterStatus = "refusee";
     application.candidateStatus = "non_retenue";
     application.dateDecision = new Date();
+    if (reason) application.rejectionMessage = reason;
     pushStatusHistory(
       application,
       "refusee",
@@ -16778,11 +17271,66 @@ export const removeHire = async (req, res) => {
     );
     await application.save();
 
+    
+    await syncNombreCandidatures(application.offerId._id);
+
+    
+    await Interview.updateMany(
+      {
+        applicationId: application._id,
+        status: {
+          $in: [
+            "proposed",
+            "confirmed",
+            "rescheduled_by_candidate",
+            "rescheduled_by_recruiter",
+            "pending_feedback",
+          ],
+        },
+      },
+      {
+        status: "cancelled_by_recruiter",
+        cancellationReason: "Embauche retirée",
+        cancelledBy: "recruiter",
+        cancelledAt: new Date(),
+      },
+    );
+
+    
     const candidate = await Candidate.findById(application.candidateId);
+    const conversation = await Conversation.findOne({ applicationId });
+    if (conversation) {
+      conversation.messages.push({
+        senderId: req.user.id,
+        senderType: "system",
+        content: `Votre embauche pour "${application.offerId.titre}" a été annulée par le recruteur.${reason ? ` Raison: ${reason}` : ""}`,
+        messageType: "closure",
+      });
+      conversation.isClosed = true;
+      conversation.closedReason = "application_closed";
+      conversation.unreadByCandidate += 1;
+      conversation.lastMessageAt = new Date();
+      await conversation.save();
+
+      const lastMsg = conversation.messages[conversation.messages.length - 1];
+      emitNewMessage(conversation._id.toString(), lastMsg);
+      emitConversationClosed(conversation._id.toString(), {
+        isClosed: true,
+        closedBy: "recruiter",
+        reason: "hire_removed",
+      });
+    }
+
     await Notification.create({
       userId: candidate.userId,
       message: `Votre embauche pour "${application.offerId.titre}" a été annulée par le recruteur.`,
       type: "alerte",
+    });
+
+    emitApplicationUpdate(candidate.userId.toString(), {
+      _id: application._id,
+      candidateStatus: "non_retenue",
+      offerTitle: application.offerId.titre,
     });
 
     res.json({ msg: "Embauche retirée", application });
@@ -16794,17 +17342,8 @@ export const removeHire = async (req, res) => {
 
 
 
-
-
-
 export const triggerPendingFeedback = async () => {
-  const now = new Date();
-
-  
-  const interviews = await Interview.find({
-    status: "confirmed",
-  });
-
+  const interviews = await Interview.find({ status: "confirmed" });
   let updatedCount = 0;
 
   for (const interview of interviews) {
@@ -16812,7 +17351,6 @@ export const triggerPendingFeedback = async () => {
       interview.status = "pending_feedback";
       await interview.save();
 
-      
       const application = await Application.findById(interview.applicationId);
       if (application && application.recruiterStatus === "entretien_planifie") {
         application.recruiterStatus = "pending_feedback";
@@ -16821,13 +17359,12 @@ export const triggerPendingFeedback = async () => {
         application.statusHistory.push({
           candidateStatus: application.candidateStatus,
           recruiterStatus: "pending_feedback",
-          changedBy: null, 
+          changedBy: null,
           note: `Feedback requis pour l'entretien #${interview.interviewNumber}`,
         });
         await application.save();
       }
 
-      
       const recruiter = await Recruiter.findById(interview.recruiterId);
       if (recruiter) {
         await Notification.create({
@@ -16836,17 +17373,11 @@ export const triggerPendingFeedback = async () => {
           type: "alerte",
         });
       }
-
       updatedCount++;
     }
   }
-
   return updatedCount;
 };
-
-
-
-
 
 export const sendInterviewReminders = async () => {
   const now = new Date();
@@ -16867,9 +17398,7 @@ export const sendInterviewReminders = async () => {
     .populate("recruiterId");
 
   let sentCount = 0;
-
   for (const interview of interviews) {
-    
     if (interview.candidateId?.userId) {
       await Notification.create({
         userId: interview.candidateId.userId,
@@ -16877,8 +17406,6 @@ export const sendInterviewReminders = async () => {
         type: "info",
       });
     }
-
-    
     if (interview.recruiterId?.userId) {
       await Notification.create({
         userId: interview.recruiterId.userId,
@@ -16886,15 +17413,43 @@ export const sendInterviewReminders = async () => {
         type: "info",
       });
     }
-
     interview.reminderSentToCandidate = true;
     interview.reminderSentToRecruiter = true;
     interview.reminderSentAt = new Date();
     await interview.save();
     sentCount++;
   }
-
   return sentCount;
+};
+
+export const deleteOrphanedConversation = async (req, res) => {
+  try {
+    const recruiter = await getRecruiterProfile(req.user.id);
+    const { conversationId } = req.params;
+
+    const conversation = await Conversation.findOne({
+      _id: conversationId,
+      recruiterId: recruiter._id,
+    });
+
+    if (!conversation) {
+      return res.status(404).json({ msg: "Conversation introuvable" });
+    }
+
+    if (!conversation.candidateDeleted) {
+      return res.status(400).json({
+        msg: "Seules les conversations liées à un candidat supprimé peuvent être supprimées.",
+      });
+    }
+
+    await Interview.deleteMany({ conversationId: conversation._id });
+    await Conversation.deleteOne({ _id: conversation._id });
+
+    res.json({ msg: "Conversation supprimée de votre historique." });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ msg: err.msg });
+    res.status(500).json({ msg: err.message });
+  }
 };
 
 
@@ -19458,6 +20013,7 @@ const anemOfferSchema = new mongoose.Schema(
     cooldownStartedAt: { type: Date },
     cooldownEndsAt: { type: Date },
     cooldownDays: { type: Number, default: 21 },
+    cooldownMs: { type: Number },
 
     
     failedAt: { type: Date },
@@ -20793,26 +21349,24 @@ const messageSchema = new mongoose.Schema({
   readAt: Date,
   createdAt: { type: Date, default: Date.now },
 
-  
   messageType: {
     type: String,
     enum: [
-      "text", 
-      "predefined", 
-      "interview_card", 
-      "interview_response", 
-      "negotiate", 
-      "hire_offer", 
-      "hire_response", 
-      "hire_cancelled", 
-      "rejection", 
-      "system", 
-      "closure", 
+      "text",
+      "predefined",
+      "interview_card",
+      "interview_response",
+      "negotiate",
+      "hire_offer",
+      "hire_response",
+      "hire_cancelled",
+      "rejection",
+      "system",
+      "closure",
     ],
     default: "text",
   },
 
-  
   metadata: {
     interviewId: { type: mongoose.Schema.Types.ObjectId, ref: "Interview" },
     interviewNumber: Number,
@@ -20846,6 +21400,13 @@ const conversationSchema = new mongoose.Schema(
     },
 
     
+    
+    candidateNameSnapshot: { type: String },
+
+    
+    candidateDeleted: { type: Boolean, default: false },
+    candidateDeletedAt: { type: Date },
+
     isClosed: { type: Boolean, default: false },
     closedReason: {
       type: String,
@@ -20854,6 +21415,7 @@ const conversationSchema = new mongoose.Schema(
         "application_rejected",
         "application_closed",
         "offer_closed",
+        "candidate_deleted",
       ],
     },
 
@@ -20881,7 +21443,6 @@ const conversationSchema = new mongoose.Schema(
       default: "active",
     },
 
-    
     activeInterviewIds: [
       { type: mongoose.Schema.Types.ObjectId, ref: "Interview" },
     ],
@@ -20932,6 +21493,11 @@ const interviewSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Conversation",
     },
+
+    
+    candidateNameSnapshot: { type: String },
+    candidateDeleted: { type: Boolean, default: false },
+    candidateDeletedAt: { type: Date },
 
     
     interviewNumber: { type: Number, default: 1 },
@@ -21101,6 +21667,24 @@ const notificationSchema = new mongoose.Schema(
       enum: ["info", "alerte", "validation"],
       default: "info",
     },
+    meta: {
+      category: {
+        type: String,
+        enum: ["message", "interview", "application", "hire", "generic"],
+        default: "generic",
+      },
+      conversationId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Conversation",
+      },
+      interviewId: { type: mongoose.Schema.Types.ObjectId, ref: "Interview" },
+      applicationId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Application",
+      },
+      interviewScheduled: { type: Boolean, default: false },
+    },
+
     lu: { type: Boolean, default: false },
     date: { type: Date, default: Date.now },
   },
@@ -21172,19 +21756,17 @@ const offerSchema = new mongoose.Schema(
     skills: [{ type: String, index: true }],
     wilaya: { type: String },
 
-    
     allowRepostulation: { type: Boolean, default: true },
     repostulationCooldownDays: { type: Number, default: 30 },
     maxRepostulations: { type: Number, default: 2 },
     hiresNeeded: { type: Number },
 
-    
     validationStatus: {
       type: String,
       enum: [
         "draft",
-        "pending", 
-        "pending_anem", 
+        "pending",
+        "pending_anem",
         "approved",
         "rejected",
         "changes_requested",
@@ -21214,14 +21796,22 @@ const offerSchema = new mongoose.Schema(
 
     actif: { type: Boolean, default: false },
     datePublication: { type: Date },
+
+    
+    
     nombreCandidatures: { type: Number, default: 0 },
 
     
+    
+    candidaturesRecues: { type: Number, default: 0 },
+
     isAnem: { type: Boolean, default: false },
 
-    
     isDeletedByRecruiter: { type: Boolean, default: false },
     deletedByRecruiterAt: { type: Date },
+
+    isRecruiterDeleted: { type: Boolean, default: false },
+    recruiterDeletedAt: { type: Date },
   },
   { timestamps: true },
 );
@@ -21230,7 +21820,8 @@ offerSchema.methods.isVisible = function () {
   return (
     this.validationStatus === "approved" &&
     this.actif &&
-    !this.isDeletedByRecruiter
+    !this.isDeletedByRecruiter &&
+    !this.isRecruiterDeleted
   );
 };
 
@@ -21242,6 +21833,7 @@ offerSchema.index({ validationStatus: 1, datePublication: -1 });
 offerSchema.index({ candidateSearchMode: 1, actif: 1, validationStatus: 1 });
 offerSchema.index({ isAnem: 1, validationStatus: 1 });
 offerSchema.index({ isDeletedByRecruiter: 1 });
+offerSchema.index({ isRecruiterDeleted: 1 });
 
 export default mongoose.model("Offer", offerSchema);
 
@@ -21994,6 +22586,14 @@ systemSettingsSchema.statics.initializeDefaults = async function () {
       category: "general",
     },
     {
+      key: "anem_offer_cooldown_ms",
+      value: 21 * 24 * 60 * 60 * 1000,
+      description:
+        "Durée de cooldown ANEM en millisecondes (permet réglage fin: minutes/secondes pour tests). Prioritaire sur anem_offer_cooldown_days.",
+      category: "general",
+    },
+
+    {
       key: "storage_mode",
       value: "cloudinary", 
       description:
@@ -22615,6 +23215,8 @@ import {
   getSettingsByCategory,
   updateSettingsBulk,
   toggleStorageMode,
+  setAnemCooldown,
+  getAnemCooldown,
 } from "../controllers/adminSettingsController.js";
 
 import { uploadAttachments } from "../config/multer.js";
@@ -22914,6 +23516,12 @@ router.post(
   "/settings/storage-mode",
   requirePermission("editAdminPermissions"),
   toggleStorageMode,
+);
+router.get("/settings/anem-cooldown", getAnemCooldown);
+router.post(
+  "/settings/anem-cooldown",
+  requirePermission("editAdminPermissions"),
+  setAnemCooldown,
 );
 
 
@@ -23463,6 +24071,7 @@ import {
   getPasswordStatus,
   logoutAllDevices,
   deleteMyAccount,
+  setPassword,
 } from "../controllers/authController.js";
 
 import {
@@ -23581,6 +24190,7 @@ router.delete("/delete-account", auth, authRateLimiter, deleteMyAccount);
 
 
 router.get("/password-status", auth, getPasswordStatus);
+router.put("/set-password", auth, validators.setPassword, setPassword);
 
 router.put(
   "/change-password",
@@ -23870,6 +24480,8 @@ import {
   getCandidateStats,
   getActivityTimeline,
   getRecommendedOffers,
+  getFinalizationStatus,
+  finalizeAccount,
 } from "../controllers/candidateController.js";
 
 import {
@@ -23883,6 +24495,7 @@ import {
   withdrawApplication,
   cancelApplication,
   checkApplicationStatus,
+  getCandidateBadgeCounts,
 } from "../controllers/candidateApplicationController.js";
 
 import {
@@ -23905,6 +24518,10 @@ router.get("/profil", getProfile);
 router.put("/profil", validators.updateProfile, updateProfile);
 router.put("/compte", updateAccount);
 router.get("/stats", getCandidateStats);
+router.get("/finalization-status", getFinalizationStatus);
+router.post("/finalize-account", finalizeAccount);
+
+router.get("/badge-counts", getCandidateBadgeCounts);
 router.get("/activity", getActivityTimeline);
 
 router.post(
@@ -24229,7 +24846,6 @@ import {
   getPredefinedMessages,
   
   proposeInterview,
-  forceNewInterview,
   
   acceptInterview,
   proposeAlternativeDate,
@@ -24255,6 +24871,7 @@ import {
   
   getMyHires,
   removeHire,
+  deleteOrphanedConversation,
 } from "../controllers/recruitmentFlowController.js";
 
 const router = express.Router();
@@ -24270,11 +24887,6 @@ router.post("/contact/:applicationId", ...recruiterAuth, initiateContact);
 
 
 router.post("/interviews/:applicationId", ...recruiterAuth, proposeInterview);
-router.post(
-  "/interviews/:applicationId/force",
-  ...recruiterAuth,
-  forceNewInterview,
-);
 
 
 router.put(
@@ -24315,6 +24927,12 @@ router.post("/offers/:offerId/close", ...recruiterAuth, closeOffer);
 
 
 router.get("/my-hires", ...recruiterAuth, getMyHires);
+
+router.delete(
+  "/conversations/:conversationId/orphaned",
+  ...recruiterAuth,
+  deleteOrphanedConversation,
+);
 
 
 
@@ -24422,6 +25040,45 @@ router.post(
 );
 
 export default router;
+
+
+=== services\anemSocketEvents.js ===
+import { getIO } from "../config/socket.js";
+
+const safeGetIO = () => {
+  try {
+    return getIO();
+  } catch {
+    return null;
+  }
+};
+
+
+export const emitAnemOfferUpdate = (recruiterUserId, payload) => {
+  const io = safeGetIO();
+  if (!io || !recruiterUserId) return;
+  io.to(`user:${recruiterUserId}`).emit("anem_offer:updated", payload);
+};
+
+
+export const emitAnemOfferAdminUpdate = (payload) => {
+  const io = safeGetIO();
+  if (!io) return;
+  io.to("admins").emit("anem_offer:admin_updated", payload);
+};
+
+
+export const emitAnemRegistrationUpdate = (userId, payload) => {
+  const io = safeGetIO();
+  if (!io || !userId) return;
+  io.to(`user:${userId}`).emit("anem_registration:updated", payload);
+};
+
+export default {
+  emitAnemOfferUpdate,
+  emitAnemOfferAdminUpdate,
+  emitAnemRegistrationUpdate,
+};
 
 
 === services\emailService.js ===
@@ -24722,7 +25379,6 @@ export const saveFiles = async (files, folderName = "attachments") => {
 === services\socketEvents.js ===
 import { getIO } from "../config/socket.js";
 
-
 const safeGetIO = () => {
   try {
     return getIO();
@@ -24736,7 +25392,6 @@ const safeGetIO = () => {
 export const emitNotification = (userId, notification) => {
   const io = safeGetIO();
   if (!io) return;
-
   io.to(`user:${userId}`).emit("notification:new", {
     _id: notification._id,
     message: notification.message,
@@ -24749,20 +25404,17 @@ export const emitNotification = (userId, notification) => {
 export const emitNotificationCount = async (userId) => {
   const io = safeGetIO();
   if (!io) return;
-
-  
   const Notification = (await import("../models/Notification.js")).default;
   const count = await Notification.countDocuments({ userId, lu: false });
-
   io.to(`user:${userId}`).emit("notification:count", { count });
 };
+
 
 
 
 export const emitNewMessage = (conversationId, message, meta = {}) => {
   const io = safeGetIO();
   if (!io) return;
-
   io.to(`conversation:${conversationId}`).emit("message:new", {
     conversationId,
     message,
@@ -24773,38 +25425,58 @@ export const emitNewMessage = (conversationId, message, meta = {}) => {
 export const emitConversationUpdate = (userId, conversationSummary) => {
   const io = safeGetIO();
   if (!io) return;
-
   io.to(`user:${userId}`).emit("conversation:updated", conversationSummary);
 };
 
 export const emitUnreadCount = (userId, counts) => {
   const io = safeGetIO();
   if (!io) return;
-
   io.to(`user:${userId}`).emit("unread:updated", counts);
 };
 
 export const emitConversationClosed = (conversationId, data) => {
   const io = safeGetIO();
   if (!io) return;
-
-  io.to(`conversation:${conversationId}`).emit("conversation:closed", data);
+  io.to(`conversation:${conversationId}`).emit("conversation:closed", {
+    conversationId,
+    ...data,
+  });
 };
+
+export const emitConversationReopened = (conversationId, data = {}) => {
+  const io = safeGetIO();
+  if (!io) return;
+  io.to(`conversation:${conversationId}`).emit("conversation:reopened", {
+    conversationId,
+    ...data,
+  });
+};
+
+
+
 
 
 
 export const emitInterviewUpdate = (userId, interview) => {
   const io = safeGetIO();
   if (!io) return;
-
   io.to(`user:${userId}`).emit("interview:updated", interview);
 };
 
 export const emitInterviewNew = (userId, interview) => {
   const io = safeGetIO();
   if (!io) return;
-
   io.to(`user:${userId}`).emit("interview:new", interview);
+};
+
+
+export const emitInterviewCardUpdate = (conversationId, interview) => {
+  const io = safeGetIO();
+  if (!io) return;
+  io.to(`conversation:${conversationId}`).emit("interview:card_update", {
+    conversationId,
+    interview,
+  });
 };
 
 
@@ -24812,23 +25484,24 @@ export const emitInterviewNew = (userId, interview) => {
 export const emitApplicationUpdate = (userId, application) => {
   const io = safeGetIO();
   if (!io) return;
-
   io.to(`user:${userId}`).emit("application:updated", application);
 };
 
 export const emitApplicationNew = (recruiterId, application) => {
   const io = safeGetIO();
   if (!io) return;
-
   io.to(`user:${recruiterId}`).emit("application:new", application);
 };
+
+
+
+
 
 
 
 export const emitAdminEvent = (eventName, data) => {
   const io = safeGetIO();
   if (!io) return;
-
   io.to("admins").emit(eventName, data);
 };
 
@@ -24839,8 +25512,10 @@ export default {
   emitConversationUpdate,
   emitUnreadCount,
   emitConversationClosed,
+  emitConversationReopened,
   emitInterviewUpdate,
   emitInterviewNew,
+  emitInterviewCardUpdate,
   emitApplicationUpdate,
   emitApplicationNew,
   emitAdminEvent,
@@ -25038,22 +25713,12 @@ export const PREDEFINED_MESSAGES = {
   greeting: {
     id: "greeting",
     template: (candidateName, offerTitle) =>
-      `Bonjour ${candidateName}, votre profil a retenu notre attention pour le poste de ${offerTitle}. Êtes-vous disponible pour échanger ?`,
-  },
-  availability: {
-    id: "availability",
-    template: (candidateName, offerTitle) =>
-      `Bonjour ${candidateName}, nous examinons les candidatures pour ${offerTitle}. Pouvez-vous nous confirmer votre disponibilité actuelle ?`,
+      `Bonjour ${candidateName}, votre profil a retenu notre attention pour le poste de ${offerTitle}. Seriez-vous disponible pour échanger à ce sujet ?`,
   },
   interest: {
     id: "interest",
     template: (candidateName, offerTitle) =>
-      `Bonjour ${candidateName}, nous avons une opportunité intéressante pour le poste de ${offerTitle}. Seriez-vous intéressé(e) pour en discuter ?`,
-  },
-  quick_chat: {
-    id: "quick_chat",
-    template: (candidateName, offerTitle) =>
-      `Bonjour ${candidateName}, votre candidature pour ${offerTitle} nous intéresse. Pouvons-nous organiser un court échange pour en savoir plus sur votre parcours ?`,
+      `Bonjour ${candidateName}, nous étudions votre candidature pour ${offerTitle} et souhaiterions en discuter avec vous. Quand seriez-vous disponible pour un court échange ?`,
   },
 };
 

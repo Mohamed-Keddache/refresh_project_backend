@@ -21,6 +21,7 @@ import {
   getPasswordStatus,
   logoutAllDevices,
   deleteMyAccount,
+  setPassword,
 } from "../controllers/authController.js";
 
 import {
@@ -139,6 +140,7 @@ router.delete("/delete-account", auth, authRateLimiter, deleteMyAccount);
 
 // ─── PASSWORD MANAGEMENT ───
 router.get("/password-status", auth, getPasswordStatus);
+router.put("/set-password", auth, validators.setPassword, setPassword);
 
 router.put(
   "/change-password",

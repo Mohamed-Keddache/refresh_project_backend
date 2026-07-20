@@ -199,3 +199,66 @@ export const toggleStorageMode = async (req, res) => {
     res.status(500).json({ msg: err.message });
   }
 };
+export const setAnemCooldown = async (req, res) => {
+  try {
+    const { value, unit } = req.body;
+    // unit: "seconds" | "minutes" | "hours" | "days"
+    if (value === undefined || value === null || isNaN(Number(value))) {
+      return res.status(400).json({ msg: "Valeur invalide." });
+    }
+    const n = Number(value);
+    let ms;
+    switch (unit) {
+      case "seconds":
+        ms = n * 1000;
+        break;
+      case "minutes":
+        ms = n * 60 * 1000;
+        break;
+      case "hours":
+        ms = n * 60 * 60 * 1000;
+        break;
+      case "days":
+      default:
+        ms = n * 24 * 60 * 60 * 1000;
+        break;
+    }
+
+    if (ms < 0)
+      return res.status(400).json({ msg: "Durée négative interdite." });
+
+    await SystemSettings.setSetting(
+      "anem_offer_cooldown_ms",
+      ms,
+      "Durée de cooldown ANEM en millisecondes",
+      req.user.id,
+    );
+    await SystemSettings.setSetting(
+      "anem_offer_cooldown_days",
+      Math.max(0, Math.round(ms / (24 * 60 * 60 * 1000))),
+      "Nombre de jours de cooldown ANEM (dérivé)",
+      req.user.id,
+    );
+
+    res.json({
+      msg: "Délai de cooldown ANEM mis à jour.",
+      cooldownMs: ms,
+      unit,
+      value: n,
+    });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getAnemCooldown = async (req, res) => {
+  try {
+    const ms = await SystemSettings.getSetting(
+      "anem_offer_cooldown_ms",
+      21 * 24 * 60 * 60 * 1000,
+    );
+    res.json({ cooldownMs: ms });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};

@@ -89,6 +89,8 @@ import {
   getSettingsByCategory,
   updateSettingsBulk,
   toggleStorageMode,
+  setAnemCooldown,
+  getAnemCooldown,
 } from "../controllers/adminSettingsController.js";
 
 import { uploadAttachments } from "../config/multer.js";
@@ -388,6 +390,12 @@ router.post(
   "/settings/storage-mode",
   requirePermission("editAdminPermissions"),
   toggleStorageMode,
+);
+router.get("/settings/anem-cooldown", getAnemCooldown);
+router.post(
+  "/settings/anem-cooldown",
+  requirePermission("editAdminPermissions"),
+  setAnemCooldown,
 );
 
 ////////////////////////////////////////////////////

@@ -59,6 +59,7 @@ const anemOfferSchema = new mongoose.Schema(
     cooldownStartedAt: { type: Date },
     cooldownEndsAt: { type: Date },
     cooldownDays: { type: Number, default: 21 },
+    cooldownMs: { type: Number },
 
     // ── Failure Phase ──
     failedAt: { type: Date },

@@ -284,6 +284,24 @@ function startScheduledTasks() {
   setInterval(runScheduledTasks, INTERVAL_MS);
   setTimeout(runScheduledTasks, 10000);
 
+  // Fast checker dedicated to ANEM cooldown expiry (every 30s)
+  const runAnemCooldownCheck = async () => {
+    try {
+      const { processExpiredCooldowns } =
+        await import("./controllers/anemOfferController.js");
+      const publishedCount = await processExpiredCooldowns();
+      if (publishedCount > 0) {
+        console.log(
+          `⏰ ANEM Cooldown (fast): ${publishedCount} offre(s) publiée(s)`,
+        );
+      }
+    } catch (err) {
+      console.error("⏰ ANEM fast cooldown check error:", err.message);
+    }
+  };
+  setInterval(runAnemCooldownCheck, 5 * 1000);
+  setTimeout(runAnemCooldownCheck, 3000);
+
   console.log("⏰ Scheduled tasks registered (runs every 5 minutes)");
 }
 

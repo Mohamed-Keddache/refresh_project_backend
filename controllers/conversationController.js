@@ -105,6 +105,11 @@ export const openConversation = async (req, res) => {
         userId: candidate.userId,
         message: `Nouveau message du recruteur pour "${application.offerId.titre}"`,
         type: "info",
+        meta: {
+          category: "message",
+          conversationId: conversation._id,
+          applicationId: applicationId,
+        },
       });
     }
 
@@ -166,8 +171,13 @@ export const sendMessageAsRecruiter = async (req, res) => {
 
     await Notification.create({
       userId: candidate.userId,
-      message: `Nouveau message du recruteur`,
+      message: `Nouveau message : "${(content || "").slice(0, 60)}${(content || "").length > 60 ? "…" : ""}"`,
       type: "info",
+      meta: {
+        category: "message",
+        conversationId: conversation._id,
+        applicationId: conversation.applicationId,
+      },
     });
 
     res.json({
@@ -213,13 +223,18 @@ export const getRecruiterConversations = async (req, res) => {
       applicationId: c.applicationId,
       offer: { _id: c.offerId?._id, titre: c.offerId?.titre },
       candidate: {
-        nom: c.candidateId?.userId?.nom,
+        nom:
+          c.candidateId?.userId?.nom ||
+          c.candidateNameSnapshot ||
+          "Candidat supprimé",
         profilePicture: c.candidateId?.profilePicture,
+        deleted: c.candidateDeleted || !c.candidateId,
       },
       lastMessage: c.messages?.slice(-1)[0],
       unreadCount: c.unreadByRecruiter,
       lastMessageAt: c.lastMessageAt,
       isClosed: c.isClosed,
+      candidateDeleted: c.candidateDeleted || !c.candidateId,
     }));
 
     res.json({
@@ -551,8 +566,12 @@ export const getRecruiterConversationMessages = async (req, res) => {
       candidateId: conversation.candidateId?._id,
       offer: { titre: conversation.offerId?.titre },
       candidate: {
-        nom: conversation.candidateId?.userId?.nom,
+        nom:
+          conversation.candidateId?.userId?.nom ||
+          conversation.candidateNameSnapshot ||
+          "Candidat supprimé",
         profilePicture: conversation.candidateId?.profilePicture,
+        deleted: conversation.candidateDeleted || !conversation.candidateId,
       },
       messages: paginatedMessages,
       status: conversation.status,

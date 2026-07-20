@@ -13,6 +13,24 @@ const notificationSchema = new mongoose.Schema(
       enum: ["info", "alerte", "validation"],
       default: "info",
     },
+    meta: {
+      category: {
+        type: String,
+        enum: ["message", "interview", "application", "hire", "generic"],
+        default: "generic",
+      },
+      conversationId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Conversation",
+      },
+      interviewId: { type: mongoose.Schema.Types.ObjectId, ref: "Interview" },
+      applicationId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Application",
+      },
+      interviewScheduled: { type: Boolean, default: false },
+    },
+
     lu: { type: Boolean, default: false },
     date: { type: Date, default: Date.now },
   },
