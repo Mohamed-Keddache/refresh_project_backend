@@ -95,8 +95,9 @@ export const uploadRateLimiter = createRateLimiter({
 });
 
 export const generalRateLimiter = createRateLimiter({
-  windowMs: 15 * 60 * 1000,
-  max: isProduction ? 150 : 200,
+  windowMs: 60 * 1000, // 1-minute window instead of 15
+  max: isProduction ? 300 : 2000, // generous ceiling for polling SPAs
+  keyGenerator: (req) => `general:${req.user?.id || req.ip}`,
 });
 
 export const offerCreationLimiter = createRateLimiter({
@@ -120,6 +121,15 @@ export const messageLimiter = createRateLimiter({
   keyGenerator: (req) => `msg:${req.user?.id || req.ip}`,
 });
 
+// Paths that the frontend polls frequently and should NOT count
+// against the general rate limit (they are cheap reads and already auth-protected).
+const POLLING_WHITELIST = [
+  "/api/notifications/unread-count",
+  "/api/candidates/badge-counts",
+  "/api/candidates/finalization-status",
+  "/api/announcements/active",
+];
+
 export const setupSecurity = (app) => {
   app.use(
     helmet({
@@ -130,7 +140,16 @@ export const setupSecurity = (app) => {
 
   app.use(mongoSanitize());
 
-  app.use(generalRateLimiter);
+  // Apply the general limiter to everything EXCEPT the cheap polling reads.
+  app.use((req, res, next) => {
+    if (
+      req.method === "GET" &&
+      POLLING_WHITELIST.some((p) => req.path.startsWith(p))
+    ) {
+      return next();
+    }
+    return generalRateLimiter(req, res, next);
+  });
 };
 
 export default {

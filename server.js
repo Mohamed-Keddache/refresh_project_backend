@@ -299,7 +299,7 @@ function startScheduledTasks() {
       console.error("⏰ ANEM fast cooldown check error:", err.message);
     }
   };
-  setInterval(runAnemCooldownCheck, 5 * 1000);
+  setInterval(runAnemCooldownCheck, 30 * 1000);
   setTimeout(runAnemCooldownCheck, 3000);
 
   console.log("⏰ Scheduled tasks registered (runs every 5 minutes)");
